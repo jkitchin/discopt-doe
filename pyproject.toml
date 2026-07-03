@@ -55,10 +55,13 @@ where = ["src"]
 include = ["discopt.doe*"]
 namespaces = true
 
-# Pre-release window: discopt 0.6 is not on PyPI yet, so resolve it from the
-# local checkout. REMOVE this block when discopt v0.6.0 is published.
+# Pre-release window: discopt 0.6 is not on PyPI yet (and not on git main),
+# so resolve it from the extraction branch. That branch has the 0.6 API and
+# has discopt.doe removed — branches that still ship discopt.doe would
+# overwrite this package's files in site-packages. REMOVE this block when
+# discopt v0.6.0 is published.
 [tool.uv.sources]
-discopt = { path = "../../../projects/discopt", editable = true }
+discopt = { git = "https://github.com/jkitchin/discopt", branch = "refactor/389-extract-doe" }
 
 [tool.setuptools.package-data]
 "discopt.doe" = ["gui/discopt-logo.png", "skill/SKILL.md", "skill/agents/*.md"]

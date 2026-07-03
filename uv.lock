@@ -402,7 +402,7 @@ wheels = [
 [[package]]
 name = "discopt"
 version = "0.6.0.dev0"
-source = { editable = "../../../projects/discopt" }
+source = { git = "https://github.com/jkitchin/discopt?branch=refactor%2F389-extract-doe#fd6106e63c8fb15f82533d0a29d6321b9232af41" }
 dependencies = [
     { name = "jax", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "jax", version = "0.10.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -416,42 +416,6 @@ dependencies = [
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "cyipopt", marker = "extra == 'ipopt'", specifier = ">=1.4" },
-    { name = "discopt", extras = ["pounce", "ipopt", "cutest", "llm", "gnn", "nn", "ml", "sympy", "pyomo"], marker = "extra == 'all'" },
-    { name = "equinox", marker = "extra == 'gnn'", specifier = ">=0.13.8" },
-    { name = "equinox", marker = "extra == 'learned'", specifier = ">=0.13.8" },
-    { name = "gamsapi", extras = ["core"], marker = "extra == 'gams'", specifier = ">=45" },
-    { name = "jax", specifier = ">=0.4" },
-    { name = "jaxlib", specifier = ">=0.4" },
-    { name = "lightgbm", marker = "extra == 'lightgbm'", specifier = ">=4.0" },
-    { name = "litellm", marker = "extra == 'llm'", specifier = ">=1.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = "==2.1.0" },
-    { name = "numpy", specifier = ">=1.24" },
-    { name = "onnx", marker = "extra == 'nn'", specifier = ">=1.14" },
-    { name = "onnxruntime", marker = "extra == 'nn'", specifier = ">=1.16" },
-    { name = "optax", marker = "extra == 'gnn'", specifier = ">=0.1" },
-    { name = "optax", marker = "extra == 'learned'", specifier = ">=0.1" },
-    { name = "pounce-solver", specifier = ">=0.7" },
-    { name = "pounce-solver", marker = "extra == 'pounce'", specifier = ">=0.7" },
-    { name = "pre-commit", marker = "extra == 'dev'" },
-    { name = "pycutest", marker = "extra == 'cutest'", specifier = ">=1.8.0" },
-    { name = "pyomo", marker = "extra == 'dev'", specifier = ">=6.7" },
-    { name = "pyomo", marker = "extra == 'pyomo'", specifier = ">=6.7" },
-    { name = "pytest", marker = "extra == 'dev'" },
-    { name = "pytest-cov", marker = "extra == 'dev'" },
-    { name = "pytest-timeout", marker = "extra == 'dev'" },
-    { name = "pytest-xdist", marker = "extra == 'dev'" },
-    { name = "pyyaml", marker = "extra == 'gams'", specifier = ">=6" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = "==0.14.6" },
-    { name = "scikit-learn", marker = "extra == 'ml'", specifier = ">=1.0" },
-    { name = "scipy", specifier = ">=1.10" },
-    { name = "sympy", marker = "extra == 'sympy'", specifier = ">=1.12" },
-    { name = "xgboost", marker = "extra == 'xgboost'", specifier = ">=1.7" },
-]
-provides-extras = ["pounce", "ipopt", "cutest", "gams", "llm", "nn", "pyomo", "ml", "xgboost", "lightgbm", "gnn", "learned", "sympy", "dev", "all"]
 
 [[package]]
 name = "discopt-doe"
@@ -494,7 +458,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "discopt", editable = "../../../projects/discopt" },
+    { name = "discopt", git = "https://github.com/jkitchin/discopt?branch=refactor%2F389-extract-doe" },
     { name = "jax", specifier = ">=0.4" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "openpyxl", specifier = ">=3.1" },
