@@ -1,0 +1,25 @@
+format: jb-book
+root: intro
+parts:
+  - caption: Getting Started
+    chapters:
+      - file: notebooks/tutorial_doe
+      - file: notebooks/doe_cli
+      - file: notebooks/tutorial_batch_doe
+  - caption: Classical Designs
+    chapters:
+      - file: notebooks/factor-screening
+      - file: notebooks/mixture-designs
+      - file: notebooks/latin-designs
+  - caption: Model-Based & Sequential DoE
+    chapters:
+      - file: notebooks/model_based_doe
+      - file: notebooks/identifiability-estimability
+      - file: notebooks/model-based-active-learning
+      - file: notebooks/model-discrimination
+  - caption: Active-Learning Optimization
+    chapters:
+      - file: notebooks/active-learning
+  - caption: Appendix
+    chapters:
+      - file: references

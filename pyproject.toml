@@ -1,0 +1,82 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "discopt-doe"
+version = "0.1.0"
+description = "Design-of-experiments plugin for the discopt modeling language"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "EPL-2.0" }
+authors = [{ name = "John Kitchin", email = "jkitchin@andrew.cmu.edu" }]
+dependencies = [
+    # Public parametric-compile API + the "discopt.cli" plugin hook land in 0.6.
+    "discopt>=0.6",
+    "jax>=0.4",          # fim.py / model_based.py use jax directly
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "openpyxl>=3.1",     # workbook.py and the `discopt doe` CLI verbs
+]
+
+[project.optional-dependencies]
+gui = ["streamlit>=1.30", "pandas>=2.0"]   # altair ships with streamlit
+ml = ["scikit-learn>=1.0"]                 # surrogate.py sklearn estimators
+
+[project.scripts]
+discopt-doe-install-skill = "discopt.doe.install:main"
+
+# The base discopt CLI discovers plugin subcommands through this group (see
+# the protocol in discopt/cli.py): the entry-point name is the subcommand and
+# the value is a module exposing add_subparser(subparsers) and run(args).
+# This is what keeps `discopt doe ...` working after the extraction.
+[project.entry-points."discopt.cli"]
+doe = "discopt.doe.cli"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-timeout",
+    # notebook build scripts (scripts/build_*_notebook.py)
+    "nbformat>=5",
+    "nbclient>=0.10",
+    "ipykernel>=6",
+    # docs build
+    "jupyter-book<2",
+    "sphinxcontrib-bibtex",
+]
+
+# discopt.doe is a PEP 420 namespace subpackage: it merges into the ``discopt``
+# namespace at import time (discopt's __init__ extends its __path__ via
+# pkgutil.extend_path). We deliberately package only ``discopt.doe`` — never
+# ``discopt`` — so this distribution never shadows the base package.
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["discopt.doe*"]
+namespaces = true
+
+# Pre-release window: discopt 0.6 is not on PyPI yet, so resolve it from the
+# local checkout. REMOVE this block when discopt v0.6.0 is published.
+[tool.uv.sources]
+discopt = { path = "../../../projects/discopt", editable = true }
+
+[tool.setuptools.package-data]
+"discopt.doe" = ["gui/discopt-logo.png", "skill/SKILL.md", "skill/agents/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 300
+addopts = "-m 'not slow'"
+markers = [
+    "smoke: one solve per code path on a tiny instance; fast",
+    "slow: long-running tests (excluded by default; run with -m '')",
+    "integration: end-to-end multi-component workflows",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint.per-file-ignores]
+# The discopt version guard must run before the API re-exports.
+"src/discopt/doe/__init__.py" = ["E402"]

@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# uv / virtualenv
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Jupyter Book
+docs/_build/
+
+# OS
+.DS_Store
+
+# pytest
+.pytest_cache/

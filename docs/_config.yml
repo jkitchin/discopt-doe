@@ -1,0 +1,24 @@
+title: discopt-doe
+author: John Kitchin
+copyright: "2026, John Kitchin"
+logo: doe-banner.png
+
+execute:
+  execute_notebooks: "off"
+
+repository:
+  url: https://github.com/jkitchin/discopt-doe
+  branch: main
+  path_to_book: docs
+
+html:
+  use_repository_button: true
+  use_issues_button: true
+
+sphinx:
+  extra_extensions:
+    - sphinxcontrib.bibtex
+  config:
+    bibtex_bibfiles: ["references.bib"]
+    bibtex_reference_style: author_year
+    suppress_warnings: ["etoc.toctree", "myst.header"]
