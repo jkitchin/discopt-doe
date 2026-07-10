@@ -294,20 +294,31 @@ def _cumulative_fim_from_completed(
     parameter_names: list[str],
     completed_runs: list[dict[str, Any]],
     input_names: list[str],
+    param_values: dict[str, float] | None = None,
 ) -> np.ndarray:
     """Sum FIMs over every completed run. Adds a ridge so first-batch
     FIMs stay non-singular when fewer runs than parameters have come in.
+
+    ``param_values`` is the point at which each per-run FIM is evaluated; for a
+    nonlinear model it must be the fitted/guessed parameters (the FIM at θ=0 is
+    meaningless there). Rows whose FIM cannot be evaluated are skipped with a
+    warning rather than dropped silently.
     """
     from discopt.doe.fim import compute_fim
 
     n_p = len(parameter_names)
     fim = _RIDGE * np.eye(n_p)
-    param_values = {name: 0.0 for name in parameter_names}
+    if param_values is None:
+        param_values = {name: 0.0 for name in parameter_names}
     for row in completed_runs:
         design = {nm: float(row[nm]) for nm in input_names}
         try:
             r = compute_fim(experiment, param_values, design)
-        except Exception:
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"warning: skipping run {row.get('run_id')} in prior-FIM sum ({e})",
+                file=sys.stderr,
+            )
             continue
         fim = fim + np.asarray(r.fim)
     return fim
@@ -1572,15 +1583,16 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
     bounds = {s.name: (s.lb, s.ub) for s in input_specs}
     completed = wb.completed_runs()
 
+    param_values = _param_values_for_design(parameter_names, wb)
+
     cached = wb.read_fim()
     if cached is not None and cached[1] == parameter_names:
         prior_fim = cached[0]
     else:
         prior_fim = _cumulative_fim_from_completed(
-            experiment, parameter_names, completed, input_names
+            experiment, parameter_names, completed, input_names, param_values
         )
 
-    param_values = _param_values_for_design(parameter_names, wb)
     template = wb.template_name()
     template_args = wb.template_args()
     mixture_total = template_args.get("mixture_total")
