@@ -599,7 +599,7 @@ def _sidebar_open() -> None:
     if col_open.button(
         "Open",
         help="Load the workbook at the path above into the GUI.",
-        use_container_width=True,
+        width="stretch",
     ):
         candidate = Path(path_input).expanduser().resolve()
         if not candidate.is_file():
@@ -610,7 +610,7 @@ def _sidebar_open() -> None:
     if col_browse.button(
         "Browse…",
         help="Open a native OS file picker.",
-        use_container_width=True,
+        width="stretch",
     ):
         picked = _native_file_picker()
         if picked is None:
@@ -2139,7 +2139,7 @@ def _render_fit_results(
         if parity is None or parity.empty:
             st.info("Parity plot needs completed runs and a fitted model.")
         else:
-            st.altair_chart(_parity_chart(parity), use_container_width=True)
+            st.altair_chart(_parity_chart(parity), width="stretch")
             st.caption(
                 "Each point is one completed run; the diagonal is perfect "
                 "prediction. Points far off the line indicate fit error or "
@@ -2151,7 +2151,7 @@ def _render_fit_results(
         if parity is None or parity.empty:
             st.info("Residual plot needs completed runs and a fitted model.")
         else:
-            st.altair_chart(_residual_chart(parity), use_container_width=True)
+            st.altair_chart(_residual_chart(parity), width="stretch")
             st.caption(
                 "Residual = observed − predicted, plotted vs predicted. "
                 "Look for trends or fanning out (signs of model "

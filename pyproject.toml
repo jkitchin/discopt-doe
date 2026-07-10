@@ -23,7 +23,9 @@ dependencies = [
 # The GUI needs matplotlib (history / surrogate diagnostic plots) and
 # scikit-learn (its optimize round fits a GP surrogate), so the gui extra
 # pulls in the ml extra's dependency too.
-gui = ["streamlit>=1.30", "pandas>=2.0", "matplotlib>=3.5", "scikit-learn>=1.0"]
+# streamlit >= 1.49: the app uses st.logo (added 1.35) and the width="stretch"
+# element API (string width literals, ~1.49); older versions crash at startup.
+gui = ["streamlit>=1.49", "pandas>=2.0", "matplotlib>=3.5", "scikit-learn>=1.0"]
 ml = ["scikit-learn>=1.0"]                 # surrogate.py sklearn estimators
 
 [project.scripts]
