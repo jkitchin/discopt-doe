@@ -1043,19 +1043,37 @@ def do_status(params: dict[str, Any]) -> dict[str, Any]:
     fitted = wb.read_parameters()
     fim_data = wb.read_fim()
 
+    # The analysis verb depends on the template family: combinatorial designs
+    # use `anova` (fit/extend explicitly reject them), the active-learning
+    # template uses `optimize`, and parametric templates use `fit`/`extend`.
+    from discopt.doe.templates import COMBINATORIAL_TEMPLATES
+
+    template = wb.template_name() or ""
+    if template == "optimize":
+        analyze_verb = "optimize"
+    elif template in COMBINATORIAL_TEMPLATES:
+        analyze_verb = "anova"
+    else:
+        analyze_verb = "fit"
+
     if pending:
         if completed:
-            next_command = f"discopt doe fit {wb.path}  # {len(pending)} run(s) still pending"
+            next_command = (
+                f"discopt doe {analyze_verb} {wb.path}  # {len(pending)} run(s) still pending"
+            )
         else:
             next_command = (
                 f"# fill in '{response}' column for run_ids "
                 f"{', '.join(str(r['run_id']) for r in pending)}, save, then: "
-                f"discopt doe fit {wb.path}"
+                f"discopt doe {analyze_verb} {wb.path}"
             )
-    elif completed and not fitted:
-        next_command = f"discopt doe fit {wb.path}"
-    elif fitted:
-        next_command = f"discopt doe extend {wb.path} --n N"
+    elif completed:
+        # Parametric campaigns fit, then extend for the next batch; anova and
+        # optimize workbooks just re-run their single analysis verb.
+        if analyze_verb == "fit" and fitted:
+            next_command = f"discopt doe extend {wb.path} --n N"
+        else:
+            next_command = f"discopt doe {analyze_verb} {wb.path}"
     else:
         next_command = f"discopt doe new ... -o {wb.path}"
 

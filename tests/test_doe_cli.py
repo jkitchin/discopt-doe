@@ -716,3 +716,49 @@ def test_fit_blank_input_gives_actionable_error(tmp_path):
 
     with pytest.raises(DoEError, match="blank value for input"):
         do_fit({"workbook": str(wb_path)})
+
+
+# ──────────────────────────────────────────────────────────────────
+# status recommends the right verb per template (issue #37)
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_status_recommends_anova_for_latin(tmp_path):
+    do_new(
+        NewParams(
+            output=tmp_path / "l.xlsx",
+            n=9,
+            inputs=[],
+            response_name="y",
+            measurement_error=1.0,
+            criterion="anova",
+            seed=0,
+            n_starts=1,
+            template="latin-square",
+            levels={"row": [1, 2, 3], "col": [1, 2, 3], "t": ["A", "B", "C"]},
+            replicates=1,
+        )
+    )
+    out = do_status({"workbook": str(tmp_path / "l.xlsx")})
+    assert "anova" in out["next_command"]
+    assert " fit " not in out["next_command"]
+
+
+def test_fit_on_optimize_workbook_points_to_optimize(tmp_path):
+    from discopt.doe.workbook import Workbook
+
+    do_new(
+        NewParams(
+            output=tmp_path / "o.xlsx",
+            n=3,
+            inputs=[("x", 0.0, 1.0)],
+            response_name="y",
+            measurement_error=0.1,
+            criterion="determinant",
+            seed=0,
+            n_starts=1,
+            template="optimize",
+        )
+    )
+    with pytest.raises(ValueError, match="discopt doe optimize"):
+        Workbook.open(tmp_path / "o.xlsx").rebuild_experiment()

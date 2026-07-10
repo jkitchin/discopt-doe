@@ -716,6 +716,11 @@ class Workbook:
                 f"workbook uses combinatorial template {template!r}; use `discopt doe anova` "
                 "instead of fit/extend"
             )
+        if template == "optimize":
+            raise ValueError(
+                "workbook uses the active-learning 'optimize' template; use "
+                "`discopt doe optimize` instead of fit/extend"
+            )
         specs = self.input_specs()
         response = self.response_name()
         sigma = self.measurement_error()
