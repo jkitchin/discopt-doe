@@ -1586,6 +1586,20 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
     bounds = {s.name: (s.lb, s.ub) for s in input_specs}
     completed = wb.completed_runs()
 
+    # Offset the search seed by the batch index so two consecutive extends
+    # (with no new data) don't recommend the identical set of points.
+    batch_idx = wb.next_batch_index()
+    design_seed = wb.seed() + batch_idx
+
+    warnings_out: list[str] = []
+    pending = wb.pending_runs()
+    if pending:
+        warnings_out.append(
+            f"{len(pending)} run(s) are still pending; they contribute no "
+            "information to the prior FIM, so the recommended batch may overlap "
+            "them. Fill in their responses before extending for best results."
+        )
+
     param_values = _param_values_for_design(parameter_names, wb)
 
     cached = wb.read_fim()
@@ -1616,7 +1630,7 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
             equality_constraints=eq_cons,
             feasible_projection=proj,
             n_starts=params.n_starts,
-            seed=wb.seed(),
+            seed=design_seed,
         )
         designs = [single.design]
         criterion_value = float(single.criterion_value)
@@ -1631,12 +1645,11 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
             equality_constraints=eq_cons,
             feasible_projection=proj,
             n_starts=params.n_starts,
-            seed=wb.seed(),
+            seed=design_seed,
         )
         designs = list(batch.designs)
         criterion_value = float(batch.criterion_value)
 
-    batch_idx = wb.next_batch_index()
     new_ids = wb.append_runs(batch_idx, designs)
     wb.log("extend", {"n": params.n, "batch": batch_idx})
     wb.save()
@@ -1652,6 +1665,7 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
         "criterion": wb.criterion(),
         "criterion_value": criterion_value,
         "parameter_names": parameter_names,
+        "warnings": warnings_out,
         "next_command": f"discopt doe status {wb.path}",
     }
 
@@ -1667,6 +1681,8 @@ def _cmd_extend(args) -> int:
         )
     except (DoEError, FileNotFoundError, OSError, ValueError, TypeError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
+    for _w in out.get("warnings", []):
+        print(f"warning: {_w}", file=sys.stderr)
     if args.json:
         print(_dump_json(out, indent=2))
     else:

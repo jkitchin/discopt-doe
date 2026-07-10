@@ -781,3 +781,25 @@ def test_do_status_exposes_seed(tmp_path):
     )
     status = do_status({"workbook": out["workbook_path"]})
     assert status["seed"] == 7
+
+
+def test_extend_warns_when_pending_runs_exist(tmp_path):
+    """Extending while runs are still pending warns the user (issue #38).
+
+    Pending runs contribute nothing to the prior FIM, so a second extend can
+    re-recommend overlapping points; surface that instead of doing it silently.
+    """
+
+    def predict(row):
+        return 2.0 + 3.0 * row["x"]
+
+    out = do_new(_new_params(tmp_path, template="linear", inputs=[("x", 0.0, 10.0)], n=4, error=0.05))
+    wb_path = Path(out["workbook_path"])
+    _fill_response(wb_path, "y", predict)
+    do_fit({"workbook": str(wb_path)})
+
+    e1 = do_extend(ExtendParams(workbook=wb_path, n=2, n_starts=3))
+    assert e1["warnings"] == []  # nothing pending yet
+    # batch 2 is now pending; a second extend must warn.
+    e2 = do_extend(ExtendParams(workbook=wb_path, n=2, n_starts=3))
+    assert any("pending" in w for w in e2["warnings"])
