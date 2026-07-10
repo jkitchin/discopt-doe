@@ -365,9 +365,16 @@ def _per_obs_loglik(experiment: Experiment, result: EstimationResult, data: dict
         if name not in data:
             continue
         fn = compile_expression(em.responses[name], em.model)
-        y_hat.append(float(np.asarray(fn(x_flat, p_flat)).flat[0]))
-        sigma.append(float(em.measurement_error[name]))
-        y_obs.append(float(np.asarray(data[name]).flat[0]))
+        yh = float(np.asarray(fn(x_flat, p_flat)).flat[0])
+        sig = float(em.measurement_error[name])
+        # A response may carry replicate observations (a 1-D array); each is an
+        # independent measurement sharing the same prediction and noise, so
+        # expand them all rather than keeping only the first (which truncated
+        # the Vuong statistic to one value per response name).
+        for obs in np.atleast_1d(np.asarray(data[name], dtype=float)).ravel():
+            y_hat.append(yh)
+            sigma.append(sig)
+            y_obs.append(float(obs))
 
     y_hat_arr = np.array(y_hat)
     sigma_arr = np.array(sigma)
