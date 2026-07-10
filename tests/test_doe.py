@@ -108,6 +108,27 @@ class MixtureExperiment(Experiment):
 # ──────────────────────────────────────────────────────────
 
 
+def test_optimal_experiment_surfaces_root_cause(monkeypatch):
+    """When FIM evaluation fails everywhere, the real error is chained.
+
+    Regression: _scan_candidates swallowed the batch exception, so the user
+    only saw a generic 'No feasible design point found'.
+    """
+    import discopt.doe.design as design_mod
+
+    def boom(*a, **k):
+        raise RuntimeError("kaboom in FIM")
+
+    monkeypatch.setattr(design_mod, "compute_fim_batch", boom)
+    monkeypatch.setattr(design_mod, "compute_fim", boom)
+
+    exp = DesignableExperiment()
+    with pytest.raises(RuntimeError, match="No feasible design point") as ei:
+        optimal_experiment(exp, {"k": 2.0}, {"x": (0.1, 10.0)})
+    assert isinstance(ei.value.__cause__, RuntimeError)
+    assert "kaboom" in str(ei.value.__cause__)
+
+
 class TestConstrainedOptimalExperiment:
     """Regression: constrained designs must actually satisfy the constraints."""
 

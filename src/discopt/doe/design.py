@@ -395,6 +395,16 @@ def optimal_experiment(
         experiment, param_values, candidates, criterion, prior_fim
     )
     if seed_design is None or scan_fim_result is None:
+        # Re-evaluate one candidate to surface the underlying failure (a bad
+        # parameter name, a shape mismatch, ...) instead of a generic message.
+        # _scan_candidates swallows the batch exception to stay robust.
+        try:
+            compute_fim(experiment, param_values, candidates[0], prior_fim=prior_fim)
+        except Exception as e:  # noqa: BLE001 -- surfaced as the cause below
+            raise RuntimeError(
+                "No feasible design point found; the FIM could not be evaluated "
+                "at any candidate (see the chained error for the cause)."
+            ) from e
         raise RuntimeError("No feasible design point found")
 
     if not constrained:
