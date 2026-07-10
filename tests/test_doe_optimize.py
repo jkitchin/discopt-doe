@@ -352,3 +352,15 @@ def test_optimize_round_user_supplied_estimator(tmp_path):
     )
     assert len(result.next_designs) == 1
     assert result.surrogate_mode == "return_std"
+
+
+def test_gp_preset_missing_sklearn_gives_actionable_error(monkeypatch):
+    """coerce_surrogate('gp') without scikit-learn names the [ml] extra."""
+    import sys
+
+    from discopt.doe.surrogate import coerce_surrogate
+
+    # Force `import sklearn` to fail even though it is installed here.
+    monkeypatch.setitem(sys.modules, "sklearn", None)
+    with pytest.raises(ImportError, match=r"discopt-doe\[ml\]"):
+        coerce_surrogate("gp")

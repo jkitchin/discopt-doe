@@ -192,8 +192,21 @@ class _SklearnUQAdapter:
         return models
 
 
+def _require_sklearn() -> None:
+    """Raise an actionable error when the optional ``ml`` extra is missing."""
+    try:
+        import sklearn  # noqa: F401
+    except ImportError as e:
+        raise ImportError(
+            "the built-in 'gp' and 'response-surface' surrogates require "
+            "scikit-learn, which ships in the optional 'ml' extra. Install it "
+            'with: pip install "discopt-doe[ml]"'
+        ) from e
+
+
 def _gp_preset() -> Surrogate:
     """Default GP: Matern(5/2) + WhiteKernel, normalized output."""
+    _require_sklearn()
     from sklearn.gaussian_process import GaussianProcessRegressor
     from sklearn.gaussian_process.kernels import ConstantKernel, Matern, WhiteKernel
 
@@ -208,6 +221,7 @@ def _gp_preset() -> Surrogate:
 
 def _response_surface_preset() -> Surrogate:
     """Default response surface: degree-2 polynomial with BayesianRidge UQ."""
+    _require_sklearn()
     from sklearn.linear_model import BayesianRidge
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import PolynomialFeatures, StandardScaler
