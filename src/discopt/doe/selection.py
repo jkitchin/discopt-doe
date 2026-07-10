@@ -87,6 +87,16 @@ def model_selection(
     ``n_observations``). The deviance convention of
     :func:`discopt.estimate.estimate_parameters` makes these one-liners.
 
+    .. warning::
+       ``res.objective`` is the σ-weighted deviance ``Σ ((y − ŷ)/σ)²``; it
+       drops the additive constant ``Σ log(2π σ²)``, which depends on each
+       model's declared ``measurement_error``. These scores are therefore
+       only comparable across candidates that share the **same measurement-
+       error model**. A model that declares a larger σ gets an artificially
+       smaller deviance for the same misfit and would win AIC/BIC spuriously.
+       ``EstimationResult`` does not carry σ, so this precondition cannot be
+       checked here -- it is the caller's responsibility.
+
     Parameters
     ----------
     estimation_results : dict[str, EstimationResult]
