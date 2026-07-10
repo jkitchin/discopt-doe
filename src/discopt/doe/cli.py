@@ -982,13 +982,15 @@ def _cmd_new(args) -> int:
         factor_pairs = {name: (lo, hi) for name, lo, hi in factor_arg}
     params = NewParams(
         output=output,
-        n=int(args.n),
+        # --n / --criterion / --n-starts are only registered for the templates
+        # that use them (see the subparser wiring); default the rest.
+        n=int(getattr(args, "n", 1) or 1),
         inputs=inputs,
         response_name=args.response,
         measurement_error=float(args.error),
-        criterion=_normalize_criterion(args.criterion),
+        criterion=_normalize_criterion(getattr(args, "criterion", _DEFAULT_CRITERION)),
         seed=int(args.seed),
-        n_starts=int(args.n_starts),
+        n_starts=int(getattr(args, "n_starts", 10) or 10),
         template=None if is_module else getattr(args, "template", None),
         degree=getattr(args, "degree", None),
         mixture_total=getattr(args, "mixture_total", None),
@@ -1906,6 +1908,13 @@ def add_subparser(subparsers) -> None:
                 help="Required sum of the component values (default 1.0).",
             )
         _add_common_new_options(sp)
+        # --n applies to parametric + optimize (initial batch), not to
+        # combinatorial designs (run count = levels/factors x replicates).
+        if tmpl not in COMBINATORIAL_TEMPLATES:
+            _add_run_count_option(sp)
+        # --criterion / --n-starts govern the parametric D-optimal search only.
+        if tmpl not in COMBINATORIAL_TEMPLATES and tmpl != "optimize":
+            _add_design_search_options(sp)
         sp.set_defaults(doe_func=_cmd_new, _is_module=False, bounds=None, params=None, module=None)
 
     # Escape-hatch: --module
@@ -1933,6 +1942,8 @@ def add_subparser(subparsers) -> None:
         help="Prior parameter value as NAME=VALUE (repeatable).",
     )
     _add_common_new_options(p_module)
+    _add_run_count_option(p_module)
+    _add_design_search_options(p_module)
     p_module.set_defaults(doe_func=_cmd_new, _is_module=True, input=None, degree=None)
 
     # --- status ---
@@ -2084,8 +2095,8 @@ def add_subparser(subparsers) -> None:
 
 
 def _add_common_new_options(sp) -> None:
+    """Options that apply to every ``new`` template."""
     sp.add_argument("-o", "--output", required=True, help="Output .xlsx path.")
-    sp.add_argument("--n", type=int, default=1, help="Number of initial runs (default 1).")
     sp.add_argument(
         "--response",
         default="y",
@@ -2097,21 +2108,34 @@ def _add_common_new_options(sp) -> None:
         default=1.0,
         help="Measurement error stdev (default 1.0).",
     )
+    sp.add_argument("--seed", type=int, default=42, help="Random seed (default 42).")
+    sp.add_argument("--force", action="store_true", help="Overwrite existing output file.")
+    _add_json(sp)
+
+
+def _add_run_count_option(sp) -> None:
+    """``--n`` applies to parametric and optimize templates (initial batch).
+
+    Combinatorial designs derive their run count from levels/factors x
+    replicates, so they do not accept ``--n``.
+    """
+    sp.add_argument("--n", type=int, default=1, help="Number of initial runs (default 1).")
+
+
+def _add_design_search_options(sp) -> None:
+    """``--criterion``/``--n-starts`` govern the parametric D-optimal search."""
     sp.add_argument(
         "--criterion",
         default=_DEFAULT_CRITERION,
         choices=(*_CRITERION_CHOICES, *_CRITERION_ALIASES.keys()),
         help="Optimality criterion (default determinant aka D).",
     )
-    sp.add_argument("--seed", type=int, default=42, help="Random seed (default 42).")
     sp.add_argument(
         "--n-starts",
         type=int,
         default=10,
         help="Multi-start budget for each single-design search (default 10).",
     )
-    sp.add_argument("--force", action="store_true", help="Overwrite existing output file.")
-    _add_json(sp)
 
 
 def _add_json(sp) -> None:

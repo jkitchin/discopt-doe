@@ -235,3 +235,23 @@ def test_cli_gui_dispatches_to_launcher(monkeypatch, tmp_path: Path) -> None:
     assert captured["workbook"] == str(wb)
     assert captured["port"] == 1234
     assert captured["open_browser"] is False
+
+
+def test_latin_subparser_rejects_inapplicable_flags():
+    """--n / --criterion / --n-starts must not be accepted for latin-square.
+
+    Regression for issue #39 (they were silently ignored).
+    """
+    import argparse
+
+    from discopt.doe.cli import add_subparser
+
+    top = argparse.ArgumentParser()
+    add_subparser(top.add_subparsers(dest="cmd"))
+    base = ["doe", "new", "latin-square", "-o", "x.xlsx", "--levels", "row:1,2,3"]
+    # These parse fine (applicable flags):
+    top.parse_args([*base, "--replicates", "2"])
+    # These must be rejected (inapplicable to a combinatorial design):
+    for bad in (["--n", "10"], ["--criterion", "trace"], ["--n-starts", "5"]):
+        with pytest.raises(SystemExit):
+            top.parse_args([*base, *bad])
