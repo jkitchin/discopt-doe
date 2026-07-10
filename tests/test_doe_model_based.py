@@ -253,6 +253,43 @@ def test_model_based_optimize_round_returns_parameters(tmp_path):
     assert "x" in result.next_designs[0]
 
 
+def test_model_based_report_invariant_to_batch_size(tmp_path):
+    """parameter_se / fim_log_det come from the real-data fit only.
+
+    Regression: they were read from the surrogate after the fantasy loop, so
+    they shrank/inflated with batch_size even though the real data was fixed.
+    """
+
+    def truth(x):
+        return -((x - 2.0) ** 2) + 3.0
+
+    init_xs = np.array([-3.0, -1.0, 0.0, 2.0, 4.0])
+    d1 = tmp_path / "b1"
+    d5 = tmp_path / "b5"
+    d1.mkdir()
+    d5.mkdir()
+    p1 = _make_workbook_polynomial(d1, init_xs, truth)
+    p5 = _make_workbook_polynomial(d5, init_xs, truth)
+
+    r1 = model_based_optimize_round(
+        workbook=p1,
+        criterion=OptimizationCriterion.MAXIMIZE,
+        acquisition="expected_improvement",
+        batch_size=1,
+        seed=0,
+    )
+    r5 = model_based_optimize_round(
+        workbook=p5,
+        criterion=OptimizationCriterion.MAXIMIZE,
+        acquisition="expected_improvement",
+        batch_size=5,
+        seed=0,
+    )
+    assert r5.fim_log_det == pytest.approx(r1.fim_log_det, rel=1e-9)
+    for name in r1.parameter_se:
+        assert r5.parameter_se[name] == pytest.approx(r1.parameter_se[name], rel=1e-9)
+
+
 def test_model_based_optimize_round_diverse_batch(tmp_path):
     rng = np.random.default_rng(4)
 

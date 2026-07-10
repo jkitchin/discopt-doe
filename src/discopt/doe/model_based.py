@@ -420,6 +420,17 @@ def model_based_optimize_round(
     )
     s.fit(X, y)
 
+    # Snapshot the real-data fit for reporting. The batch loop below refits the
+    # surrogate on fantasy (mean-imputed) phantom points to diversify picks;
+    # reporting from that contaminated fit would shrink the standard errors and
+    # inflate fim_log_det (extra rows, ~zero fantasy residuals), corrupting the
+    # very diagnostics used to judge convergence.
+    assert s.covariance_ is not None and s.fim_ is not None and s.parameters_ is not None
+    real_parameters = dict(s.parameters_)
+    real_parameter_names = list(s.parameter_names_)
+    real_covariance = np.array(s.covariance_, copy=True)
+    real_fim = np.array(s.fim_, copy=True)
+
     rng = np.random.default_rng(seed)
     candidates = _sample_candidates(bounds_arr, n_candidates, candidate_sampler, rng)
 
@@ -459,11 +470,12 @@ def model_based_optimize_round(
     batch_idx = wb.next_batch_index()
     new_run_ids = wb.append_runs(batch_idx, next_designs)
 
-    assert s.covariance_ is not None and s.fim_ is not None and s.parameters_ is not None
+    # Report from the real-data snapshot, not the fantasy-contaminated fit.
     parameter_se = {
-        n: float(np.sqrt(max(s.covariance_[i, i], 0.0))) for i, n in enumerate(s.parameter_names_)
+        n: float(np.sqrt(max(real_covariance[i, i], 0.0)))
+        for i, n in enumerate(real_parameter_names)
     }
-    sign, logdet = np.linalg.slogdet(s.fim_)
+    sign, logdet = np.linalg.slogdet(real_fim)
     fim_log_det = float(logdet) if sign > 0 else float("-inf")
 
     wb.log(
@@ -487,7 +499,7 @@ def model_based_optimize_round(
         surrogate_mode="parametric",
         n_completed=len(completed),
         workbook_path=str(wb.path),
-        parameters=dict(s.parameters_),
+        parameters=real_parameters,
         parameter_se=parameter_se,
         fim_log_det=fim_log_det,
     )
