@@ -293,8 +293,9 @@ class BatchDesignResult:
 
 def _metrics_from_fim(fim: np.ndarray) -> dict[str, float]:
     """All optimality metrics computed from a raw FIM matrix."""
-    det = float(np.linalg.det(fim))
-    log_det = float(np.log(det)) if det > 0 else float("-inf")
+    # slogdet is stable for badly-scaled FIMs where det over/underflows.
+    sign, slog = np.linalg.slogdet(fim)
+    log_det = float(slog) if sign > 0 and np.isfinite(slog) else float("-inf")
     try:
         tr_inv = float(np.trace(np.linalg.inv(fim)))
     except np.linalg.LinAlgError:

@@ -61,11 +61,17 @@ class FIMResult:
 
     @property
     def d_optimal(self) -> float:
-        """D-optimality criterion: ``log(det(FIM))``."""
-        det = np.linalg.det(self.fim)
-        if det <= 0:
+        """D-optimality criterion: ``log(det(FIM))``.
+
+        Uses ``slogdet`` rather than ``log(det(...))``: for badly-scaled FIMs
+        (parameters spanning many decades) ``det`` overflows to inf or
+        underflows to 0, whereas ``slogdet`` computes the log-determinant
+        directly and stably.
+        """
+        sign, logdet = np.linalg.slogdet(self.fim)
+        if sign <= 0 or not np.isfinite(logdet):
             return -np.inf
-        return float(np.log(det))
+        return float(logdet)
 
     @property
     def a_optimal(self) -> float:
@@ -94,6 +100,24 @@ class FIMResult:
             "min_eigenvalue": self.e_optimal,
             "condition_number": self.me_optimal,
         }
+
+
+def _measurement_sigma(em: ExperimentModel) -> np.ndarray:
+    """Validated per-response measurement std-devs (sigma > 0).
+
+    A zero (or negative) measurement error makes ``1/sigma**2`` infinite, which
+    silently poisons every FIM-based criterion. Fail loudly instead.
+    """
+    sigma = np.array(
+        [em.measurement_error[name] for name in em.response_names], dtype=np.float64
+    )
+    if np.any(sigma <= 0.0):
+        bad = [n for n in em.response_names if float(em.measurement_error[n]) <= 0.0]
+        raise ValueError(
+            f"measurement_error must be positive; response(s) {bad} have <= 0 "
+            "(a zero measurement error gives an infinite FIM)."
+        )
+    return sigma
 
 
 def _design_source_map(em: ExperimentModel) -> dict | None:
@@ -310,7 +334,7 @@ def compute_fim(
         raise ValueError(f"Unknown method: {method!r}. Use 'autodiff' or 'finite_difference'.")
 
     # Measurement covariance (diagonal)
-    sigma = np.array([em.measurement_error[name] for name in em.response_names])
+    sigma = _measurement_sigma(em)
     Sigma_inv = np.diag(1.0 / sigma**2)
 
     # FIM = J^T Σ^{-1} J
@@ -382,7 +406,7 @@ def compute_fim_batch(
     J_all = np.asarray(jax.vmap(jax.jacobian(response_vector))(X))
     J_all = J_all[:, :, param_indices]
 
-    sigma = np.array([em.measurement_error[name] for name in em.response_names])
+    sigma = _measurement_sigma(em)
     Sigma_inv = np.diag(1.0 / sigma**2)
 
     results: list[FIMResult] = []
@@ -444,7 +468,7 @@ def _make_direct_fim_evaluator(
     # Compile the Jacobian once; the JIT cache keys on x*'s (fixed) shape, so
     # every subsequent design point reuses the same compiled trace.
     jac = jax.jit(jax.jacobian(response_vector))
-    sigma = np.array([em.measurement_error[name] for name in em.response_names])
+    sigma = _measurement_sigma(em)
     Sigma_inv = np.diag(1.0 / sigma**2)
     param_names = em.parameter_names
     response_names = em.response_names

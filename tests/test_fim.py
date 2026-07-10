@@ -520,3 +520,16 @@ def test_fd_matches_autodiff_at_large_parameter_scale():
     fim_ad = compute_fim(exp, pv, method="autodiff")
     fim_fd = compute_fim(exp, pv, method="finite_difference")
     np.testing.assert_allclose(fim_fd.fim, fim_ad.fim, rtol=1e-5)
+
+
+def test_compute_fim_rejects_zero_measurement_error():
+    """A zero measurement error must error (it gives an infinite FIM)."""
+
+    class ZeroErr(Experiment):
+        def create_model(self, **kwargs):
+            m = dm.Model("zeroerr")
+            k = m.continuous("k", lb=0.01, ub=20)
+            return ExperimentModel(m, {"k": k}, {}, {"y": k * 2.0}, {"y": 0.0})
+
+    with pytest.raises(ValueError, match="measurement_error must be positive"):
+        compute_fim(ZeroErr(), {"k": 2.0})
