@@ -107,7 +107,6 @@ def sequential_doe(
     history = []
     current_guess = dict(initial_guess)
     all_data = dict(initial_data)
-    prior_fim = None
 
     for round_idx in range(n_rounds):
         # Step 1: Estimate parameters from all data
@@ -117,8 +116,11 @@ def sequential_doe(
             initial_guess=current_guess,
         )
 
-        # Accumulate FIM as prior
-        prior_fim = est.fim if prior_fim is None else prior_fim + est.fim
+        # Information already collected: est.fim is fit on *all* accumulated
+        # data, so it is the cumulative prior for designing the next point.
+        # (Summing est.fim across rounds would double-count earlier data,
+        # since each round's est.fim already includes it.)
+        prior_fim = est.fim
 
         # Step 2: Design next experiment(s)
         design: DesignResult | BatchDesignResult
