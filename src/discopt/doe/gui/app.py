@@ -1282,9 +1282,28 @@ def _resolve_template(
     return gui_choice
 
 
+def _set_output_dir(path: Path) -> None:
+    """Point the output-folder browser at ``path`` (from a browse button).
+
+    Streamlit forbids writing a widget's session-state key after the widget is
+    instantiated, and the browse buttons run *after* the folder text_input. So
+    we stage the target and let ``_output_path_picker`` apply it to the widget
+    key at the top of the next run, before the text_input is created. Without
+    this, the stale typed value is written back on rerun and reverts the click.
+    """
+    resolved = str(Path(path).expanduser())
+    st.session_state["output_dir"] = resolved
+    st.session_state["_output_dir_pending"] = resolved
+
+
 def _output_path_picker() -> tuple[str, str]:
     """Sidebar widget: directory browser + filename → (dir, filename)."""
     st.sidebar.markdown("**Output workbook**")
+
+    # Apply a staged browse navigation to the text_input key before the widget
+    # is instantiated (setting it afterwards raises StreamlitAPIException).
+    if "_output_dir_pending" in st.session_state:
+        st.session_state["output_dir_input"] = st.session_state.pop("_output_dir_pending")
 
     if "output_dir" not in st.session_state:
         st.session_state["output_dir"] = str(Path.cwd())
@@ -1325,14 +1344,14 @@ def _output_path_picker() -> tuple[str, str]:
             disabled=current_dir.parent == current_dir,
             help="Navigate up one directory.",
         ):
-            st.session_state["output_dir"] = str(current_dir.parent)
+            _set_output_dir(current_dir.parent)
             st.rerun()
 
         if subdirs:
             st.caption("Subfolders")
             for d in subdirs[:50]:
                 if st.button(f"📁 {d.name}", key=f"browse_dir_{d}"):
-                    st.session_state["output_dir"] = str(d)
+                    _set_output_dir(d)
                     st.rerun()
             if len(subdirs) > 50:
                 st.caption(f"…and {len(subdirs) - 50} more (type the path above).")
