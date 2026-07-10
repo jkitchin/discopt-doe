@@ -345,3 +345,80 @@ def test_cli_latin_rejects_k6_for_graeco(tmp_path: Path) -> None:
                 replicates=1,
             )
         )
+
+
+def test_cli_factorial_replicate_blocking(tmp_path: Path) -> None:
+    """--include-replicate persists a replicate column and blocks on it.
+
+    Regression: the replicate tag was dropped before writing the runs sheet,
+    so --include-replicate silently did nothing.
+    """
+    openpyxl = pytest.importorskip("openpyxl")
+    from discopt.doe.cli import NewParams, do_anova, do_new
+
+    wb_path = tmp_path / "fac.xlsx"
+    do_new(
+        NewParams(
+            output=wb_path,
+            n=1,
+            inputs=[],
+            response_name="y",
+            measurement_error=1.0,
+            criterion="anova",
+            seed=0,
+            n_starts=1,
+            template="factorial-2level",
+            factor_pairs={"A": (-1, 1), "B": (-1, 1)},
+            replicates=2,
+        )
+    )
+    book = openpyxl.load_workbook(wb_path)
+    headers = [c.value for c in book["runs"][1]]
+    assert "replicate" in headers
+
+    sheet = book["runs"]
+    y_idx = headers.index("y")
+    a_idx = headers.index("A")
+    b_idx = headers.index("B")
+    rng = np.random.default_rng(0)
+    for row in sheet.iter_rows(min_row=2):
+        if row[0].value is None:
+            continue
+        row[y_idx].value = float(row[a_idx].value + 0.5 * row[b_idx].value + rng.normal(0, 0.1))
+    book.save(wb_path)
+
+    out = do_anova({"workbook": str(wb_path), "include_replicate": True})
+    sources = [r["source"] for r in out["rows"]]
+    assert "replicate" in sources
+
+
+def test_cli_anova_include_replicate_without_column_errors(tmp_path: Path) -> None:
+    from discopt.doe.cli import DoEError, NewParams, do_anova, do_new
+
+    wb_path = tmp_path / "lin.xlsx"
+    do_new(
+        NewParams(
+            output=wb_path,
+            n=3,
+            inputs=[("x", 0.0, 10.0)],
+            response_name="y",
+            measurement_error=1.0,
+            criterion="determinant",
+            seed=0,
+            n_starts=1,
+            template="linear",
+        )
+    )
+    openpyxl = pytest.importorskip("openpyxl")
+    book = openpyxl.load_workbook(wb_path)
+    sheet = book["runs"]
+    headers = [c.value for c in sheet[1]]
+    y_idx = headers.index("y")
+    for row in sheet.iter_rows(min_row=2):
+        if row[0].value is None:
+            continue
+        row[y_idx].value = 1.0
+    book.save(wb_path)
+
+    with pytest.raises(DoEError, match="replicate"):
+        do_anova({"workbook": str(wb_path), "include_replicate": True})

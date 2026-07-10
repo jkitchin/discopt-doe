@@ -207,6 +207,7 @@ class Workbook:
         response_name: str,
         module_callable: str | None = None,
         param_initial_guess: dict[str, float] | None = None,
+        extra_columns: Sequence[str] = (),
     ) -> "Workbook":
         _require_openpyxl()
         from openpyxl import Workbook as _OpenpyxlWorkbook
@@ -253,10 +254,15 @@ class Workbook:
         for k, v in meta_rows:
             meta_sheet.append([k, v])
 
-        # Runs header row
+        # Runs header row. Any ``extra_columns`` (e.g. "replicate" bookkeeping
+        # for factorial/latin designs) sit between the design inputs and the
+        # response so ``anova_report`` can pick them up as blocking factors.
         runs_sheet = wb[SHEET_RUNS]
         header = (
-            ["run_id", "batch"] + [s.name for s in input_specs] + [response_name, "measured_at"]
+            ["run_id", "batch"]
+            + [s.name for s in input_specs]
+            + list(extra_columns)
+            + [response_name, "measured_at"]
         )
         runs_sheet.append(header)
 
@@ -403,7 +409,11 @@ class Workbook:
     def append_runs(self, batch_idx: int, runs: Sequence[Mapping[str, object]]) -> list[int]:
         """Append a batch of pending runs to the workbook. Returns the new run_ids."""
         sheet = self._wb[SHEET_RUNS]
-        input_names = self._input_column_names()
+        # Header layout is run_id, batch, <inputs...>, <extra...>, response,
+        # measured_at. The middle columns (inputs plus any extra bookkeeping
+        # columns such as "replicate") are written from each run mapping.
+        headers = self._runs_headers()
+        middle = headers[2:-2] if len(headers) >= 4 else self._input_column_names()
         # Determine next run_id
         existing_ids = []
         for row in sheet.iter_rows(min_row=2, values_only=True):
@@ -416,8 +426,8 @@ class Workbook:
         new_ids: list[int] = []
         for run in runs:
             row = [next_id, int(batch_idx)]
-            for nm in input_names:
-                v = run[nm]
+            for nm in middle:
+                v = run.get(nm)
                 if isinstance(v, (int, float)) and not isinstance(v, bool):
                     row.append(float(v))
                 else:

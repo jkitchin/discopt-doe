@@ -570,9 +570,13 @@ def _do_new_factorial(params: NewParams) -> dict[str, Any]:
         response_name=params.response_name,
         module_callable=None,
         param_initial_guess=None,
+        extra_columns=["replicate"],
     )
 
-    designs = [{n: row[n] for n in factor_names} for row in design.rows]
+    designs = [
+        {**{n: row[n] for n in factor_names}, "replicate": row.get("replicate")}
+        for row in design.rows
+    ]
     new_ids = wb.append_runs(1, designs)
     wb.log(
         "new",
@@ -870,9 +874,13 @@ def _do_new_latin(params: NewParams) -> dict[str, Any]:
         response_name=params.response_name,
         module_callable=None,
         param_initial_guess=None,
+        extra_columns=["replicate"],
     )
 
-    designs = [{n: row[n] for n in factor_names} for row in design.rows]
+    designs = [
+        {**{n: row[n] for n in factor_names}, "replicate": row.get("replicate")}
+        for row in design.rows
+    ]
     new_ids = wb.append_runs(1, designs)
     wb.log(
         "new",
@@ -1416,6 +1424,16 @@ def do_anova(params: dict[str, Any]) -> dict[str, Any]:
         factors = [s.name for s in wb.input_specs()]
 
     include_replicate = params.get("include_replicate", False)
+    if include_replicate:
+        if not any(r.get("replicate") is not None for r in completed):
+            raise DoEError(
+                "--include-replicate was given but this workbook has no "
+                "replicate column with data. Recreate the design with "
+                "--replicates > 1."
+            )
+        # anova_report only auto-adds "replicate" when factors is None; we pass
+        # an explicit factor list, so add it here as a blocking factor.
+        factors = [*factors, "replicate"]
     interactions = params.get("interactions") or None
     rows: list[dict[str, Any]] = []
     for r in completed:
