@@ -65,9 +65,28 @@ from importlib.metadata import version as _dist_version
 # install fails here with a clear message instead of an AttributeError later.
 # Two-component compare so 0.6.0.dev0 local builds pass.
 _MIN_DISCOPT = (0, 6)
+
+
+def _version_prefix(found: str) -> tuple[int, ...]:
+    """(major, minor) integer prefix, tolerant of pre-release suffixes.
+
+    ``"0.6rc1"`` -> ``(0, 6)``, ``"0.7b2"`` -> ``(0, 7)``. The old
+    ``int(p) for p in ... if p.isdigit()`` dropped a component like ``"6rc1"``
+    entirely and spuriously rejected valid pre-releases.
+    """
+    import re as _re
+
+    out: list[int] = []
+    for p in found.split(".")[:2]:
+        m = _re.match(r"\d+", p)
+        if m:
+            out.append(int(m.group()))
+    return tuple(out)
+
+
 try:
     _found = _dist_version("discopt")
-    _v = tuple(int(p) for p in _found.split(".")[:2] if p.isdigit())
+    _v = _version_prefix(_found)
     if _v < _MIN_DISCOPT:
         raise ImportError(
             f"discopt-doe requires discopt>={'.'.join(map(str, _MIN_DISCOPT))} "
