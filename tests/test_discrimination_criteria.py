@@ -362,6 +362,34 @@ class TestValidation:
         with pytest.raises(ValueError, match="positive"):
             discriminate_design(EXPS, PE, BOUNDS, model_priors={"linear": 0.0, "quadratic": 0.0})
 
+    def test_all_candidates_failing_raises(self):
+        """When every candidate fails, raise instead of returning a garbage best.
+
+        Regression: the finite _SINGULAR_SENTINEL was accepted as a real 'best'
+        value, so a failing design was returned silently.
+        """
+
+        class ExpY(Experiment):
+            def create_model(self, **kw):
+                m = dm.Model("y")
+                a = m.continuous("a", lb=0.1, ub=5.0)
+                x = m.continuous("x", lb=0.0, ub=2.0)
+                return ExperimentModel(m, {"a": a}, {"x": x}, {"y": a * x}, {"y": 0.5})
+
+        class ExpZ(Experiment):
+            def create_model(self, **kw):
+                m = dm.Model("z")
+                a = m.continuous("a", lb=0.1, ub=5.0)
+                x = m.continuous("x", lb=0.0, ub=2.0)
+                return ExperimentModel(m, {"a": a}, {"x": x}, {"z": a * x}, {"z": 0.5})
+
+        with pytest.raises(RuntimeError, match="No feasible design"):
+            discriminate_design(
+                {"m1": ExpY(), "m2": ExpZ()},
+                {"m1": {"a": 1.0}, "m2": {"a": 1.0}},
+                BOUNDS,
+            )
+
 
 # ─────────────────────────────────────────────────────────────────────
 # Three-model stress test

@@ -37,6 +37,7 @@ Usage
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from enum import Enum
 from itertools import combinations
@@ -200,18 +201,27 @@ def discriminate_design(
     DiscriminationDesignResult
     """
     _validate_inputs(experiments, param_estimates, design_bounds)
+    if DiscriminationCriterion(criterion) is DiscriminationCriterion.DT:
+        raise ValueError(
+            "DT-compound is not a standalone criterion; call "
+            "discriminate_compound() instead of discriminate_design(..., criterion=DT)."
+        )
     model_names = list(experiments.keys())
     weights = _normalise_priors(model_priors, model_names)
 
     rng = np.random.default_rng(seed)
     rng_seed = int(rng.integers(0, 2**31 - 1))
 
+    last_exc: list[BaseException] = []
+
     def objective(design: dict[str, float]) -> float:
         """Return *negative* criterion value for minimisation."""
         try:
             preds = _predict_all_models(experiments, param_estimates, design)
             value, _ = _evaluate_criterion(criterion, preds, weights, mi_samples, rng_seed)
-        except Exception:
+        except Exception as e:  # noqa: BLE001 -- root cause surfaced below
+            last_exc.clear()
+            last_exc.append(e)
             return _SINGULAR_SENTINEL
         if not np.isfinite(value):
             return _SINGULAR_SENTINEL
@@ -221,7 +231,10 @@ def discriminate_design(
         objective, design_bounds, n_starts=n_starts, local_refine=local_refine, seed=rng_seed
     )
     if best_design is None:
-        raise RuntimeError("No feasible design found for discrimination")
+        msg = "No feasible design found for discrimination"
+        if last_exc:
+            raise RuntimeError(msg) from last_exc[-1]
+        raise RuntimeError(msg)
 
     # Final evaluation at the optimum to populate the result.
     preds = _predict_all_models(experiments, param_estimates, best_design)
@@ -699,7 +712,9 @@ def _optimize_over_design(
             best_value = val
             best_design = cand
 
-    if best_design is None or not np.isfinite(best_value):
+    # A best_value at (or above) the sentinel means every candidate failed;
+    # the finite sentinel would otherwise be accepted as a real "best".
+    if best_design is None or not np.isfinite(best_value) or best_value >= _SINGULAR_SENTINEL:
         return None
 
     if local_refine:
@@ -714,8 +729,12 @@ def _optimize_over_design(
             if res.fun < best_value:
                 best_value = float(res.fun)
                 best_design = {n: float(v) for n, v in zip(design_names, res.x)}
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            warnings.warn(
+                f"discrimination local refinement failed ({e}); using the "
+                "best multi-start candidate.",
+                stacklevel=2,
+            )
 
     return best_design
 
