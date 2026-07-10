@@ -114,6 +114,23 @@ discopt doe optimize run.xlsx        # one active-learning round (optimize templ
 discopt doe gui run.xlsx              # Streamlit GUI (needs [gui] extra)
 ```
 
+## GUI
+
+`discopt doe gui [workbook.xlsx]` launches a Streamlit app over a campaign
+workbook (install the `[gui]` extra, which also pulls scikit-learn for the
+active-learning round). It wraps the same `do_*` functions as the CLI:
+
+- **Create** a new campaign from a template, browsing to an output folder.
+- **Edit responses** in-app or in Excel, then Save; the **Rename** panel can
+  rename factors/response — note this clears the fit artifacts, so re-run Fit.
+- **Fit / Extend / Optimize / ANOVA** panels drive the corresponding verb, and
+  a **History** panel shows the workbook's audit log.
+
+Flags: `--port N`, `--no-browser`. The `DISCOPT_DOE_WORKBOOK` environment
+variable pre-selects a workbook. Keep charts in a separate file — the CLI/GUI
+rewrite the workbook and openpyxl does not preserve embedded charts (a `.bak`
+is written before the first save).
+
 ## Development
 
 The project is uv-managed:

@@ -1,5 +1,30 @@
 # Repository review — prioritized issues
 
+> **Resolution status (2026-07-10).** All P0, all P1, and essentially all P2/P3
+> issues below were fixed on this branch — one commit per issue, each with a
+> regression test that fails on the old code. The fast test suite went from 219
+> to 277 passing (~58 new regression tests). Deliberately **not** changed, with
+> rationale:
+>
+> - **#45** (duplicate `doe` entry-point warning) — the warning comes from the
+>   base `discopt` extraction branch still declaring the `doe` entry point;
+>   nothing in *this* repo can suppress it. It disappears when discopt 0.6 ships
+>   with `discopt.doe` removed. Upstream fix only.
+> - **#53** (notebook build scripts drifted from the committed notebooks) —
+>   regenerating would blank the published cell outputs and the scripts use a
+>   private API; making them canonical (regenerate + execute + CI diff) is a
+>   workflow decision left to the maintainer.
+> - **#72** (flag-naming inconsistencies: `--input` vs `--bounds`, `extend --n`
+>   vs `optimize --batch-size`, `new --seed` default 42 vs `optimize --seed`
+>   default None) — these are breaking renames best decided before the first
+>   release; documented here rather than changed unilaterally.
+> - **#79/#80 remainder** — the load-bearing GUI bugs (folder browser, stale
+>   ANOVA, seed default, flash messages, file-open errors) are fixed and a
+>   short GUI doc section was added; the smaller polish items (mixture-editor
+>   `ub` default, always-GP diagnostic plots, native-picker threading,
+>   `_free_port` race, history logging for in-GUI edits) and broader `AppTest`
+>   coverage remain as follow-ups.
+
 Date: 2026-07-10. Full-repo review of `discopt-doe` for correctness, usability,
 documentation, and practitioner foot-guns. Method: five independent review
 passes (core numerics; sequential/model-based/discrimination statistics;
