@@ -171,6 +171,10 @@ def sequential_discrimination(
         # Not converged: always propose the next design (even on the final
         # round, so the caller has a recommendation to run).
         param_estimates = {name: dict(res.parameters) for name, res in estimation_results.items()}
+        # Propagate parameter uncertainty from the data collected so far into the
+        # prediction covariances (each res.fim is ordered by that model's
+        # parameter names, matching discriminate_design's convention).
+        prior_fims = {name: np.asarray(res.fim) for name, res in estimation_results.items()}
         round_seed = int(rng.integers(0, 2**31 - 1))
         design = discriminate_design(
             experiments=experiments,
@@ -178,6 +182,7 @@ def sequential_discrimination(
             design_bounds=design_bounds,
             criterion=criterion,
             model_priors=selection.weights,  # posterior-like weighting
+            prior_fims=prior_fims,
             n_starts=n_starts,
             local_refine=local_refine,
             mi_samples=mi_samples,

@@ -153,6 +153,20 @@ class TestBuzziFerraris:
         t_ba, _ = _criterion_buzzi_ferraris({"i": b, "j": a}, {"i": 0.5, "j": 0.5})
         assert t_ab == pytest.approx(t_ba)
 
+    def test_prior_fim_shrinks_prediction_covariance(self):
+        """Supplying a larger prior FIM reduces the prediction covariance V.
+
+        Regression: without prior_fims, V came from the single candidate FIM
+        and was independent of how well the parameters are actually known.
+        """
+        from discopt.doe.discrimination import _predict_with_covariance
+
+        exp = LinearExp()
+        pv, dv = {"a": 1.0}, {"x": 1.5}
+        small = _predict_with_covariance(exp, pv, dv, prior_fim=np.array([[1.0]]))
+        large = _predict_with_covariance(exp, pv, dv, prior_fim=np.array([[100.0]]))
+        assert large.V[0, 0] < small.V[0, 0]
+
     def test_misaligned_response_names_raise(self):
         """All criteria index responses positionally; mismatched names error."""
         from discopt.doe.discrimination import _predict_all_models

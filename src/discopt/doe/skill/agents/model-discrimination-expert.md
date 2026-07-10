@@ -40,11 +40,11 @@ result = discriminate_design(
     },
     design_bounds={"T": (300.0, 700.0)},
     criterion=DiscriminationCriterion.BF,     # default
-    model_weights=None,                        # optional posterior priors
+    model_priors=None,                         # optional model priors (uniform default)
 )
 # result.design -> {"T": 480.0}
 # result.criterion_value -> scalar (bigger = more discriminating)
-# result.per_model_fims, result.per_model_predictions for diagnostics
+# result.fim_results, result.predicted_responses, result.prediction_covariances for diagnostics
 ```
 
 ### Sequential discrimination
@@ -53,15 +53,16 @@ from discopt.doe import sequential_discrimination, DiscriminationRound
 
 history = sequential_discrimination(
     experiments={"arrh": ArrheniusExp(), "eyr": EyringExp()},
-    initial_data={"arrh": initial_arrh_data, "eyr": initial_eyr_data},
-    initial_guesses={"arrh": {"A": 1e3, "Ea": 50e3}, "eyr": {...}},
+    initial_data=initial_data,              # ONE shared dataset, fit by every model
     design_bounds={"T": (300.0, 700.0)},
     n_rounds=5,
     criterion=DiscriminationCriterion.BF,
-    run_experiment=lab_callback,            # returns {"arrh": ..., "eyr": ...}
-    stop_when_concentrated=0.95,            # optional: stop when max weight > threshold
+    run_experiment=lab_callback,            # design -> new_data (one shared dict)
+    stop_when_dominant=0.95,                # optional: stop when max weight >= threshold
+    initial_guesses={"arrh": {"A": 1e3, "Ea": 50e3}, "eyr": {...}},  # optional
 )
-# Each DiscriminationRound records the design, per-model re-fit, updated weights.
+# Each DiscriminationRound records the design, per-model re-fit, and updated
+# selection weights (round.selection.weights).
 ```
 
 ### Post-experiment: pick the best model
@@ -79,18 +80,21 @@ sel = model_selection({"arrh": est_a, "eyr": est_e}, method="aic")  # or "bic", 
 
 # Nested pair via LRT.
 lrt = likelihood_ratio_test(est_nested, est_full)
-# lrt.g2_statistic, lrt.p_value, lrt.df
+# lrt.p_value, lrt.best_model, lrt.nested_pair. The G² statistic is the deviance
+# difference: lrt.scores[nested_name] - lrt.scores[full_name] (df = p_full - p_nested,
+# not stored on the result).
 
 # Non-nested pair via Vuong.
-v = vuong_test({"arrh": ArrheniusExp(), "eyr": EyringExp()},
-               {"arrh": est_a, "eyr": est_e}, data)
-# v.z_statistic, v.p_value
+v = vuong_test(est_a, est_e, data,
+               {"arrh": ArrheniusExp(), "eyr": EyringExp()})
+# v.z_statistic, v.p_value, v.best_model ("indistinguishable" inside the
+# acceptance region).
 ```
 
 ### Key files
-- `python/discopt/doe/discrimination.py` — the five criteria, `discriminate_design`, `discriminate_compound`, `DiscriminationDesignResult`.
-- `python/discopt/doe/discrimination_sequential.py` — `sequential_discrimination`, `DiscriminationRound`.
-- `python/discopt/doe/selection.py` — `model_selection`, `likelihood_ratio_test`, `vuong_test`, `ModelSelectionResult`. AIC/BIC/LRT all derive one-line from `EstimationResult.objective` (deviance).
+- `src/discopt/doe/discrimination.py` — the five criteria, `discriminate_design`, `discriminate_compound`, `DiscriminationDesignResult`.
+- `src/discopt/doe/discrimination_sequential.py` — `sequential_discrimination`, `DiscriminationRound`.
+- `src/discopt/doe/selection.py` — `model_selection`, `likelihood_ratio_test`, `vuong_test`, `ModelSelectionResult`. AIC/BIC/LRT all derive one-line from `EstimationResult.objective` (deviance).
 
 ### Convention: deviance vs. log-likelihood
 `EstimationResult.objective` equals `D = −2 · log L` up to a constant under Gaussian noise. That's why:
@@ -101,14 +105,9 @@ g2  = est_nested.objective - est_full.objective      # LRT statistic
 ```
 Every `selection.py` formula uses this convention directly. **Do not add a factor of 1/2.**
 
-## Context: Crucible Knowledge Base
+## Background Reading
 
-discopt does not yet have a dedicated `model-discrimination.org` crucible article. The closest-adjacent articles are:
-
-- `.crucible/wiki/concepts/model-based-doe.org` — DoE context.
-- `.crucible/wiki/concepts/fisher-information-matrix.org` — underlying prediction covariance.
-
-When writing a new crucible article, consider covering: Hunter-Reiner origin, BF derivation, JR/MI as modern generalizations, nesting assumption for LRT, Akaike weights interpretation.
+For the theory behind these tools see the primary literature below: Hunter-Reiner for the original criterion, Buzzi-Ferraris-Forzatti for the multiresponse extension, Olofsson et al. for the JR/MI generalizations, and the Akaike/Schwarz/Wilks/Vuong references for the post-experiment selection tests. The underlying prediction covariance `Vᵢ = Jᵢ · FIM_{i}⁻¹ · Jᵢᵀ` is the same FIM machinery documented in `doe-expert`.
 
 ## Primary Literature
 
@@ -125,7 +124,7 @@ When writing a new crucible article, consider covering: Hunter-Reiner origin, BF
 
 - **"Which criterion should I pick?"** Default to **BF**. Move to **JR** or **MI** if you have `M ≥ 3` models (BF generalizes but loses theoretical cleanness). Use **HR** only when prediction uncertainties are truly negligible or for pedagogical comparison. Use **DT** when you need parameter precision *and* discrimination simultaneously.
 - **"My models have different parameter counts — is that OK?"** Yes — everything operates in prediction space. Parameter names do not need to align across models.
-- **"How many rounds of sequential discrimination?"** Watch the model weights. When one model's weight exceeds ~0.9–0.95 or the design converges to a bounded region of the design space, stop. The `stop_when_concentrated` argument implements this.
+- **"How many rounds of sequential discrimination?"** Watch the model weights. When one model's weight exceeds ~0.9–0.95 or the design converges to a bounded region of the design space, stop. The `stop_when_dominant` argument implements this.
 - **"My rival models give nearly identical predictions everywhere."** The models are empirically indistinguishable. No discrimination experiment will separate them within your bounds. Either widen the design space or accept that both are adequate.
 - **"LRT p-value is 0.07 — reject or keep?"** LRT assumes nested models and asymptotic χ². With small `n`, the test is conservative. Triangulate with AIC / BIC / Vuong; a single borderline p-value is not a decision.
 - **"AIC and BIC disagree."** They penalize complexity differently (2 vs. log(n)). For `n < 40` they can disagree often. AICc is a small-sample correction and is usually the tie-breaker.
@@ -133,7 +132,7 @@ When writing a new crucible article, consider covering: Hunter-Reiner origin, BF
 
 ## When to Defer
 
-- **"Fit one specific model"** → `estimation-expert`.
+- **"Fit one specific model"** → fit with `discopt.estimate.estimate_parameters` directly.
 - **"Rank parameters WITHIN one model"** → `estimability-expert`.
 - **"Is my single model identifiable?"** → `identifiability-expert`.
 - **"Generic MBDoE question, not specifically rival-model"** → `doe-expert`.

@@ -163,6 +163,7 @@ def discriminate_design(
     *,
     criterion: DiscriminationCriterion = DiscriminationCriterion.BF,
     model_priors: dict[str, float] | None = None,
+    prior_fims: dict[str, np.ndarray] | None = None,
     n_starts: int = 10,
     local_refine: bool = True,
     mi_samples: int = 2000,
@@ -186,6 +187,12 @@ def discriminate_design(
     model_priors : dict[str, float], optional
         Prior probability per model (used by HR, BF, JR, MI). Defaults
         to a uniform prior.
+    prior_fims : dict[str, numpy.ndarray], optional
+        Per-model FIM accumulated from data collected so far (ordered by that
+        model's parameter names). When given, each model's prediction
+        covariance ``V`` reflects real parameter uncertainty instead of the
+        candidate design's own FIM. Recommended when driving discrimination
+        from a growing dataset; without it the stateless approximation applies.
     n_starts : int, default 10
         Multi-start sample count.
     local_refine : bool, default True
@@ -217,7 +224,7 @@ def discriminate_design(
     def objective(design: dict[str, float]) -> float:
         """Return *negative* criterion value for minimisation."""
         try:
-            preds = _predict_all_models(experiments, param_estimates, design)
+            preds = _predict_all_models(experiments, param_estimates, design, prior_fims)
             value, _ = _evaluate_criterion(criterion, preds, weights, mi_samples, rng_seed)
         except Exception as e:  # noqa: BLE001 -- root cause surfaced below
             last_exc.clear()
@@ -237,7 +244,7 @@ def discriminate_design(
         raise RuntimeError(msg)
 
     # Final evaluation at the optimum to populate the result.
-    preds = _predict_all_models(experiments, param_estimates, best_design)
+    preds = _predict_all_models(experiments, param_estimates, best_design, prior_fims)
     crit_value, pairwise = _evaluate_criterion(criterion, preds, weights, mi_samples, rng_seed)
 
     return DiscriminationDesignResult(
@@ -378,6 +385,7 @@ def _predict_all_models(
     experiments: dict[str, Experiment],
     param_estimates: dict[str, dict[str, float]],
     design_values: dict[str, float],
+    prior_fims: dict[str, np.ndarray] | None = None,
 ) -> dict[str, _ModelPrediction]:
     """Compute (y_hat, V, Sigma_y, FIM, J) for every model at one design.
 
@@ -385,9 +393,16 @@ def _predict_all_models(
     model must expose the same responses in the same order; otherwise the
     pairwise differences would silently misalign. This is checked once here
     (previously only the BF criterion validated it).
+
+    ``prior_fims`` optionally maps a model name to its accumulated FIM so the
+    prediction covariance reflects real parameter uncertainty (see
+    :func:`_predict_with_covariance`).
     """
+    prior_fims = prior_fims or {}
     preds = {
-        name: _predict_with_covariance(experiments[name], param_estimates[name], design_values)
+        name: _predict_with_covariance(
+            experiments[name], param_estimates[name], design_values, prior_fims.get(name)
+        )
         for name in experiments
     }
     names = list(preds)
@@ -406,6 +421,7 @@ def _predict_with_covariance(
     experiment: Experiment,
     param_values: dict[str, float],
     design_values: dict[str, float],
+    prior_fim: np.ndarray | None = None,
 ) -> _ModelPrediction:
     """Evaluate y_hat, the FIM, and the prediction covariance V at one design.
 
@@ -413,6 +429,13 @@ def _predict_with_covariance(
     :func:`discopt.doe.fim.compute_fim`, with the addition that we also
     read the predicted response values from the same solve, avoiding a
     second model build per design point.
+
+    ``prior_fim`` (if given, ordered by the model's parameter names) is the FIM
+    accumulated from the data collected so far; the prediction covariance is
+    then ``V = J Cov(theta) J^T`` with ``Cov(theta) = pinv(prior_fim)``. Without
+    it, ``V`` falls back to the single candidate design's own FIM -- a stateless
+    approximation that is independent of how well the parameters are actually
+    known and treats non-identifiable directions as zero-variance.
     """
     from discopt.doe.fim import _compute_jacobian_autodiff, _get_param_indices
     from discopt.parametric import compile_expression, extract_x_flat, flatten_params
@@ -451,7 +474,11 @@ def _predict_with_covariance(
     Sigma_y = np.diag(sigma**2)
     Sigma_inv = np.diag(1.0 / sigma**2)
     fim = J.T @ Sigma_inv @ J
-    V = J @ np.linalg.pinv(fim) @ J.T
+    # Propagate parameter uncertainty into the prediction covariance. Prefer the
+    # prior FIM (parameter knowledge from data collected so far); fall back to
+    # the candidate design's own FIM when none is supplied.
+    cov_theta = np.linalg.pinv(np.asarray(prior_fim) if prior_fim is not None else fim)
+    V = J @ cov_theta @ J.T
 
     fim_result = FIMResult(
         fim=np.asarray(fim),

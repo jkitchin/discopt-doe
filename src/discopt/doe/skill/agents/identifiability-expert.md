@@ -32,31 +32,35 @@ res = check_identifiability(experiment, param_values={"k": 0.3, "A": 1.0})
 
 # Full Belsley/Kuh/Welsch + sloppy-spectrum diagnostic
 diag = diagnose_identifiability(experiment, param_values)
-# Returns: condition_index, variance_decomposition, eigenvalues, classification.
+# Returns (IdentifiabilityDiagnostics): condition_indices, variance_decomposition,
+# vif, correlation_matrix, log_eigenvalue_spectrum, normalized_log_spectrum,
+# null_space, standard_errors, warnings, problematic_parameters.
 
 # Profile likelihood for one parameter
 prof = profile_likelihood(experiment, data, "k",
-                          n_steps=40, step_factor=1.2,
-                          alpha=0.05)
-# Returns: theta_vals, deviance_vals, ci_lo, ci_hi, shape ("identifiable" /
-# "flat_right" / "flat_left" / "flat_both" / "non_monotone").
+                          confidence_level=0.95,
+                          max_steps=40)
+# Returns (ProfileLikelihoodResult): theta_values, neg_log_lik, ci_lower, ci_upper,
+# shape ("bounded" / "one_sided_lower" / "one_sided_upper" / "flat"), warnings.
 
 # Or sweep every parameter
-all_prof = profile_all(experiment, data, alpha=0.05)
+all_prof = profile_all(experiment, data, confidence_level=0.95)
 ```
 
 ### Shape classification semantics
-`ProfileLikelihoodResult.shape` uses the Raue/Kreutz convention:
+`ProfileLikelihoodResult.shape` (a `ProfileShape` literal) takes one of four values:
 
-- `"identifiable"` — deviance crosses the `chi²_{1, 1-α}` threshold on both sides. Finite CI returned.
-- `"flat_right"` / `"flat_left"` — deviance stays below threshold on one side; CI is open-ended. Practical non-id if the flat direction corresponds to a finite parameter change; structural non-id if the flat extends to parameter bounds without the solver stepping at all.
-- `"flat_both"` — completely unidentifiable along this direction. Almost always structural.
-- `"non_monotone"` — the profile is bumpy. Usually an optimizer failure (re-solve with better initial guess or more steps) rather than a real identifiability statement.
+- `"bounded"` — deviance crosses the `chi²_{1, 1-α}` threshold on both sides. Finite CI (`ci_lower` and `ci_upper` both set).
+- `"one_sided_lower"` — deviance crosses only on the lower arm; `ci_lower` is set but `ci_upper` is `None` (open above). A warning notes the upper arm exhausted `max_steps` or hit a bound.
+- `"one_sided_upper"` — deviance crosses only on the upper arm; `ci_upper` is set but `ci_lower` is `None` (open below).
+- `"flat"` — the profile never crosses the threshold (or stays essentially flat). The parameter is practically (often structurally) non-identifiable along this direction.
+
+A bumpy / non-monotone profile is not a distinct shape: it is flagged via an entry in `prof.warnings` ("... arm is non-monotone; consider multi-start on the full problem"). It usually signals an optimizer failure (re-solve with a better initial guess or more steps) rather than a real identifiability statement.
 
 ### Key files
-- `python/discopt/doe/fim.py` — `check_identifiability`, `diagnose_identifiability`, `IdentifiabilityResult`, `IdentifiabilityDiagnostics`.
-- `python/discopt/doe/profile.py` — `profile_likelihood`, `profile_all`, step-outward algorithm with deviance threshold from `scipy.stats.chi2`.
-- `python/discopt/estimate.py` — `estimate_parameters(..., fixed_parameters=...)` underpins profile likelihood.
+- `src/discopt/doe/fim.py` — `check_identifiability`, `diagnose_identifiability`, `IdentifiabilityResult`, `IdentifiabilityDiagnostics`.
+- `src/discopt/doe/profile.py` — `profile_likelihood`, `profile_all`, step-outward algorithm with deviance threshold from `scipy.stats.chi2`.
+- `discopt.estimate` module — `estimate_parameters(..., fixed_parameters=...)` underpins profile likelihood.
 
 ### Typical diagnostic workflow
 ```python
@@ -64,22 +68,23 @@ all_prof = profile_all(experiment, data, alpha=0.05)
 if not check_identifiability(exp, nominal).is_identifiable:
     # 2. Full diagnostic report with variance decomposition.
     diag = diagnose_identifiability(exp, nominal)
-    print(diag.summary())
+    # IdentifiabilityDiagnostics has no summary(); inspect the fields directly.
+    print(f"rank {diag.fim_rank}/{diag.n_parameters}, cond={diag.condition_number:.3g}")
+    print(f"condition indices: {diag.condition_indices}")
+    print(f"VIF: {diag.vif}")
+    for w in diag.warnings:
+        print(f"  warning: {w}")
+    print(f"null-space directions: {diag.null_space}")
 # 3. For each ambiguous parameter, profile it.
 prof = profile_likelihood(exp, data, "k")
-if prof.shape != "identifiable":
+if prof.shape != "bounded":
     # reparameterize or drop / fix the parameter
     ...
 ```
 
-## Context: Crucible Knowledge Base
+## Background Reading
 
-- `.crucible/wiki/concepts/identifiability-analysis.org` — overview of the three diagnostics and when to use each.
-- `.crucible/wiki/concepts/sloppy-models.org` — Gutenkunst spectrum interpretation.
-- `.crucible/wiki/methods/structural-identifiability.org` — algebraic / differential-geometric tests from the systems-biology literature.
-- `.crucible/wiki/methods/profile-likelihood-identifiability.org` — Raue methodology in depth.
-- `.crucible/wiki/methods/algebraic-model-identifiability.org` — closed-form identifiability for algebraic / regression models.
-- `.crucible/wiki/methods/identifiability-software.org` — comparison to DAISY, STRIKE-GOLDD, GenSSI, and others.
+For deeper background, consult the systems-biology and regression-diagnostics literature listed below (Belsley/Kuh/Welsch on collinearity diagnostics, Gutenkunst on the sloppy-model spectrum, Raue/Kreutz on profile likelihood). Structural-identifiability tooling (DAISY, STRIKE-GOLDD, GenSSI) is complementary to the FIM/profile-likelihood diagnostics in `discopt.doe`.
 
 ## Primary Literature
 
@@ -94,13 +99,13 @@ if prof.shape != "identifiable":
 - **"Which diagnostic should I run first?"** Start with `check_identifiability` (cheap, O(FIM rank)). If it flags anything, escalate to `diagnose_identifiability` for the variance-decomposition table, then `profile_likelihood` on each suspect parameter.
 - **"Is this structural or practical non-id?"** Run profile likelihood at several different data sizes (or simulated perfect data). Structural: the flat profile persists regardless of data. Practical: it sharpens as data grows.
 - **"My FIM is singular but I get finite CIs — what?"** The `EstimationResult.covariance` uses `np.linalg.pinv(FIM)` when inversion fails, which silently projects out null directions and can produce misleadingly-narrow CIs on identifiable components. Always cross-check with profile likelihood.
-- **"What counts as 'sloppy' in Gutenkunst's sense?"** The log-ratio of largest to smallest FIM eigenvalue. `diagnose_identifiability` reports this as `eigenvalue_range_log10`; values > 6 are classically "sloppy".
+- **"What counts as 'sloppy' in Gutenkunst's sense?"** The log-ratio of largest to smallest FIM eigenvalue. `diagnose_identifiability` reports the eigenvalue spectrum as `log_eigenvalue_spectrum` (log10 of the FIM eigenvalues, descending) and `normalized_log_spectrum` (log10(λ_k / λ_max), the Gutenkunst sloppy-model form). The span is `log_eigenvalue_spectrum[0] - log_eigenvalue_spectrum[-1]` (equivalently `-normalized_log_spectrum[-1]`); values > 6 are classically "sloppy".
 - **"Can I log-transform my parameter to make it identifiable?"** Reparameterizing `k → log k` changes the scaling; it can turn a sloppy direction aligned with `k` into a regular direction. It does NOT change structural identifiability. Profile likelihood in both parameterizations tells you which kind of problem you had.
 - **"Profile is non-monotone — what's wrong?"** Almost always the NLP at each grid step is getting stuck in local minima. Tighten bounds, improve initial guesses (use the previous step's estimate as warm start), reduce step size.
 
 ## When to Defer
 
 - **"Which subset of parameters can I estimate?"** → `estimability-expert`.
-- **"Fit parameters, not just analyze them"** → `estimation-expert`.
+- **"Fit parameters, not just analyze them"** → fit with `discopt.estimate.estimate_parameters` directly.
 - **"Design an experiment that makes θⱼ identifiable"** → `doe-expert`.
 - **"Compare two model structures"** → `model-discrimination-expert`.
