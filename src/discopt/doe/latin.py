@@ -205,6 +205,7 @@ def latin_square_design(
 
     The number of factors determines the design family:
 
+    * 1 factor  -> one-way layout
     * 2 factors -> randomized complete block (full k x k factorial)
     * 3 factors -> Latin square
     * 4 factors -> Graeco-Latin square

@@ -120,7 +120,11 @@ def sequential_doe(
     Returns
     -------
     list[DoERound]
-        History of all rounds.
+        History of all rounds. Each round estimates parameters *before*
+        collecting that round's data, so ``history[-1].estimation`` does not
+        include the final round's ``data_collected``. Re-run
+        :func:`~discopt.estimate.estimate_parameters` on the accumulated data
+        (or start another loop) if you need the fully-updated estimate.
     """
     if experiments_per_round < 1:
         raise ValueError(f"experiments_per_round must be >= 1, got {experiments_per_round}")

@@ -104,9 +104,10 @@ def fractional_factorial_design(
         MILP and substituted back into output rows.
     n_runs : int, optional
         Number of corner runs to keep (per replicate, excluding center
-        points). Must be a power of 2 in :math:`[k+1,\\, 2^k]`. Defaults
-        to the smallest power of 2 that is feasible for the requested
-        resolution (``max(k+1, 8)`` rounded up).
+        points). Must be a power of 2, at least the resolution-dependent
+        minimum, and strictly less than the full factorial :math:`2^k` (use
+        :func:`factorial_2level_design` for the full design). Defaults to the
+        smallest feasible power of 2 for the requested resolution.
     resolution : int, default 3
         Required resolution (3, 4, or 5). See module docstring.
     extra_pairs : list of (str, str), optional
@@ -330,9 +331,9 @@ def _solve_row_milp(
         # are products of ±1 so sums of constants are caught naturally.
         m.subject_to(sum(int(prod[r]) * x[r] for r in range(N)) == 0)
 
-    # Feasibility objective: minimize 0. The solver may need a real
-    # objective; use a deterministic small linear function in r so the
-    # solution is unique-up-to-ties.
+    # Pure feasibility problem: the constraints fully determine the generator
+    # column set, so the objective is a constant zero (any feasible point is
+    # accepted). Kept explicit because the solver requires an objective.
     m.minimize(sum(r * x[r] for r in range(N)) * 0.0)
 
     from discopt.modeling.core import SolveResult
