@@ -22,6 +22,8 @@ from discopt.doe import (
     compute_fim,
     explore_design_space,
     optimal_experiment,
+    project_to_simplex,
+    sum_constraint,
 )
 from discopt.estimate import Experiment, ExperimentModel
 
@@ -82,9 +84,80 @@ class TwoParamDesignExperiment(Experiment):
         )
 
 
+class MixtureExperiment(Experiment):
+    """y = a*x1 + b*x2 at mixture point (x1, x2). Estimate a and b."""
+
+    def create_model(self, **kwargs):
+        m = dm.Model("mixture")
+        a = m.continuous("a", lb=-20, ub=20)
+        b = m.continuous("b", lb=-20, ub=20)
+        x1 = m.continuous("x1", lb=0.0, ub=1.0)
+        x2 = m.continuous("x2", lb=0.0, ub=1.0)
+
+        return ExperimentModel(
+            model=m,
+            unknown_parameters={"a": a, "b": b},
+            design_inputs={"x1": x1, "x2": x2},
+            responses={"y": a * x1 + b * x2},
+            measurement_error={"y": 0.1},
+        )
+
+
 # ──────────────────────────────────────────────────────────
 # TestOptimalExperiment
 # ──────────────────────────────────────────────────────────
+
+
+class TestConstrainedOptimalExperiment:
+    """Regression: constrained designs must actually satisfy the constraints."""
+
+    def _bounds(self):
+        return {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}
+
+    def test_returns_feasible_via_slsqp_without_projection(self):
+        """Even with no feasible_projection, the result must satisfy the sum.
+
+        Previously the multi-start scan ranked by criterion only, and the
+        feasible SLSQP design was accepted only if it *beat* the infeasible
+        incumbent — so an infeasible design was returned.
+        """
+        exp = MixtureExperiment()
+        g = sum_constraint(["x1", "x2"], 1.0)
+        design = optimal_experiment(
+            exp,
+            {"a": 1.0, "b": 1.0},
+            self._bounds(),
+            equality_constraints=[g],
+        )
+        assert abs(design.design["x1"] + design.design["x2"] - 1.0) < 1e-4
+
+    def test_returns_feasible_with_projection(self):
+        from functools import partial
+
+        exp = MixtureExperiment()
+        g = sum_constraint(["x1", "x2"], 1.0)
+        design = optimal_experiment(
+            exp,
+            {"a": 1.0, "b": 1.0},
+            self._bounds(),
+            equality_constraints=[g],
+            feasible_projection=partial(
+                project_to_simplex, variables=["x1", "x2"], total=1.0
+            ),
+        )
+        assert abs(design.design["x1"] + design.design["x2"] - 1.0) < 1e-4
+
+    def test_no_feasible_seed_and_no_refine_raises(self):
+        exp = MixtureExperiment()
+        g = sum_constraint(["x1", "x2"], 1.0)
+        with pytest.raises(RuntimeError, match="feasible"):
+            optimal_experiment(
+                exp,
+                {"a": 1.0, "b": 1.0},
+                self._bounds(),
+                equality_constraints=[g],
+                local_refine=False,
+            )
 
 
 class TestOptimalExperiment:
