@@ -229,6 +229,26 @@ class TestSequentialDiscrimination:
         assert rounds[0].design is not None
         assert rounds[0].collected_data is None
 
+    def test_n_rounds_one_caller_driven_carries_design(self, kinetics_setup):
+        """n_rounds=1 in caller-driven mode must still propose a design.
+
+        Regression: budget exhaustion (k == n_rounds-1) was folded into the
+        early-stop branch, returning design=None for n_rounds=1.
+        """
+        first, second, initial_data, _ = kinetics_setup
+        rounds = sequential_discrimination(
+            experiments={"first": first, "second": second},
+            initial_data=initial_data,
+            design_bounds={"t": (0.5, 10.0), "C0": (0.5, 5.0)},
+            n_rounds=1,
+            run_experiment=None,
+            stop_when_dominant=2.0,
+            n_starts=3,
+            seed=0,
+        )
+        assert len(rounds) == 1
+        assert rounds[0].design is not None
+
     def test_stop_when_dominant(self, kinetics_setup):
         """If the stopping threshold is generous enough, the loop should
         stop early before n_rounds is reached."""
