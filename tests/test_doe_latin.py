@@ -249,6 +249,20 @@ def test_anova_aliased_design_raises():
             anova_report(rows, response="y", factors=["A", "B"])
 
 
+def test_anova_excludes_is_center_column():
+    """Auto factor detection must skip the is_center bookkeeping column."""
+    rows = [
+        {"A": -1, "is_center": 0, "y": 1.0},
+        {"A": 1, "is_center": 0, "y": 3.0},
+        {"A": -1, "is_center": 0, "y": 1.2},
+        {"A": 1, "is_center": 0, "y": 3.1},
+    ]
+    table = anova_report(rows, response="y")  # factors=None -> auto-detect
+    sources = [r.source for r in table.rows]
+    assert "is_center" not in sources
+    assert "A" in sources
+
+
 def test_anova_non_orthogonal_warns():
     """Correlated (non-proportional cross-tab) factors warn but still compute."""
     rows = [

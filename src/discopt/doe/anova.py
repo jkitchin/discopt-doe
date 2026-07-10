@@ -96,8 +96,16 @@ class AnovaTable:
         return self.summary()
 
 
-def _is_response_column(name: str) -> bool:
-    return name in {"replicate", "run_order"} or name.startswith("_")
+def _is_bookkeeping_column(name: str) -> bool:
+    """Columns excluded from automatic factor detection.
+
+    ``is_center`` marks center-point rows in factorial/fractional designs; if
+    treated as a factor it perfectly confounds with the mid-level of every
+    real factor and produces a wrong table. ``replicate``/``run_order`` are
+    likewise bookkeeping, not factors. ``effects_estimates`` excludes the same
+    set, so the two modules agree.
+    """
+    return name in {"replicate", "run_order", "is_center"} or name.startswith("_")
 
 
 def anova_report(
@@ -148,7 +156,7 @@ def anova_report(
         raise ValueError(f"response column {response!r} missing from rows")
 
     if factors is None:
-        candidates = [k for k in rows[0].keys() if k != response and not _is_response_column(k)]
+        candidates = [k for k in rows[0].keys() if k != response and not _is_bookkeeping_column(k)]
         if include_replicate and "replicate" in rows[0]:
             candidates.append("replicate")
         factors = candidates
