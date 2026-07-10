@@ -15,10 +15,9 @@ different question:
    append the batch to an Excel workbook for execution.
 
 2. **"Does this factor matter?"** — 2-level full and fractional factorial
-   screening designs {cite:p}`BoxHunter2005,Montgomery2017`, Plackett–Burman
-   designs {cite:p}`PlackettBurman1946`, signed main-effect estimates, and
-   ANOVA F-tables {cite:p}`Fisher1935`. Mixture designs
-   {cite:p}`Scheffe1958,Cornell2002` and Latin squares/hypercubes
+   screening designs {cite:p}`BoxHunter2005,Montgomery2017`, signed
+   main-effect estimates, and ANOVA F-tables {cite:p}`Fisher1935`. Mixture
+   designs {cite:p}`Scheffe1958,Cornell2002` and Latin / Graeco-Latin squares
    {cite:p}`Cochran1957` round out the classical toolbox.
 
 3. **"How precisely can I estimate the model parameters?"** — exact

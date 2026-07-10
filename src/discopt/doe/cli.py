@@ -1,6 +1,6 @@
 """``discopt doe`` — Excel-workbook-driven optimal experimental design.
 
-Five verbs make up the loop:
+Eight verbs make up the CLI:
 
 * ``discopt doe templates`` — list the available template models.
 * ``discopt doe new TEMPLATE [args] -o file.xlsx --n N`` — start a
@@ -9,8 +9,12 @@ Five verbs make up the loop:
   pending, and what to do next.
 * ``discopt doe fit file.xlsx`` — estimate parameters from completed
   runs and refresh the FIM.
+* ``discopt doe anova file.xlsx`` — ANOVA F-table for latin/factorial designs.
 * ``discopt doe extend file.xlsx --n M`` — append M more optimal runs
   using the cumulative FIM as the prior.
+* ``discopt doe optimize file.xlsx`` — one active-learning round on an
+  optimize-template workbook.
+* ``discopt doe gui file.xlsx`` — launch the Streamlit workbook GUI.
 
 Each verb is split into a pure ``do_<verb>(params: dict) -> dict``
 function and a ``_cmd_<verb>(args)`` argparse wrapper. The pure

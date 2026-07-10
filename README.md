@@ -13,8 +13,8 @@ Three complementary entry points:
    acquisition function (EI, UCB, steepest ascent), track everything in an
    Excel workbook.
 2. **"Does this factor matter?"** — classical designs: 2-level full/fractional
-   factorials, Plackett–Burman, mixture designs, Latin squares/hypercubes,
-   main-effect estimates, ANOVA.
+   factorials, mixture designs, Latin/Graeco-Latin squares, main-effect
+   estimates, ANOVA.
 3. **"How precisely can I estimate the model parameters?"** — model-based DoE:
    exact D/A/E-optimal design from the Fisher Information Matrix (JAX
    autodiff), identifiability/estimability diagnostics, profile likelihood,
@@ -108,7 +108,9 @@ discopt doe templates                 # list workbook templates
 discopt doe new linear -o run.xlsx --input T:300:400 --n 8
 discopt doe status run.xlsx
 discopt doe fit run.xlsx              # fit parameters to completed rows
+discopt doe anova run.xlsx           # ANOVA F-table (latin/factorial designs)
 discopt doe extend run.xlsx --n 4     # design the next batch
+discopt doe optimize run.xlsx        # one active-learning round (optimize template)
 discopt doe gui run.xlsx              # Streamlit GUI (needs [gui] extra)
 ```
 
