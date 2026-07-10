@@ -631,3 +631,42 @@ def test_cli_new_rejects_nonpositive_error(tmp_path, capsys):
     )
     assert args.doe_func(args) == 1
     assert not (tmp_path / "z.xlsx").exists()
+
+
+# ──────────────────────────────────────────────────────────────────
+# --json output is always valid JSON (issue #36)
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_json_new_factorial_is_valid_json(tmp_path, capsys):
+    """`new factorial-2level --json` embeds a NaN criterion_value; the emitted
+    JSON must still parse strictly (no bare NaN)."""
+    import argparse
+    import json
+
+    from discopt.doe.cli import add_subparser
+
+    top = argparse.ArgumentParser()
+    add_subparser(top.add_subparsers(dest="cmd"))
+    args = top.parse_args(
+        [
+            "doe",
+            "new",
+            "factorial-2level",
+            "-o",
+            str(tmp_path / "f.xlsx"),
+            "--factor",
+            "A:-1:1",
+            "--factor",
+            "B:-1:1",
+            "--json",
+        ]
+    )
+    assert args.doe_func(args) == 0
+    out = capsys.readouterr().out
+    # Strict parse: parse_constant fires on NaN/Infinity, so raise if present.
+    def _boom(x):
+        raise ValueError(f"non-finite literal {x!r} in JSON")
+
+    parsed = json.loads(out, parse_constant=_boom)
+    assert parsed["template"] == "factorial-2level"

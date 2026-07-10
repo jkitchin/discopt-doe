@@ -395,7 +395,7 @@ def do_templates(_params: dict[str, Any] | None = None) -> dict[str, Any]:
 def _cmd_templates(args) -> int:
     out = do_templates()
     if args.json:
-        print(json.dumps(out, indent=2))
+        print(_dump_json(out, indent=2))
     else:
         for entry in out["templates"]:
             print(f"{entry['name']}")
@@ -968,7 +968,7 @@ def _cmd_new(args) -> int:
     except (DoEError, ValueError, TypeError, FileNotFoundError, ImportError) as e:
         return _fail(args, str(e), workbook_path=str(output))
     if args.json:
-        print(json.dumps(out, indent=2))
+        print(_dump_json(out, indent=2))
     else:
         _print_new_human(out)
     return 0
@@ -1053,7 +1053,7 @@ def _cmd_status(args) -> int:
     except (FileNotFoundError, ValueError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
     if args.json:
-        print(json.dumps(out, indent=2))
+        print(_dump_json(out, indent=2))
     else:
         label = out["template"] or out["module_callable"] or "(unknown model)"
         print(f"{out['workbook_path']}")
@@ -1383,7 +1383,7 @@ def _cmd_fit(args) -> int:
     except (DoEError, FileNotFoundError, ValueError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
     if args.json:
-        print(json.dumps(out, indent=2))
+        print(_dump_json(out, indent=2))
     else:
         print(f"fit complete: {out['workbook_path']}")
         print(f"  observations: {out['n_observations']}")
@@ -1486,7 +1486,7 @@ def _cmd_anova(args) -> int:
     except (DoEError, FileNotFoundError, ValueError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
     if args.json:
-        print(json.dumps({k: v for k, v in out.items() if k != "summary"}, indent=2))
+        print(_dump_json({k: v for k, v in out.items() if k != "summary"}, indent=2))
     else:
         print(f"ANOVA on {out['workbook_path']}")
         print(f"  response:   {out['response']}")
@@ -1593,7 +1593,7 @@ def _cmd_extend(args) -> int:
     except (DoEError, FileNotFoundError, ValueError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
     if args.json:
-        print(json.dumps(out, indent=2))
+        print(_dump_json(out, indent=2))
     else:
         print(f"extended workbook: {out['workbook_path']}")
         new_ids = out["new_run_ids"]
@@ -1653,7 +1653,7 @@ def _cmd_optimize(args) -> int:
     for _w in out.get("warnings", []):
         print(f"warning: {_w}", file=sys.stderr)
     if args.json:
-        print(json.dumps(out, indent=2, default=str))
+        print(_dump_json(out, indent=2, default=str))
     else:
         print(f"optimized workbook: {out['workbook_path']}")
         print(
@@ -1699,12 +1699,36 @@ def _cmd_gui(args) -> int:
 # ──────────────────────────────────────────────────────────────────
 
 
+def _sanitize_json(obj: Any) -> Any:
+    """Replace non-finite floats (NaN, +/-inf) with None, recursively.
+
+    ``json.dumps`` emits the literals ``NaN``/``Infinity`` by default, which
+    are invalid JSON that ``jq`` and strict parsers reject. DoE outputs contain
+    NaN criterion values (factorial/latin `new`) and -inf log-dets, so sanitize
+    before dumping.
+    """
+    import math as _math
+
+    if isinstance(obj, float):
+        return obj if _math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_json(v) for v in obj]
+    return obj
+
+
+def _dump_json(obj: Any, **kwargs: Any) -> str:
+    """``json.dumps`` that never emits NaN/Infinity (invalid JSON)."""
+    return json.dumps(_sanitize_json(obj), allow_nan=False, **kwargs)
+
+
 def _fail(args, msg: str, *, workbook_path: str | None = None) -> int:
     if getattr(args, "json", False):
         payload: dict[str, Any] = {"error": msg}
         if workbook_path is not None:
             payload["workbook_path"] = workbook_path
-        print(json.dumps(payload, indent=2), file=sys.stdout)
+        print(_dump_json(payload, indent=2), file=sys.stdout)
     else:
         print(f"error: {msg}", file=sys.stderr)
     return 1
