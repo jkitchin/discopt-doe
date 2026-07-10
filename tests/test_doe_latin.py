@@ -230,6 +230,41 @@ def test_anova_unbalanced_warns():
     assert table.balanced is False
 
 
+def test_anova_aliased_design_raises():
+    """Marginally balanced but perfectly aliased factors -> negative residual.
+
+    Regression: A and B are fully confounded, so each marginal main-effect SS
+    equals the total SS and the implied residual is negative. The per-factor
+    balance check passes, so this must be caught by the orthogonality/residual
+    guard rather than printing a nonsensical table.
+    """
+    rows = [
+        {"A": 0, "B": 0, "y": 0.0},
+        {"A": 0, "B": 0, "y": 0.0},
+        {"A": 1, "B": 1, "y": 2.0},
+        {"A": 1, "B": 1, "y": 2.0},
+    ]
+    with pytest.raises(ValueError, match="negative residual|orthogonal"):
+        with pytest.warns(UserWarning):
+            anova_report(rows, response="y", factors=["A", "B"])
+
+
+def test_anova_non_orthogonal_warns():
+    """Correlated (non-proportional cross-tab) factors warn but still compute."""
+    rows = [
+        {"A": 0, "B": 0, "y": 0.0},
+        {"A": 0, "B": 0, "y": 2.0},
+        {"A": 0, "B": 1, "y": 1.0},
+        {"A": 1, "B": 0, "y": 1.0},
+        {"A": 1, "B": 1, "y": 8.0},
+        {"A": 1, "B": 1, "y": 10.0},
+    ]
+    with pytest.warns(UserWarning, match="not orthogonal"):
+        table = anova_report(rows, response="y", factors=["A", "B"])
+    by_source = {r.source: r for r in table.rows}
+    assert by_source["Residual"].ss >= 0.0
+
+
 # ──────────────────────────────────────────────────────────────────
 # CLI / workbook round-trip
 # ──────────────────────────────────────────────────────────────────
