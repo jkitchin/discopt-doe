@@ -668,6 +668,18 @@ def _validate_inputs(
         )
     if not design_bounds:
         raise ValueError("design_bounds must be non-empty")
+    # Every design_bounds key must be a design input of every candidate model;
+    # otherwise the optimizer scans a variable no model consumes and returns an
+    # arbitrary "optimal" design (the docstring says keys must be a subset of
+    # every model's design inputs).
+    for name, exp in experiments.items():
+        inputs = set(exp.create_model(**param_estimates[name]).design_inputs)
+        unknown = [k for k in design_bounds if k not in inputs]
+        if unknown:
+            raise ValueError(
+                f"design_bounds key(s) {unknown} are not design inputs of model "
+                f"{name!r} (its design inputs are {sorted(inputs)})."
+            )
 
 
 def _normalise_priors(priors: dict[str, float] | None, model_names: list[str]) -> dict[str, float]:

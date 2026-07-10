@@ -248,6 +248,18 @@ def compute_fim(
     # Build the model at nominal parameter values
     em = experiment.create_model(**param_values)
 
+    # Reject unknown design_values keys. Silently ignoring them (e.g. a typo
+    # like "temperture") would leave the real design input free and compute the
+    # FIM at an arbitrary point -- worse than a crash, since it propagates
+    # meaningless "optima" through optimal_experiment.
+    if design_values:
+        unknown = [name for name in design_values if name not in em.design_inputs]
+        if unknown:
+            raise ValueError(
+                f"unknown design input(s) {unknown} in design_values; "
+                f"model design inputs are {sorted(em.design_inputs)}."
+            )
+
     # Fast path: for a pure explicit response model (no constraints; every
     # variable is an unknown parameter or a design input) the solution point
     # x* is fully determined by the nominal parameters and the fixed design.

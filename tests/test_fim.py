@@ -474,3 +474,26 @@ class TestSolveFreeAndBatch:
                 )
 
         assert _make_direct_fim_evaluator(ConstrainedExp(), {"k": 1.0}) is None
+
+
+class _DesignInputExperiment(Experiment):
+    """y = k * x, with x a design input."""
+
+    def create_model(self, **kwargs):
+        m = dm.Model("designed")
+        k = m.continuous("k", lb=0.01, ub=20)
+        x = m.continuous("x", lb=0.0, ub=5.0)
+        return ExperimentModel(
+            model=m,
+            unknown_parameters={"k": k},
+            design_inputs={"x": x},
+            responses={"y": k * x},
+            measurement_error={"y": 0.1},
+        )
+
+
+def test_compute_fim_rejects_unknown_design_key():
+    """A typo'd design key must error, not silently float the real input."""
+    exp = _DesignInputExperiment()
+    with pytest.raises(ValueError, match="unknown design input"):
+        compute_fim(exp, {"k": 2.0}, {"temperture": 1.0})

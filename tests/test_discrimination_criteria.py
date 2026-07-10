@@ -350,6 +350,10 @@ class TestValidation:
         with pytest.raises(ValueError, match="non-empty"):
             discriminate_design(EXPS, PE, {})
 
+    def test_unknown_design_bound_key_raises(self):
+        with pytest.raises(ValueError, match="not design inputs"):
+            discriminate_design(EXPS, PE, {"temperture": (0.0, 2.0)})
+
     def test_dt_not_callable_as_plain_criterion(self):
         with pytest.raises(ValueError, match="discriminate_compound"):
             discriminate_design(EXPS, PE, BOUNDS, criterion=DiscriminationCriterion.DT)
