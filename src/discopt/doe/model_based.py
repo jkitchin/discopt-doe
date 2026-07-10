@@ -507,11 +507,18 @@ def model_based_optimize_round(
     sign, logdet = np.linalg.slogdet(real_fim)
     fim_log_det = float(logdet) if sign > 0 else float("-inf")
 
+    acq_name = acquisition if isinstance(acquisition, str) else acq_fn.__name__
+    log_lines = [
+        f"fit {len(real_parameter_names)} parameter(s) on {len(completed)} completed run(s)",
+        f"criterion={crit.value}, acquisition={acq_name}, batch_size={int(batch_size)}",
+        f"recommended runs {new_run_ids}",
+        f"fim_log_det={fim_log_det:.6g}",
+    ]
     wb.log(
         "model_based_optimize",
         {
             "criterion": crit.value,
-            "acquisition": acquisition if isinstance(acquisition, str) else acq_fn.__name__,
+            "acquisition": acq_name,
             "batch_size": int(batch_size),
             "n_completed": len(completed),
             "fim_log_det": fim_log_det,
@@ -531,6 +538,7 @@ def model_based_optimize_round(
         parameters=real_parameters,
         parameter_se=parameter_se,
         fim_log_det=fim_log_det,
+        log=log_lines,
     )
 
 

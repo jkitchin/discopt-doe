@@ -147,6 +147,12 @@ def steepest_ascent(
     return int(direction) * (mu - float(y_best))
 
 
+# Note: "ucb" and "lcb" both resolve to the *direction-aware* confidence_bound
+# wrapper, which picks upper (maximize) or lower (minimize) from the round's
+# direction. So under maximization "lcb" still computes the UCB (and vice
+# versa) -- the names are aliases for "confidence bound", not a hard choice of
+# upper vs lower. Use the raw upper_confidence_bound / lower_confidence_bound
+# callables directly if you need a fixed side.
 ACQUISITIONS: dict[str, Callable[..., np.ndarray]] = {
     "expected_improvement": expected_improvement,
     "ei": expected_improvement,

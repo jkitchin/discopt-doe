@@ -1132,7 +1132,17 @@ def _cmd_status(args) -> int:
         label = out["template"] or out["module_callable"] or "(unknown model)"
         print(f"{out['workbook_path']}")
         print(f"  model:       {label}")
-        inputs_str = ", ".join(f"{s['name']} in [{s['lb']}, {s['ub']}]" for s in out["input_specs"])
+        # For combinatorial designs the factors are categorical/level-based;
+        # show the actual levels instead of the synthesized numeric bounds
+        # (which would misleadingly print e.g. 'treatment in [0.0, 3.0]').
+        levels = (out.get("template_args") or {}).get("levels") or {}
+        parts = []
+        for s in out["input_specs"]:
+            if s["name"] in levels:
+                parts.append(f"{s['name']} in {{{', '.join(map(str, levels[s['name']]))}}}")
+            else:
+                parts.append(f"{s['name']} in [{s['lb']}, {s['ub']}]")
+        inputs_str = ", ".join(parts)
         print(f"  inputs:      {inputs_str}")
         print(f"  response:    {out['response_name']}")
         print(
@@ -2191,11 +2201,13 @@ __all__ = [
     "DoEError",
     "ExtendParams",
     "NewParams",
+    "OptimizeParams",
     "add_subparser",
     "do_anova",
     "do_extend",
     "do_fit",
     "do_new",
+    "do_optimize",
     "do_status",
     "do_templates",
     "run",

@@ -24,8 +24,8 @@ Sheets
     :meth:`Workbook.rebuild_experiment`.
 
 ``parameters``
-    Written by ``fit`` and ``extend``. Columns: ``name``, ``estimate``,
-    ``std_error``, ``ci_lower_95``, ``ci_upper_95``, ``updated_at``.
+    Written by ``fit``. Columns: ``name``, ``estimate``, ``std_error``,
+    ``ci_lower_95``, ``ci_upper_95``, ``updated_at``.
 
 ``fim``
     The latest cumulative Fisher Information Matrix, labelled
