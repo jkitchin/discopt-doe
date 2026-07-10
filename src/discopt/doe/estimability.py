@@ -35,6 +35,7 @@ parameterization itself is in question.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from itertools import combinations
 from typing import Literal
@@ -100,14 +101,25 @@ def _scaled_sensitivity(
         L = np.linalg.cholesky(Sigma)
         J_weighted = scipy.linalg.solve_triangular(L, J, lower=True)
 
-    eps = np.finfo(np.float64).eps
-    scales = np.array(
-        [
-            (abs(float((parameter_scales or {}).get(name, param_values[name]))) or eps)
-            for name in names
-        ],
-        dtype=np.float64,
-    )
+    # Parameter-axis scales. A nominal value of 0 (common for offsets) has no
+    # meaningful magnitude scale; the old ``abs(...) or eps`` fallback used
+    # machine-eps, which zeroed that parameter's Z column and always ranked it
+    # unestimable regardless of its true sensitivity. Fall back to 1.0 with a
+    # warning instead so the QR sees the real sensitivity.
+    scales_list: list[float] = []
+    for name in names:
+        override = (parameter_scales or {}).get(name)
+        s = abs(float(override)) if override is not None else abs(float(param_values[name]))
+        if s == 0.0:
+            warnings.warn(
+                f"parameter {name!r} has scale 0 (nominal value 0 and no "
+                "parameter_scales override); using 1.0. Pass parameter_scales "
+                "for a meaningful axis scale.",
+                stacklevel=2,
+            )
+            s = 1.0
+        scales_list.append(s)
+    scales = np.array(scales_list, dtype=np.float64)
     Z = J_weighted * scales[np.newaxis, :]
     return Z, names
 
@@ -138,9 +150,14 @@ def estimability_rank(
     design_values : dict[str, float], optional
         Fixed design conditions.
     cutoff : float, default 0.04
-        Relative cutoff for the recommended subset. A parameter is
-        included if ``|R_kk| / |R_11| >= cutoff``. The default 0.04 is
-        Yao's rule of thumb.
+        Cutoff for the recommended subset. A parameter is included if
+        ``|R_kk| / |R_11| >= cutoff`` -- a *relative* (scale-invariant)
+        variant of Yao's rule, thresholding each projected column against the
+        largest pivot rather than against an absolute value. Yao et al. (2003)
+        apply the 0.04 threshold to the projected magnitude ``|R_kk|`` itself;
+        the two agree only when ``|R_11| ~ 1`` (well-scaled Z). The 0.04
+        default is carried over as a rule of thumb; adjust it if you rely on
+        the absolute Yao criterion.
     parameter_scales : dict[str, float], optional
         Override parameter-axis scales ``s_theta``. Defaults to
         ``|param_values|``.
