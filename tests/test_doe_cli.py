@@ -670,3 +670,26 @@ def test_json_new_factorial_is_valid_json(tmp_path, capsys):
 
     parsed = json.loads(out, parse_constant=_boom)
     assert parsed["template"] == "factorial-2level"
+
+
+# ──────────────────────────────────────────────────────────────────
+# Column-name collision validation (issue #40)
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_input_named_like_response_rejected(tmp_path):
+    """An input named 'y' would collide with the default response column."""
+    with pytest.raises(DoEError, match="reserved"):
+        do_new(_new_params(tmp_path, template="linear", inputs=[("y", 0.0, 1.0)], n=2))
+
+
+def test_duplicate_input_names_rejected(tmp_path):
+    with pytest.raises(DoEError, match="duplicate"):
+        do_new(
+            _new_params(
+                tmp_path,
+                template="linear",
+                inputs=[("x", 0.0, 1.0), ("x", 2.0, 3.0)],
+                n=2,
+            )
+        )

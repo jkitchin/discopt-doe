@@ -408,9 +408,39 @@ def _cmd_templates(args) -> int:
 # ──────────────────────────────────────────────────────────────────
 
 
+def _validate_new_column_names(params: NewParams) -> None:
+    """Reject duplicate factor/input names or collisions with reserved columns.
+
+    Runs before any design work so all templates fail with the same clear
+    message instead of an opaque downstream error (or silent corruption).
+    """
+    from discopt.doe.templates import COMBINATORIAL_TEMPLATES
+
+    if params.template == "factorial-2level":
+        names = list((params.factor_pairs or {}).keys())
+    elif params.template in COMBINATORIAL_TEMPLATES:
+        names = list((params.levels or {}).keys())
+    else:
+        names = [s[0] for s in params.inputs]
+
+    reserved = {"run_id", "batch", "measured_at", "replicate", params.response_name}
+    seen: set[str] = set()
+    for name in names:
+        if name in reserved:
+            raise DoEError(
+                f"column name {name!r} is reserved (response is "
+                f"{params.response_name!r}); rename the input/factor."
+            )
+        if name in seen:
+            raise DoEError(f"duplicate factor/input name {name!r}; names must be unique.")
+        seen.add(name)
+
+
 def do_new(params: NewParams) -> dict[str, Any]:
     from discopt.doe import batch_optimal_experiment
     from discopt.doe.templates import COMBINATORIAL_TEMPLATES
+
+    _validate_new_column_names(params)
 
     if params.template == "factorial-2level":
         return _do_new_factorial(params)

@@ -212,6 +212,23 @@ class Workbook:
         _require_openpyxl()
         from openpyxl import Workbook as _OpenpyxlWorkbook
 
+        # Validate column names up front: duplicates or collisions with the
+        # reserved/bookkeeping columns silently corrupt the runs sheet
+        # (dict(zip(headers, row)) keeps only the last duplicate, so reads pick
+        # the wrong column).
+        reserved = {"run_id", "batch", "measured_at", response_name}
+        input_names = [s.name for s in input_specs]
+        seen: set[str] = set()
+        for name in [*input_names, *extra_columns]:
+            if name in reserved:
+                raise ValueError(
+                    f"column name {name!r} is reserved (response is "
+                    f"{response_name!r}); rename the input/factor."
+                )
+            if name in seen:
+                raise ValueError(f"duplicate column name {name!r}; names must be unique.")
+            seen.add(name)
+
         path = Path(path)
         wb = _OpenpyxlWorkbook()
         # Remove default sheet
