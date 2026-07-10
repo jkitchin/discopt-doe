@@ -390,14 +390,54 @@ class Workbook:
             next_id += 1
         return new_ids
 
+    def _cached_runs_rows(self) -> list[list[Any]]:
+        """On-disk *computed* values of the runs sheet (Excel formula results).
+
+        openpyxl returns the formula *text* for formula cells unless the
+        workbook is opened with ``data_only=True``, which reads the value
+        Excel cached when it last saved the file. We keep the ordinary
+        (formula-preserving) handle for writing and consult this view only to
+        resolve formula cells, so user-entered formulas survive round-trips.
+        """
+        from openpyxl import load_workbook
+
+        dwb = load_workbook(self.path, data_only=True)
+        sheet = dwb[SHEET_RUNS]
+        return [list(r) for r in sheet.iter_rows(min_row=2, values_only=True)]
+
     def all_runs(self) -> list[dict[str, Any]]:
-        """Return every run as a dict (including pending rows)."""
+        """Return every run as a dict (including pending rows).
+
+        Formula cells (e.g. a response entered as ``=AVERAGE(...)`` in Excel)
+        are resolved to their cached computed values. A formula in the
+        response column with no stored value raises a clear error rather than
+        being silently treated as a pending run.
+        """
         sheet = self._wb[SHEET_RUNS]
         headers = self._runs_headers()
+        response = self.response_name()
+        resp_idx = headers.index(response) if response in headers else None
+        cached_rows: list[list[Any]] | None = None
         out: list[dict[str, Any]] = []
-        for row in sheet.iter_rows(min_row=2, values_only=True):
+        for r_i, row in enumerate(sheet.iter_rows(min_row=2, values_only=True)):
             if not row or row[0] is None:
                 continue
+            row = list(row)
+            for c_i, val in enumerate(row):
+                if not (isinstance(val, str) and val.startswith("=")):
+                    continue
+                if cached_rows is None:
+                    cached_rows = self._cached_runs_rows()
+                cached = cached_rows[r_i][c_i] if r_i < len(cached_rows) else None
+                if cached is None and c_i == resp_idx:
+                    raise ValueError(
+                        f"run {row[0]}: response cell {headers[c_i]!r} contains "
+                        f"the formula {val!r} but no computed value is stored. "
+                        "Open the workbook in Excel/LibreOffice and save it so "
+                        "the formula is evaluated, or enter a numeric value "
+                        "directly."
+                    )
+                row[c_i] = cached
             out.append(dict(zip(headers, row)))
         return out
 

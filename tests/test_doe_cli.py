@@ -490,3 +490,65 @@ def test_do_optimize_explicit_override_warns(tmp_path):
 
     assert out["criterion"] == "maximize"
     assert any("criterion overridden" in w for w in out["warnings"])
+
+
+# ──────────────────────────────────────────────────────────────────
+# Excel formula cells in the response column (issue #2)
+# ──────────────────────────────────────────────────────────────────
+
+
+def _formula_workbook(tmp_path):
+    out = do_new(_new_params(tmp_path, template="linear", inputs=[("x", 0.0, 10.0)], n=3))
+    return Path(out["workbook_path"])
+
+
+def test_formula_response_without_cached_value_raises(tmp_path):
+    """A response formula openpyxl can't resolve is a loud error, not a drop.
+
+    Regression for the P0 bug where '=AVERAGE(...)' in a response cell was
+    silently classified as a pending run and dropped from fit/anova/optimize.
+    """
+    wb_path = _formula_workbook(tmp_path)
+    book = openpyxl.load_workbook(wb_path)
+    runs = book["runs"]
+    headers = [c.value for c in runs[1]]
+    resp_col = headers.index("y") + 1
+    for r in runs.iter_rows(min_row=2):
+        if r[0].value is None:
+            continue
+        r[resp_col - 1].value = "=AVERAGE(1,2)"
+        break
+    book.save(wb_path)
+
+    with pytest.raises(ValueError, match="formula"):
+        Workbook.open(wb_path).completed_runs()
+
+
+def test_formula_response_with_cached_value_is_read(tmp_path, monkeypatch):
+    """A response formula with an Excel-cached value is read as that value."""
+    wb_path = _formula_workbook(tmp_path)
+    book = openpyxl.load_workbook(wb_path)
+    runs = book["runs"]
+    headers = [c.value for c in runs[1]]
+    resp_col = headers.index("y") + 1
+    data_rows = [r for r in runs.iter_rows(min_row=2) if r[0].value is not None]
+    for r in data_rows[:-1]:
+        r[resp_col - 1].value = 5.0
+    data_rows[-1][resp_col - 1].value = "=1+2"  # Excel would cache 3.0
+    book.save(wb_path)
+
+    # Stub the data_only view as if Excel had computed the formula: read the
+    # formula-preserving rows and substitute the cached result.
+    def fake(self):
+        sheet = self._wb["runs"]
+        rows = [list(r) for r in sheet.iter_rows(min_row=2, values_only=True)]
+        for row in rows:
+            for j, v in enumerate(row):
+                if isinstance(v, str) and v.startswith("="):
+                    row[j] = 3.0
+        return rows
+
+    monkeypatch.setattr(Workbook, "_cached_runs_rows", fake)
+
+    completed = Workbook.open(wb_path).completed_runs()
+    assert sorted(float(r["y"]) for r in completed) == [3.0, 5.0, 5.0]
