@@ -60,6 +60,49 @@ def test_parametric_surrogate_recovers_quadratic():
     assert abs(s.parameters_["b2"] - (-1.0)) < 0.1
 
 
+def test_parametric_surrogate_underdetermined_raises():
+    """Fewer runs than parameters gives a clear error, not an obscure scipy one.
+
+    Regression: method='lm' raised 'Method lm doesn't work when the number of
+    residuals is less than the number of variables'.
+    """
+    exp = polynomial_1d_template(("x", -5.0, 5.0), degree=2, measurement_error=0.05)
+    s = ParametricSurrogate(exp, input_names=["x"], response_name="y")
+    xs = np.array([[-1.0], [1.0]])  # 2 points, 3 parameters
+    ys = np.array([1.0, 2.0])
+    with pytest.raises(ValueError, match="at least 3"):
+        s.fit(xs, ys)
+
+
+def test_parametric_surrogate_respects_parameter_bounds():
+    """The fitted parameter stays within its declared model bounds.
+
+    Regression: method='lm' ignored bounds; a bounded parameter could be
+    fit to a nonphysical value. y = a*x with a in [0, 1], truth a = 5.
+    """
+    import discopt.modeling as dm
+    from discopt.estimate import Experiment, ExperimentModel
+
+    class BoundedSlope(Experiment):
+        def create_model(self, **kwargs):
+            m = dm.Model("bounded")
+            a = m.continuous("a", lb=0.0, ub=1.0)
+            x = m.continuous("x", lb=-5.0, ub=5.0)
+            return ExperimentModel(
+                model=m,
+                unknown_parameters={"a": a},
+                design_inputs={"x": x},
+                responses={"y": a * x},
+                measurement_error={"y": 0.1},
+            )
+
+    s = ParametricSurrogate(BoundedSlope(), input_names=["x"], response_name="y")
+    xs = np.linspace(1.0, 5.0, 6)[:, None]
+    ys = 5.0 * xs.ravel()  # true slope 5, far outside [0, 1]
+    s.fit(xs, ys)
+    assert 0.0 - 1e-9 <= s.parameters_["a"] <= 1.0 + 1e-9
+
+
 def test_parametric_surrogate_predict_returns_mean_and_std():
     exp = polynomial_1d_template(("x", -5.0, 5.0), degree=2, measurement_error=0.1)
     rng = np.random.default_rng(1)

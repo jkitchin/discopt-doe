@@ -221,6 +221,16 @@ class ParametricSurrogate:
             )
         self.parameter_names_ = list(em.unknown_parameters.keys())
 
+        # Parameter box bounds (for the bounded least-squares solver), aligned
+        # with parameter_names_. Missing bounds fall back to +/- inf.
+        self.parameter_bounds_ = [
+            (
+                float(getattr(em.unknown_parameters[n], "lb", -np.inf)),
+                float(getattr(em.unknown_parameters[n], "ub", np.inf)),
+            )
+            for n in self.parameter_names_
+        ]
+
         # Flat offsets for every variable in the model.
         slices = variable_slices(em.model)
         n_x = max((sl.stop for sl in slices.values()), default=0)
@@ -270,6 +280,15 @@ class ParametricSurrogate:
         if X.shape[1] != len(self.input_names):
             raise ValueError(f"X has {X.shape[1]} columns but {len(self.input_names)} input names")
 
+        n_obs = X.shape[0]
+        n_par = self._n_params
+        if n_obs < n_par:
+            raise ValueError(
+                f"cannot fit {n_par} parameter(s) from {n_obs} completed run(s): "
+                f"need at least {n_par}. Complete more runs before designing the "
+                "next batch."
+            )
+
         theta0 = np.array(
             [float(self.initial_guess.get(n, 1.0)) for n in self.parameter_names_],
             dtype=float,
@@ -277,6 +296,12 @@ class ParametricSurrogate:
         # Warm-start from the previous fit when available.
         if self.parameters_ is not None:
             theta0 = np.array([self.parameters_[n] for n in self.parameter_names_], dtype=float)
+
+        # Clip the (possibly warm-started) guess strictly inside the bounds so
+        # the bounded solver accepts it.
+        lb = np.array([b[0] for b in self.parameter_bounds_], dtype=float)
+        ub = np.array([b[1] for b in self.parameter_bounds_], dtype=float)
+        theta0 = np.clip(theta0, lb, ub)
 
         D = jnp.asarray(X, dtype=jnp.float64)
         Y = jnp.asarray(y, dtype=jnp.float64)
@@ -287,7 +312,10 @@ class ParametricSurrogate:
         def f_jac(theta: np.ndarray) -> np.ndarray:
             return np.asarray(self._residuals_jac(jnp.asarray(theta), D, Y), dtype=float)
 
-        res = least_squares(f_resid, theta0, jac=f_jac, method="lm")
+        # 'trf' (not 'lm') so the declared parameter bounds are respected and
+        # the solver works when n_obs < n_params would otherwise be needed;
+        # 'lm' supports neither.
+        res = least_squares(f_resid, theta0, jac=f_jac, method="trf", bounds=(lb, ub))
         theta_hat = np.asarray(res.x, dtype=float)
 
         J = np.asarray(self._jac_batch(D, jnp.asarray(theta_hat)), dtype=float)
