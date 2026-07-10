@@ -693,3 +693,26 @@ def test_duplicate_input_names_rejected(tmp_path):
                 n=2,
             )
         )
+
+
+def test_fit_blank_input_gives_actionable_error(tmp_path):
+    """A completed row with a blanked input errors clearly, not a raw traceback.
+
+    Regression for issue #41 (float(None) TypeError surfaced as a stack trace).
+    """
+    out = do_new(_new_params(tmp_path, template="linear", inputs=[("x", 0.0, 10.0)], n=3))
+    wb_path = Path(out["workbook_path"])
+    book = openpyxl.load_workbook(wb_path)
+    runs = book["runs"]
+    headers = [c.value for c in runs[1]]
+    x_idx = headers.index("x")
+    y_idx = headers.index("y")
+    for row in runs.iter_rows(min_row=2):
+        if row[0].value is None:
+            continue
+        row[y_idx].value = 1.0  # mark completed
+        row[x_idx].value = None  # but blank the input
+    book.save(wb_path)
+
+    with pytest.raises(DoEError, match="blank value for input"):
+        do_fit({"workbook": str(wb_path)})

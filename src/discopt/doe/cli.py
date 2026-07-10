@@ -1147,6 +1147,18 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
     n_p = len(parameter_names)
     n_obs = len(completed)
 
+    # A completed row (non-blank response) with a blanked-out input would raise
+    # a bare TypeError from float(None) deep in the design-matrix build; give an
+    # actionable message naming the run and column instead.
+    for row in completed:
+        for nm in input_names:
+            v = row.get(nm)
+            if v is None or (isinstance(v, str) and not v.strip()):
+                raise DoEError(
+                    f"run {row.get('run_id')} has a blank value for input {nm!r}; "
+                    "fill it in (or clear the response to mark the run pending)."
+                )
+
     X = np.array(
         [
             _design_row(template, wb.template_args(), parameter_names, input_names, row)
@@ -1410,7 +1422,7 @@ def _design_row(
 def _cmd_fit(args) -> int:
     try:
         out = do_fit({"workbook": args.workbook})
-    except (DoEError, FileNotFoundError, ValueError) as e:
+    except (DoEError, FileNotFoundError, OSError, ValueError, TypeError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
     if args.json:
         print(_dump_json(out, indent=2))
@@ -1513,7 +1525,7 @@ def _cmd_anova(args) -> int:
                 "interactions": interactions,
             }
         )
-    except (DoEError, FileNotFoundError, ValueError) as e:
+    except (DoEError, FileNotFoundError, OSError, ValueError, TypeError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
     if args.json:
         print(_dump_json({k: v for k, v in out.items() if k != "summary"}, indent=2))
@@ -1620,7 +1632,7 @@ def _cmd_extend(args) -> int:
                 n_starts=int(args.n_starts),
             )
         )
-    except (DoEError, FileNotFoundError, ValueError) as e:
+    except (DoEError, FileNotFoundError, OSError, ValueError, TypeError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
     if args.json:
         print(_dump_json(out, indent=2))
@@ -1678,7 +1690,7 @@ def _cmd_optimize(args) -> int:
                 custom_surrogate_kwargs=custom_kwargs,
             )
         )
-    except (DoEError, FileNotFoundError, ValueError) as e:
+    except (DoEError, FileNotFoundError, OSError, ValueError, TypeError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
     for _w in out.get("warnings", []):
         print(f"warning: {_w}", file=sys.stderr)
