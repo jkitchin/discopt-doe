@@ -61,30 +61,114 @@ class LatinDesign:
         return len(self.rows)
 
 
-def _mols_prime_power(k: int) -> list[list[list[int]]]:
-    """Return k-1 mutually orthogonal Latin squares of order ``k``.
+def _prime_power(k: int) -> tuple[int, int] | None:
+    """Return ``(p, m)`` if ``k == p**m`` for a prime ``p``, else ``None``."""
+    if k < 2:
+        return None
+    for p in range(2, k + 1):
+        if k % p == 0:
+            if not _is_prime(p):
+                return None  # smallest factor isn't prime -> composite base
+            n, m = k, 0
+            while n % p == 0:
+                n //= p
+                m += 1
+            return (p, m) if n == 1 else None
+    return None
 
-    Only handles k where Z_k is a field (k prime) or where we ship a
-    hardcoded MOLS table (k = 4). For other k we fall back to the
-    cyclic Z_k construction which is correct for prime k but only
-    produces non-orthogonal squares otherwise — the caller must check.
+
+def _find_irreducible(p: int, m: int) -> list[int]:
+    """Coefficients ``c0..c_{m-1}`` of a monic degree-``m`` irreducible over GF(p).
+
+    Uses the no-linear-factor test, which is a correct irreducibility criterion
+    only for degree <= 3, so callers restrict GF construction to ``m <= 3``.
+    """
+    for x in range(p**m):
+        coeffs = []
+        t = x
+        for _ in range(m):
+            coeffs.append(t % p)
+            t //= p
+        has_root = False
+        for r in range(p):
+            val = pow(r, m, p)
+            for i in range(m):
+                val = (val + coeffs[i] * pow(r, i, p)) % p
+            if val == 0:
+                has_root = True
+                break
+        if not has_root:
+            return coeffs
+    raise ValueError(f"no irreducible polynomial of degree {m} over GF({p})")
+
+
+def _gf_mols(p: int, m: int) -> list[list[list[int]]]:
+    """``q-1`` MOLS of order ``q = p**m`` via GF(q) arithmetic.
+
+    Field elements are integers ``0..q-1`` whose base-``p`` digits are the
+    polynomial coefficients. ``L_a[i][j] = a*i + j`` over GF(q) for
+    ``a = 1..q-1`` gives ``q-1`` mutually orthogonal Latin squares.
+    """
+    q = p**m
+    if m == 1:
+        def add(a: int, b: int) -> int:
+            return (a + b) % p
+
+        def mul(a: int, b: int) -> int:
+            return (a * b) % p
+    else:
+        irr = _find_irreducible(p, m)
+
+        def _digits(x: int) -> list[int]:
+            out = []
+            for _ in range(m):
+                out.append(x % p)
+                x //= p
+            return out
+
+        def _to_int(c: list[int]) -> int:
+            x = 0
+            for d in reversed(c[:m]):
+                x = x * p + (d % p)
+            return x
+
+        def add(a: int, b: int) -> int:
+            ca, cb = _digits(a), _digits(b)
+            return _to_int([(ca[i] + cb[i]) % p for i in range(m)])
+
+        def mul(a: int, b: int) -> int:
+            ca, cb = _digits(a), _digits(b)
+            prod = [0] * (2 * m)
+            for i in range(m):
+                for j in range(m):
+                    prod[i + j] = (prod[i + j] + ca[i] * cb[j]) % p
+            # Reduce modulo x^m = -sum irr[i] x^i.
+            for d in range(2 * m - 1, m - 1, -1):
+                coeff = prod[d]
+                if coeff:
+                    prod[d] = 0
+                    for i in range(m):
+                        prod[d - m + i] = (prod[d - m + i] - coeff * irr[i]) % p
+            return _to_int(prod)
+
+    return [[[add(mul(a, i), j) for j in range(q)] for i in range(q)] for a in range(1, q)]
+
+
+def _mols_prime_power(k: int) -> list[list[list[int]]]:
+    """Return ``k-1`` mutually orthogonal Latin squares of order ``k``.
+
+    Constructs a full set of MOLS via GF(k) arithmetic for prime-power orders
+    with exponent <= 3 (primes, 4, 8, 9, 25, 27, ...). For orders that are not
+    such prime powers (6, 10, 12, ...), no field construction exists here, so a
+    single cyclic square is returned and the caller validates orthogonality.
     """
     if k <= 1:
         raise ValueError(f"order must be >= 2, got {k}")
-    if k == 2:
-        return [[[0, 1], [1, 0]]]
-    if k == 4:
-        # MOLS(4) over GF(4) -- three mutually orthogonal Latin squares.
-        # Verified pairwise orthogonal (every (a, b) pair appears exactly once).
-        return [
-            [[0, 1, 2, 3], [1, 0, 3, 2], [2, 3, 0, 1], [3, 2, 1, 0]],
-            [[0, 2, 3, 1], [1, 3, 2, 0], [2, 0, 1, 3], [3, 1, 0, 2]],
-            [[0, 3, 1, 2], [1, 2, 0, 3], [2, 1, 3, 0], [3, 0, 2, 1]],
-        ]
-    if _is_prime(k):
-        return [[[(i + a * j) % k for j in range(k)] for i in range(k)] for a in range(1, k)]
-    # Composite non-prime-power: just return the cyclic square.
-    # MOLS may not exist; caller validates.
+    pp = _prime_power(k)
+    if pp is not None and pp[1] <= 3:
+        return _gf_mols(*pp)
+    # Not a supported prime power: cyclic fallback (only one square; the caller
+    # detects the shortfall and raises an honest error).
     return [[[(i + j) % k for j in range(k)] for i in range(k)]]
 
 
@@ -126,7 +210,10 @@ def graeco_latin_square(
 ) -> tuple[list[list[int]], list[list[int]]]:
     """Two orthogonal k x k Latin squares (Graeco-Latin).
 
-    Raises ``ValueError`` for k = 2 and k = 6 (no MOLS pair exists).
+    Supports prime-power orders with exponent <= 3 (3, 4, 5, 7, 8, 9, 11,
+    13, ...). Raises for k = 2 and k = 6 (no MOLS pair exists) and for orders
+    this construction does not cover (e.g. 10, 12), even where such squares
+    exist mathematically.
     """
     if k == 2:
         raise ValueError("Graeco-Latin square does not exist for k = 2")
@@ -172,7 +259,13 @@ def _build_squares(k: int, n_squares: int, seed: int | None) -> list[list[list[i
     if n_squares == 1:
         return [_randomize_square(squares[0], seed)]
     if n_squares > len(squares):
-        raise ValueError(f"k = {k} provides {len(squares)} MOLS, need {n_squares}")
+        raise ValueError(
+            f"order k = {k} is not supported by this MOLS construction "
+            f"(need {n_squares} orthogonal squares, have {len(squares)}). "
+            "Graeco-Latin designs here require a prime-power order with "
+            "exponent <= 3 (e.g. 3, 4, 5, 7, 8, 9, 11, 13). Such squares may "
+            "still exist for other k, but are not constructed by this package."
+        )
     for i in range(n_squares):
         for j in range(i + 1, n_squares):
             if not _check_orthogonal(squares[i], squares[j]):

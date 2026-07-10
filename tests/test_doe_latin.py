@@ -43,9 +43,16 @@ def test_latin_square_each_row_col_unique():
 
 def test_graeco_latin_square_orthogonality():
     """Every (a, b) pair appears exactly once in a Graeco-Latin square."""
-    for k in (3, 4, 5, 7):
+    # Includes the prime-power orders 8 (2^3) and 9 (3^2) now supported.
+    for k in (3, 4, 5, 7, 8, 9):
         a, b = graeco_latin_square(k, seed=1)
         assert _check_orthogonal(a, b)
+
+
+def test_graeco_latin_composite_order_honest_error():
+    """A non-prime-power order raises an honest 'not supported' message."""
+    with pytest.raises(ValueError, match="not supported by this MOLS construction"):
+        graeco_latin_square(10)
 
 
 def test_graeco_latin_rejects_k2_and_k6():
