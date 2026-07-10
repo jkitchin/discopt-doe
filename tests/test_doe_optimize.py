@@ -369,3 +369,45 @@ def test_gp_preset_missing_sklearn_gives_actionable_error(monkeypatch):
     monkeypatch.setitem(sys.modules, "sklearn", None)
     with pytest.raises(ImportError, match=r"discopt-doe\[ml\]"):
         coerce_surrogate("gp")
+
+
+def test_call_acquisition_rejects_typo_kwarg():
+    """A misspelled tuning kwarg must error, not silently no-op.
+
+    Regression: built-in acquisitions used **_ and the dispatch swallowed
+    TypeError, so acquisition_kwargs={'kapa': ...} was silently ignored.
+    """
+    from discopt.doe.acquisition import call_acquisition, confidence_bound
+
+    s = coerce_surrogate("gp")
+    s.fit(*_quad_data())
+    cands = np.array([[0.0], [1.0]])
+    with pytest.raises(TypeError, match="kapa"):
+        call_acquisition(
+            confidence_bound, s, cands, direction=1, y_best=0.0, acq_kwargs={"kapa": 2.5}
+        )
+
+
+def test_call_acquisition_passes_valid_kwarg():
+    from discopt.doe.acquisition import call_acquisition, confidence_bound
+
+    s = coerce_surrogate("gp")
+    s.fit(*_quad_data())
+    cands = np.array([[0.0], [1.0], [2.0]])
+    lo = call_acquisition(confidence_bound, s, cands, direction=1, y_best=0.0, acq_kwargs={"kappa": 0.0})
+    hi = call_acquisition(confidence_bound, s, cands, direction=1, y_best=0.0, acq_kwargs={"kappa": 5.0})
+    # Larger kappa rewards uncertainty, so scores differ (kwarg took effect).
+    assert not np.allclose(lo, hi)
+
+
+def test_call_acquisition_propagates_internal_typeerror():
+    """A TypeError raised *inside* a custom acquisition is not masked."""
+    from discopt.doe.acquisition import call_acquisition
+
+    def broken(surrogate, X, *, direction, y_best):
+        raise TypeError("genuine bug inside acquisition")
+
+    s = coerce_surrogate("gp")
+    s.fit(*_quad_data())
+    with pytest.raises(TypeError, match="genuine bug"):
+        call_acquisition(broken, s, np.array([[0.0]]), direction=1, y_best=0.0)
