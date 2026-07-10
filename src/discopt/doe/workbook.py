@@ -187,6 +187,7 @@ class Workbook:
     def __init__(self, path: Path, wb: Any) -> None:
         self.path = Path(path)
         self._wb = wb
+        self._backed_up = False
 
     # ------------------------------------------------------------------
     # Construction / open / save
@@ -294,9 +295,40 @@ class Workbook:
         missing = required - set(wb.sheetnames)
         if missing:
             raise ValueError(f"workbook {path} is missing required sheets: {sorted(missing)}")
-        return cls(path, wb)
+        obj = cls(path, wb)
+        if obj._has_embedded_objects():
+            import warnings
+
+            warnings.warn(
+                f"workbook {path.name} contains charts or images; openpyxl "
+                "cannot preserve them across a load+save, so they will be lost "
+                "the next time this campaign writes to the file (fit/extend/"
+                "optimize). Keep plots in a separate file. A one-time backup is "
+                "written to the .bak sibling before the first save.",
+                stacklevel=2,
+            )
+        return obj
+
+    def _has_embedded_objects(self) -> bool:
+        """True if any sheet carries charts or images openpyxl would drop."""
+        for ws in self._wb.worksheets:
+            if getattr(ws, "_charts", None) or getattr(ws, "_images", None):
+                return True
+        return False
 
     def save(self) -> None:
+        # Back up the pre-session file once, before the first in-place write.
+        # openpyxl load+save silently drops charts/images and other unsupported
+        # content, so the .bak preserves whatever the user had.
+        if not self._backed_up and self.path.exists():
+            import shutil
+
+            backup = self.path.with_name(self.path.name + ".bak")
+            try:
+                shutil.copy2(self.path, backup)
+            except OSError:
+                pass  # a failed backup must not block saving results
+            self._backed_up = True
         self._wb.save(self.path)
 
     # ------------------------------------------------------------------

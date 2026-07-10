@@ -552,3 +552,37 @@ def test_formula_response_with_cached_value_is_read(tmp_path, monkeypatch):
 
     completed = Workbook.open(wb_path).completed_runs()
     assert sorted(float(r["y"]) for r in completed) == [3.0, 5.0, 5.0]
+
+
+# ──────────────────────────────────────────────────────────────────
+# In-place save safety: backup + chart/image warning (issue #10)
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_save_writes_one_time_backup(tmp_path):
+    out = do_new(_new_params(tmp_path, template="linear", inputs=[("x", 0.0, 10.0)], n=3))
+    wb_path = Path(out["workbook_path"])
+    original = wb_path.read_bytes()
+
+    wb = Workbook.open(wb_path)
+    wb.append_runs(2, [{"x": 5.0}])
+    wb.save()
+
+    bak = wb_path.with_name(wb_path.name + ".bak")
+    assert bak.exists()
+    assert bak.read_bytes() == original
+
+
+def test_open_warns_on_embedded_chart(tmp_path):
+    from openpyxl.chart import BarChart, Reference
+
+    out = do_new(_new_params(tmp_path, template="linear", inputs=[("x", 0.0, 10.0)], n=3))
+    wb_path = Path(out["workbook_path"])
+    book = openpyxl.load_workbook(wb_path)
+    chart = BarChart()
+    chart.add_data(Reference(book["runs"], min_col=1, min_row=1, max_row=2))
+    book["runs"].add_chart(chart, "H2")
+    book.save(wb_path)
+
+    with pytest.warns(UserWarning, match="charts or images"):
+        Workbook.open(wb_path)
