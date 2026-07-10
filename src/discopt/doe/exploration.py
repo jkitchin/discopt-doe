@@ -15,6 +15,19 @@ from discopt.doe.fim import compute_fim
 from discopt.estimate import Experiment
 
 
+def _import_pyplot():
+    """Import matplotlib.pyplot with an actionable error when it's missing."""
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as e:
+        raise ImportError(
+            "plotting requires matplotlib. Install it with: pip install "
+            "matplotlib (it ships with the 'gui' extra: "
+            'pip install "discopt-doe[gui]").'
+        ) from e
+    return plt
+
+
 @dataclass
 class ExplorationResult:
     """Result of design space exploration.
@@ -97,7 +110,7 @@ class ExplorationResult:
         -------
         matplotlib.axes.Axes
         """
-        import matplotlib.pyplot as plt
+        plt = _import_pyplot()
 
         if len(self.design_names) != 2:
             raise ValueError("plot_heatmap requires exactly 2 design variables")
@@ -138,7 +151,7 @@ class ExplorationResult:
         -------
         matplotlib.axes.Axes
         """
-        import matplotlib.pyplot as plt
+        plt = _import_pyplot()
 
         if ax is None:
             _, ax = plt.subplots()

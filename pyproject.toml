@@ -20,7 +20,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gui = ["streamlit>=1.30", "pandas>=2.0"]   # altair ships with streamlit
+# The GUI needs matplotlib (history / surrogate diagnostic plots) and
+# scikit-learn (its optimize round fits a GP surrogate), so the gui extra
+# pulls in the ml extra's dependency too.
+gui = ["streamlit>=1.30", "pandas>=2.0", "matplotlib>=3.5", "scikit-learn>=1.0"]
 ml = ["scikit-learn>=1.0"]                 # surrogate.py sklearn estimators
 
 [project.scripts]
@@ -37,6 +40,8 @@ doe = "discopt.doe.cli"
 dev = [
     "pytest>=8",
     "pytest-timeout",
+    # tutorial notebooks and exploration.plot_* use matplotlib
+    "matplotlib>=3.5",
     # notebook build scripts (scripts/build_*_notebook.py)
     "nbformat>=5",
     "nbclient>=0.10",
