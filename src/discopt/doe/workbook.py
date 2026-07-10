@@ -452,6 +452,12 @@ class Workbook:
             row.append(None)  # response (blank => pending)
             row.append(None)  # measured_at
             sheet.append(row)
+            # A string level like "=A" would be stored by openpyxl as a live
+            # formula (spreadsheet-injection). Force such cells to plain text.
+            written = sheet[sheet.max_row]
+            for cell in written:
+                if isinstance(cell.value, str) and cell.value.startswith(("=", "+", "-", "@")):
+                    cell.data_type = "s"
             new_ids.append(next_id)
             next_id += 1
         return new_ids

@@ -436,3 +436,30 @@ def test_cli_anova_include_replicate_without_column_errors(tmp_path: Path) -> No
 
     with pytest.raises(DoEError, match="replicate"):
         do_anova({"workbook": str(wb_path), "include_replicate": True})
+
+
+def test_categorical_formula_level_stored_as_text(tmp_path: Path) -> None:
+    """A factor level like '=A' must be stored as text, not a live formula."""
+    openpyxl = pytest.importorskip("openpyxl")
+    from discopt.doe.workbook import InputSpec, Workbook
+
+    wb_path = tmp_path / "inj.xlsx"
+    wb = Workbook.create(
+        wb_path,
+        template=None,
+        template_args={},
+        input_specs=[InputSpec("cat", 0.0, 1.0)],
+        criterion="anova",
+        measurement_error=1.0,
+        seed=0,
+        response_name="y",
+    )
+    wb.append_runs(1, [{"cat": "=A"}, {"cat": "B"}])
+    wb.save()
+
+    book = openpyxl.load_workbook(wb_path)
+    sheet = book["runs"]
+    headers = [c.value for c in sheet[1]]
+    ci = headers.index("cat")
+    vals = [row[ci].value for row in sheet.iter_rows(min_row=2) if row[0].value is not None]
+    assert "=A" in vals  # stored literally, not evaluated to a formula error
