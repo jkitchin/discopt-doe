@@ -169,12 +169,18 @@ class NewParams:
 
 @dataclass
 class OptimizeParams:
-    """Inputs to :func:`do_optimize`."""
+    """Inputs to :func:`do_optimize`.
+
+    ``criterion``, ``surrogate`` and ``acquisition`` default to ``None``,
+    meaning "use whatever the workbook was created with" (the values stored
+    in ``template_args`` by ``discopt doe new optimize``). Pass an explicit
+    value to override the stored setting for this round.
+    """
 
     workbook: Path
-    criterion: str = "maximize"
-    surrogate: str = "gp"
-    acquisition: str = "expected_improvement"
+    criterion: str | None = None
+    surrogate: str | None = None
+    acquisition: str | None = None
     batch_size: int = 4
     n_candidates: int = 2048
     seed: int | None = None
@@ -699,7 +705,29 @@ def do_optimize(params: OptimizeParams) -> dict[str, Any]:
             "use `discopt doe new optimize` to create one"
         )
 
-    surrogate_obj: object = params.surrogate
+    # Resolve criterion/surrogate/acquisition from the settings the workbook
+    # was created with, unless the caller explicitly overrode them. Without
+    # this, a workbook made with `--optimize-criterion minimize` would be
+    # silently *maximized* by the argparse default.
+    stored = wb.template_args()
+    warnings: list[str] = []
+
+    def _resolve(name: str, given: object, fallback: str) -> str:
+        stored_val = stored.get(name, fallback)
+        if given is None:
+            return str(stored_val)
+        if str(given) != str(stored_val):
+            warnings.append(
+                f"{name} overridden: workbook was created with "
+                f"{stored_val!r}, using {given!r} for this round."
+            )
+        return str(given)
+
+    criterion = _resolve("criterion", params.criterion, "maximize")
+    acquisition = _resolve("acquisition", params.acquisition, "expected_improvement")
+    surrogate = _resolve("surrogate", params.surrogate, "gp")
+
+    surrogate_obj: object = surrogate
     if params.custom_surrogate_path:
         surrogate_obj = _instantiate_dotted(
             params.custom_surrogate_path, params.custom_surrogate_kwargs or {}
@@ -707,9 +735,9 @@ def do_optimize(params: OptimizeParams) -> dict[str, Any]:
 
     result = _optimize_round(
         workbook=wb,
-        criterion=OptimizationCriterion(params.criterion),
+        criterion=OptimizationCriterion(criterion),
         surrogate=surrogate_obj,
-        acquisition=params.acquisition,
+        acquisition=acquisition,
         batch_size=int(params.batch_size),
         n_candidates=int(params.n_candidates),
         seed=params.seed,
@@ -718,11 +746,12 @@ def do_optimize(params: OptimizeParams) -> dict[str, Any]:
 
     return {
         "workbook_path": str(wb.path),
-        "criterion": params.criterion,
-        "acquisition": params.acquisition,
+        "criterion": criterion,
+        "acquisition": acquisition,
         "surrogate": (
-            params.custom_surrogate_path if params.custom_surrogate_path else params.surrogate
+            params.custom_surrogate_path if params.custom_surrogate_path else surrogate
         ),
+        "warnings": warnings,
         "surrogate_mode": result.surrogate_mode,
         "batch_size": int(params.batch_size),
         "n_completed": result.n_completed,
@@ -1596,6 +1625,8 @@ def _cmd_optimize(args) -> int:
         )
     except (DoEError, FileNotFoundError, ValueError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
+    for _w in out.get("warnings", []):
+        print(f"warning: {_w}", file=sys.stderr)
     if args.json:
         print(json.dumps(out, indent=2, default=str))
     else:
@@ -1828,14 +1859,17 @@ def add_subparser(subparsers) -> None:
     p_opt.add_argument("workbook", help="Path to the .xlsx workbook (template=optimize).")
     p_opt.add_argument(
         "--criterion",
-        default="maximize",
+        default=None,
         choices=("maximize", "minimize"),
-        help="Optimization direction (default 'maximize').",
+        help="Optimization direction (default: whatever the workbook was created with).",
     )
     p_opt.add_argument(
         "--surrogate",
-        default="gp",
-        help="Surrogate preset name (e.g. 'gp', 'rf', 'linear'); see SURROGATE_PRESETS.",
+        default=None,
+        help=(
+            "Surrogate preset name ('gp' or 'response-surface'); see "
+            "SURROGATE_PRESETS. Default: whatever the workbook was created with."
+        ),
     )
     p_opt.add_argument(
         "--custom-surrogate",
@@ -1854,8 +1888,11 @@ def add_subparser(subparsers) -> None:
     )
     p_opt.add_argument(
         "--acquisition",
-        default="expected_improvement",
-        help="Acquisition function: 'expected_improvement', 'confidence_bound', 'steepest_ascent'.",
+        default=None,
+        help=(
+            "Acquisition function: 'expected_improvement', 'confidence_bound', "
+            "'steepest_ascent'. Default: whatever the workbook was created with."
+        ),
     )
     p_opt.add_argument(
         "--acquisition-kwarg",

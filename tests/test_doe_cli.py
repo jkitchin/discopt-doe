@@ -22,9 +22,11 @@ from discopt.doe.cli import (  # noqa: E402
     DoEError,
     ExtendParams,
     NewParams,
+    OptimizeParams,
     do_extend,
     do_fit,
     do_new,
+    do_optimize,
     do_status,
     do_templates,
 )
@@ -435,3 +437,56 @@ def test_fim_persisted_and_used_by_extend(tmp_path):
     assert names == ["b0", "b1", "b2", "b11", "b22", "b12"]
     eigvals = np.linalg.eigvalsh(fim)
     assert (eigvals > 0).all()
+
+
+# ──────────────────────────────────────────────────────────────────
+# do_optimize — resolves settings from the workbook (issue #1)
+# ──────────────────────────────────────────────────────────────────
+
+
+def _new_optimize_workbook(tmp_path, *, direction):
+    """Create an optimize-template workbook created with the given direction."""
+    return do_new(
+        NewParams(
+            output=Path(tmp_path) / "opt.xlsx",
+            n=3,
+            inputs=[("x", -5.0, 5.0)],
+            response_name="y",
+            measurement_error=0.05,
+            criterion="determinant",
+            seed=0,
+            n_starts=1,
+            template="optimize",
+            optimize_criterion=direction,
+        )
+    )
+
+
+def test_do_optimize_uses_stored_direction(tmp_path):
+    """A minimize workbook must be minimized when no --criterion is given.
+
+    Regression for the P0 bug where do_optimize ignored the workbook's stored
+    direction and always used the argparse default ('maximize').
+    """
+    pytest.importorskip("sklearn")
+    wb_path = Path(tmp_path) / "opt.xlsx"
+    _new_optimize_workbook(tmp_path, direction="minimize")
+    _fill_response(wb_path, "y", lambda row: (row["x"] - 1.0) ** 2)
+
+    out = do_optimize(OptimizeParams(workbook=wb_path))
+
+    assert out["criterion"] == "minimize"
+    assert out["warnings"] == []
+
+
+def test_do_optimize_explicit_override_warns(tmp_path):
+    """Passing --criterion that differs from the stored value warns but obeys."""
+    pytest.importorskip("sklearn")
+    wb_path = Path(tmp_path) / "opt.xlsx"
+    _new_optimize_workbook(tmp_path, direction="minimize")
+    _fill_response(wb_path, "y", lambda row: (row["x"] - 1.0) ** 2)
+
+    out = do_optimize(OptimizeParams(workbook=wb_path, criterion="maximize"))
+
+    assert out["criterion"] == "maximize"
+    assert any("criterion overridden" in w for w in out["warnings"])
