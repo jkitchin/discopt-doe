@@ -33,6 +33,11 @@ from discopt.doe.surrogate import (
 )
 from discopt.doe.workbook import InputSpec, Workbook
 
+# Every test here exercises the scikit-learn surrogate presets/adapter, which
+# live in the optional 'ml' extra. Skip the whole module on a core install
+# rather than failing with ModuleNotFoundError.
+pytest.importorskip("sklearn")
+
 _lwb = pytest.importorskip("openpyxl").load_workbook
 
 # ──────────────────────────────────────────────────────────────────
