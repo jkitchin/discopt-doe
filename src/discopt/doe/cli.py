@@ -169,6 +169,8 @@ class NewParams:
     optimize_criterion: str = "maximize"
     optimize_surrogate: str = "gp"
     optimize_acquisition: str = "expected_improvement"
+    # Overwrite an existing output workbook (the CLI maps --force here).
+    force: bool = False
 
 
 @dataclass
@@ -454,6 +456,11 @@ def _validate_new_column_names(params: NewParams) -> None:
 def do_new(params: NewParams) -> dict[str, Any]:
     from discopt.doe import batch_optimal_experiment
     from discopt.doe.templates import COMBINATORIAL_TEMPLATES
+
+    # Guard here too (not only in _cmd_new) so direct callers such as the GUI
+    # don't silently clobber an existing campaign.
+    if Path(params.output).exists() and not params.force:
+        raise DoEError(f"{params.output} already exists; pass force=True to overwrite.")
 
     _validate_new_column_names(params)
 
@@ -1009,6 +1016,7 @@ def _cmd_new(args) -> int:
         optimize_acquisition=(
             getattr(args, "optimize_acquisition", "expected_improvement") or "expected_improvement"
         ),
+        force=bool(getattr(args, "force", False)),
     )
     try:
         out = do_new(params)
@@ -1930,9 +1938,10 @@ def add_subparser(subparsers) -> None:
             )
         _add_common_new_options(sp)
         # --n applies to parametric + optimize (initial batch), not to
-        # combinatorial designs (run count = levels/factors x replicates).
+        # combinatorial designs (run count = levels/factors x replicates). The
+        # optimize template needs >= 2 seed points to fit a surrogate.
         if tmpl not in COMBINATORIAL_TEMPLATES:
-            _add_run_count_option(sp)
+            _add_run_count_option(sp, default=4 if tmpl == "optimize" else 1)
         # --criterion / --n-starts govern the parametric D-optimal search only.
         if tmpl not in COMBINATORIAL_TEMPLATES and tmpl != "optimize":
             _add_design_search_options(sp)
@@ -2134,13 +2143,15 @@ def _add_common_new_options(sp) -> None:
     _add_json(sp)
 
 
-def _add_run_count_option(sp) -> None:
+def _add_run_count_option(sp, *, default: int = 1) -> None:
     """``--n`` applies to parametric and optimize templates (initial batch).
 
     Combinatorial designs derive their run count from levels/factors x
     replicates, so they do not accept ``--n``.
     """
-    sp.add_argument("--n", type=int, default=1, help="Number of initial runs (default 1).")
+    sp.add_argument(
+        "--n", type=int, default=default, help=f"Number of initial runs (default {default})."
+    )
 
 
 def _add_design_search_options(sp) -> None:

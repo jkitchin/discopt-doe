@@ -803,3 +803,26 @@ def test_extend_warns_when_pending_runs_exist(tmp_path):
     # batch 2 is now pending; a second extend must warn.
     e2 = do_extend(ExtendParams(workbook=wb_path, n=2, n_starts=3))
     assert any("pending" in w for w in e2["warnings"])
+
+
+def test_do_new_refuses_to_overwrite(tmp_path):
+    """do_new must not silently clobber an existing workbook (issue #69)."""
+    p = _new_params(tmp_path, template="linear", inputs=[("x", 0.0, 1.0)], n=2)
+    do_new(p)
+    with pytest.raises(DoEError, match="already exists"):
+        do_new(_new_params(tmp_path, template="linear", inputs=[("x", 0.0, 1.0)], n=2))
+
+
+def test_new_optimize_default_n_succeeds(tmp_path):
+    """`new optimize` with no --n must not fail (default is >= 2) (issue #70)."""
+    import argparse
+
+    from discopt.doe.cli import add_subparser
+
+    top = argparse.ArgumentParser()
+    add_subparser(top.add_subparsers(dest="cmd"))
+    args = top.parse_args(
+        ["doe", "new", "optimize", "-o", str(tmp_path / "o.xlsx"), "--input", "x:0:1"]
+    )
+    assert args.n >= 2
+    assert args.doe_func(args) == 0
