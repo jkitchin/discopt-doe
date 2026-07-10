@@ -9,6 +9,7 @@ Alternates between parameter estimation and optimal design in a loop:
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Callable, Union
 
@@ -93,6 +94,26 @@ def sequential_doe(
         Function ``f(design_dict) -> data_dict`` that runs an experiment
         at the given design conditions and returns observed data.
         If None, the loop returns after the first recommendation.
+
+        .. important::
+           The returned ``data_dict`` is merged into the cumulative data by
+           response key and handed to :func:`~discopt.estimate.estimate_parameters`,
+           which treats repeated values under one key as **replicate
+           observations at the model's fixed conditions** -- the design values
+           are *not* attached to the data. So if your model has design inputs
+           and ``run_experiment`` returns the *same* response keys each round
+           (e.g. always ``{"y": value}``), observations taken at *different*
+           designed conditions are silently fitted as replicates at one
+           condition, corrupting the estimates and every subsequent design.
+
+           The correct pattern is a *stateful* ``Experiment`` whose
+           ``create_model`` exposes a fresh response (and its design condition)
+           per accumulated observation, with ``run_experiment`` appending a new
+           observation under a new response key each round. See
+           ``tests/test_discrimination_sequential.py`` for a worked example.
+           When ``design_bounds`` is non-empty and a returned key already
+           exists, this function warns that replicate-confusion may be
+           occurring.
     callback : callable, optional
         Called with each ``DoERound`` after it completes.
 
@@ -171,6 +192,17 @@ def sequential_doe(
             # Merge round data into cumulative data
             for key, round_arr in collected.items():
                 if key in all_data:
+                    if design_bounds:
+                        warnings.warn(
+                            f"run_experiment returned response key {key!r} that "
+                            "already has data, while design_bounds is non-empty. "
+                            "estimate_parameters will fit these as replicates at "
+                            "one fixed condition, ignoring the differing designed "
+                            "conditions. Use a stateful Experiment that exposes a "
+                            "fresh response key per observation (see the "
+                            "sequential_doe docstring).",
+                            stacklevel=2,
+                        )
                     all_data[key] = np.concatenate([np.atleast_1d(all_data[key]), round_arr])
                 else:
                     all_data[key] = round_arr

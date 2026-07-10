@@ -171,6 +171,37 @@ class TestSequentialDoE:
         for rnd, cap in zip(history, captured):
             np.testing.assert_allclose(cap, np.asarray(rnd.estimation.fim), rtol=1e-6)
 
+    def test_warns_on_replicate_confusion_with_design_bounds(self):
+        """Returning an existing response key under real design bounds warns."""
+
+        class DesignedExperiment(Experiment):
+            def create_model(self, **kwargs):
+                m = dm.Model("designed")
+                k = m.continuous("k", lb=0.01, ub=20)
+                x = m.continuous("x", lb=0.0, ub=5.0)
+                return ExperimentModel(
+                    model=m,
+                    unknown_parameters={"k": k},
+                    design_inputs={"x": x},
+                    responses={"y": k * x},
+                    measurement_error={"y": 0.1},
+                )
+
+        exp = DesignedExperiment()
+
+        def runner(design):
+            return {"y": 3.0 * float(design["x"])}  # same key every round (misuse)
+
+        with pytest.warns(UserWarning, match="replicate"):
+            sequential_doe(
+                experiment=exp,
+                initial_data={"y": 3.0},
+                initial_guess={"k": 1.0},
+                design_bounds={"x": (0.0, 5.0)},
+                n_rounds=2,
+                run_experiment=runner,
+            )
+
     def test_fim_accumulates(self):
         """FIM det should increase over rounds (more data)."""
         x_data = np.array([1.0, 2.0, 3.0])
