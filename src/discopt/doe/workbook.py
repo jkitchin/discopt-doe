@@ -373,13 +373,20 @@ class Workbook:
         return out
 
     def criterion(self) -> str:
-        return str(self.metadata().get("criterion") or "determinant")
+        v = self.metadata().get("criterion")
+        return "determinant" if v is None or v == "" else str(v)
 
     def measurement_error(self) -> float:
-        return float(self.metadata().get("measurement_error") or 1.0)
+        # `or 1.0` would turn a legitimately-stored 0.0 into 1.0; guard on
+        # None/"" only so falsy-but-valid values survive the round-trip.
+        v = self.metadata().get("measurement_error")
+        return 1.0 if v is None or v == "" else float(v)
 
     def seed(self) -> int:
-        return int(self.metadata().get("seed") or 42)
+        # `or 42` would turn a stored seed of 0 into 42, breaking
+        # reproducibility of campaigns created with --seed 0.
+        v = self.metadata().get("seed")
+        return 42 if v is None or v == "" else int(v)
 
     # ------------------------------------------------------------------
     # Runs

@@ -912,6 +912,13 @@ def _cmd_new(args) -> int:
             f"{output} already exists. Pass --force to overwrite.",
             workbook_path=str(output),
         )
+    if float(args.error) <= 0.0:
+        return _fail(
+            args,
+            f"--error must be positive (got {args.error}); it is the "
+            "measurement standard deviation and appears as 1/sigma^2 in the FIM.",
+            workbook_path=str(output),
+        )
     is_module = bool(getattr(args, "_is_module", False))
     inputs: list[tuple[str, float, float]] = list(getattr(args, "input", None) or []) + list(
         getattr(args, "bounds", None) or []

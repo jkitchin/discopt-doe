@@ -586,3 +586,48 @@ def test_open_warns_on_embedded_chart(tmp_path):
 
     with pytest.warns(UserWarning, match="charts or images"):
         Workbook.open(wb_path)
+
+
+# ──────────────────────────────────────────────────────────────────
+# Falsy metadata round-trips; --error validation (issue #11)
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_seed_zero_survives_round_trip(tmp_path):
+    out = do_new(_new_params(tmp_path, template="linear", inputs=[("x", 0.0, 10.0)], n=3))
+    wb_path = Path(out["workbook_path"])
+    wb = Workbook.open(wb_path)
+    # _new_params uses seed=0; it must not be silently replaced with 42.
+    assert wb.seed() == 0
+
+
+def test_measurement_error_half_survives(tmp_path):
+    out = do_new(
+        _new_params(tmp_path, template="linear", inputs=[("x", 0.0, 10.0)], n=3, error=0.5)
+    )
+    wb = Workbook.open(Path(out["workbook_path"]))
+    assert wb.measurement_error() == 0.5
+
+
+def test_cli_new_rejects_nonpositive_error(tmp_path, capsys):
+    import argparse
+
+    from discopt.doe.cli import add_subparser
+
+    top = argparse.ArgumentParser()
+    add_subparser(top.add_subparsers(dest="cmd"))
+    args = top.parse_args(
+        [
+            "doe",
+            "new",
+            "linear",
+            "-o",
+            str(tmp_path / "z.xlsx"),
+            "--input",
+            "x:0:1",
+            "--error",
+            "0",
+        ]
+    )
+    assert args.doe_func(args) == 1
+    assert not (tmp_path / "z.xlsx").exists()
