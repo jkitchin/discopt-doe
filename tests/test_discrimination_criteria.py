@@ -153,6 +153,31 @@ class TestBuzziFerraris:
         t_ba, _ = _criterion_buzzi_ferraris({"i": b, "j": a}, {"i": 0.5, "j": 0.5})
         assert t_ab == pytest.approx(t_ba)
 
+    def test_misaligned_response_names_raise(self):
+        """All criteria index responses positionally; mismatched names error."""
+        from discopt.doe.discrimination import _predict_all_models
+
+        class ExpY(Experiment):
+            def create_model(self, **kw):
+                m = dm.Model("y")
+                a = m.continuous("a", lb=0.1, ub=5.0)
+                x = m.continuous("x", lb=0.0, ub=2.0)
+                return ExperimentModel(m, {"a": a}, {"x": x}, {"y": a * x}, {"y": 0.5})
+
+        class ExpZ(Experiment):
+            def create_model(self, **kw):
+                m = dm.Model("z")
+                a = m.continuous("a", lb=0.1, ub=5.0)
+                x = m.continuous("x", lb=0.0, ub=2.0)
+                return ExperimentModel(m, {"a": a}, {"x": x}, {"z": a * x}, {"z": 0.5})
+
+        with pytest.raises(ValueError, match="response namespace"):
+            _predict_all_models(
+                {"m1": ExpY(), "m2": ExpZ()},
+                {"m1": {"a": 1.0}, "m2": {"a": 1.0}},
+                {"x": 1.0},
+            )
+
     def test_bf_argmax_matches_hr_argmax_on_symmetric_problem(self):
         """On a symmetric problem where prediction covariances are
         equal across models, the BF criterion and HR criterion share

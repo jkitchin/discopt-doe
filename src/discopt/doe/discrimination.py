@@ -366,11 +366,27 @@ def _predict_all_models(
     param_estimates: dict[str, dict[str, float]],
     design_values: dict[str, float],
 ) -> dict[str, _ModelPrediction]:
-    """Compute (y_hat, V, Sigma_y, FIM, J) for every model at one design."""
-    return {
+    """Compute (y_hat, V, Sigma_y, FIM, J) for every model at one design.
+
+    All criteria index ``y_hat``/``V``/``Sigma_y`` positionally, so every
+    model must expose the same responses in the same order; otherwise the
+    pairwise differences would silently misalign. This is checked once here
+    (previously only the BF criterion validated it).
+    """
+    preds = {
         name: _predict_with_covariance(experiments[name], param_estimates[name], design_values)
         for name in experiments
     }
+    names = list(preds)
+    ref = preds[names[0]].response_names
+    for name in names[1:]:
+        if preds[name].response_names != ref:
+            raise ValueError(
+                f"models {names[0]!r} and {name!r} expose different response "
+                f"namespaces ({ref} vs {preds[name].response_names}); model "
+                "discrimination requires identical, identically-ordered responses."
+            )
+    return preds
 
 
 def _predict_with_covariance(
