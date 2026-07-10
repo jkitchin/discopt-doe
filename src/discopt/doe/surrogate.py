@@ -101,7 +101,17 @@ class _SklearnUQAdapter:
     """
 
     def __init__(self, estimator, *, n_bootstrap: int = 32, random_state: int = 0):
-        self._estimator = estimator
+        # Clone so fitting never mutates the caller's estimator (optimize_round
+        # refits the surrogate each pick; a user-supplied instance would
+        # otherwise end up trained on the last fantasy dataset). Fall back to the
+        # original if clone is unavailable or the object isn't a sklearn
+        # estimator (e.g. a bare Pipeline built here, which is safe to reuse).
+        try:
+            from sklearn.base import clone as _clone
+
+            self._estimator = _clone(estimator)
+        except Exception:  # noqa: BLE001
+            self._estimator = estimator
         self._n_bootstrap = int(n_bootstrap)
         self._random_state = int(random_state)
         self._mode: str | None = None

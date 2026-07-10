@@ -411,3 +411,17 @@ def test_call_acquisition_propagates_internal_typeerror():
     s.fit(*_quad_data())
     with pytest.raises(TypeError, match="genuine bug"):
         call_acquisition(broken, s, np.array([[0.0]]), direction=1, y_best=0.0)
+
+
+def test_adapter_does_not_mutate_user_estimator():
+    """coerce_surrogate + fit must not train the caller's estimator in place."""
+    from sklearn.gaussian_process import GaussianProcessRegressor
+
+    user_gp = GaussianProcessRegressor(normalize_y=True)
+    s = coerce_surrogate(user_gp)
+    X, y = _quad_data()
+    s.fit(X, y)
+    # The adapter fits a clone, so the user's instance is untouched: X_train_ is
+    # only set by GaussianProcessRegressor.fit.
+    assert not hasattr(user_gp, "X_train_")
+    assert s.estimator is not user_gp
