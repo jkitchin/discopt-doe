@@ -1096,6 +1096,7 @@ def do_status(params: dict[str, Any]) -> dict[str, Any]:
         "template_args": wb.template_args(),
         "module_callable": wb.module_callable(),
         "response_name": response,
+        "seed": wb.seed(),
         "input_specs": [s.to_dict() for s in wb.input_specs()],
         "n_total": len(all_runs),
         "n_completed": len(completed),

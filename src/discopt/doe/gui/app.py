@@ -62,10 +62,40 @@ def _set_workbook(path: str | Path | None) -> None:
     st.session_state["last_error"] = None
 
 
+def _flash(message: str, kind: str = "success") -> None:
+    """Queue a message to show after the next rerun.
+
+    ``st.rerun()`` raises immediately, so a message shown right before it never
+    renders. Stash it and let :func:`_render_flash` display it on the next run.
+    """
+    st.session_state.setdefault("_flash", []).append((kind, message))
+
+
+def _render_flash() -> None:
+    for kind, message in st.session_state.pop("_flash", []):
+        getattr(st, kind, st.info)(message)
+
+
 def _safe_status(path: str) -> dict[str, Any] | None:
+    import zipfile
+
+    from openpyxl.utils.exceptions import InvalidFileException
+
     try:
         return do_status({"workbook": path})
-    except (FileNotFoundError, ValueError, DoEError) as e:
+    except (
+        FileNotFoundError,
+        ValueError,
+        DoEError,
+        OSError,
+        KeyError,
+        InvalidFileException,
+        zipfile.BadZipFile,
+    ) as e:
+        # openpyxl raises InvalidFileException for a wrong file type and
+        # zipfile.BadZipFile for a corrupt/half-written .xlsx (both subclass
+        # Exception directly); catch them so the recovery UI ("Forget this
+        # workbook") stays reachable instead of dumping a traceback.
         st.session_state["last_error"] = str(e)
         return None
 
@@ -1575,9 +1605,9 @@ def _rename_panel(path: str, status: dict[str, Any]) -> None:
             msg_parts.append("factors: " + ", ".join(f"{a}→{b}" for a, b in input_renames.items()))
         if response_rename:
             msg_parts.append(f"response: {response_rename[0]}→{response_rename[1]}")
-        st.success("Renamed " + " · ".join(msg_parts) + ".")
+        _flash("Renamed " + " · ".join(msg_parts) + ".", "success")
         if has_fit:
-            st.info("Fit artifacts cleared — run **Fit** again to repopulate.")
+            _flash("Fit artifacts cleared — run **Fit** again to repopulate.", "info")
         st.rerun()
 
 
@@ -1618,7 +1648,7 @@ def _runs_editor(path: str, status: dict[str, Any]) -> None:
         if n == 0:
             st.info("No changes detected.")
         else:
-            st.success(f"Updated {n} cell(s).")
+            _flash(f"Updated {n} cell(s).", "success")
             st.rerun()
     if col_b.button("Reload from disk"):
         st.rerun()
@@ -1687,6 +1717,10 @@ def _anova_panel(path: str, status: dict[str, Any]) -> None:
 
     out = cast("dict[str, Any] | None", st.session_state.get("last_anova_result"))
     if not out:
+        return
+    # Guard against showing a cached ANOVA table for a different workbook
+    # (the optimize panel guards the same way). The payload carries its source.
+    if out.get("workbook_path") and out["workbook_path"] != str(Path(path)):
         return
     cols = st.columns(3)
     cols[0].metric("Observations", out["n_observations"])
@@ -1825,12 +1859,18 @@ def _optimize_panel(path: str, status: dict[str, Any]) -> None:
             )
         )
 
+    # Default to the campaign seed offset by the number of completed runs so
+    # each round samples a *different* Sobol candidate pool (do_status now
+    # returns "seed"; previously this key was absent and the default was always
+    # 1, giving an identical candidate pool every round).
+    default_seed = int(status.get("seed", 0)) + int(status.get("n_completed", 0)) + 1
     seed = int(
         st.number_input(
             "Random seed",
-            value=int(status.get("seed", 0)) + 1,
+            value=default_seed,
             step=1,
-            help="Seed for the Sobol candidate pool.",
+            help="Seed for the Sobol candidate pool. Defaults to campaign "
+            "seed + completed-run count so each round explores new candidates.",
         )
     )
 
@@ -1867,7 +1907,7 @@ def _optimize_panel(path: str, status: dict[str, Any]) -> None:
             st.error(str(e))
             return
         st.session_state["last_optimize_result"] = out
-        st.success(f"Appended {len(out['next_designs'])} new pending runs.")
+        _flash(f"Appended {len(out['next_designs'])} new pending runs.", "success")
         st.rerun()
 
     out = cast("dict[str, Any] | None", st.session_state.get("last_optimize_result"))
@@ -2286,6 +2326,7 @@ def main() -> None:
     if _LOGO_PATH.is_file():
         st.logo(str(_LOGO_PATH), size="large", link=_ISSUES_URL.rsplit("/", 1)[0])
     _init_state()
+    _render_flash()
     if _LOGO_PATH.is_file():
         st.sidebar.image(str(_LOGO_PATH), width=120)
     _sidebar()

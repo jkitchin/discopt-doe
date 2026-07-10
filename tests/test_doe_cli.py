@@ -762,3 +762,22 @@ def test_fit_on_optimize_workbook_points_to_optimize(tmp_path):
     )
     with pytest.raises(ValueError, match="discopt doe optimize"):
         Workbook.open(tmp_path / "o.xlsx").rebuild_experiment()
+
+
+def test_do_status_exposes_seed(tmp_path):
+    """do_status returns the campaign seed (GUI optimize default relies on it)."""
+    out = do_new(
+        NewParams(
+            output=tmp_path / "s.xlsx",
+            n=3,
+            inputs=[("x", 0.0, 1.0)],
+            response_name="y",
+            measurement_error=0.1,
+            criterion="determinant",
+            seed=7,
+            n_starts=1,
+            template="linear",
+        )
+    )
+    status = do_status({"workbook": out["workbook_path"]})
+    assert status["seed"] == 7
