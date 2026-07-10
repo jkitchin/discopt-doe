@@ -216,20 +216,29 @@ def effects_estimates(
     rows: Sequence[Mapping[str, object]],
     response: str,
     factors: Sequence[str] | None = None,
+    levels: Mapping[str, tuple[object, object]] | None = None,
 ) -> list[dict[str, object]]:
     """Signed main-effect estimates for a 2-level design.
 
-    For each factor, returns ``mean(y | factor=HIGH) - mean(y |
-    factor=LOW)`` together with a standard error and t-statistic
-    against the pooled residual. Center-point runs (where the factor
-    is at neither extreme) are excluded from each effect's per-factor
-    computation but kept in the residual variance estimate.
+    For each factor, returns ``mean(y | factor=HIGH) - mean(y | factor=LOW)``
+    together with a standard error and t-statistic.
+
+    The standard error is derived from the residual of the *joint* main-effects
+    model (all factors fitted simultaneously; the columns of a 2-level design
+    are orthogonal), so one factor's real effect does not inflate another
+    factor's standard error. Center-point runs contribute to that residual.
+
+    ``levels`` fixes each factor's ``(low, high)`` orientation (e.g. from a
+    :class:`FactorialDesign`'s ``low``/``high``). Without it the low/high are
+    taken as the sorted min/max of the observed values, which can flip an
+    effect's sign for categorical (``("B", "A")``) or reversed-numeric
+    (``(120, 80)``) levels -- pass ``levels`` to be safe.
 
     Returns
     -------
     list of dict
         One entry per factor with keys ``factor``, ``effect``,
-        ``se``, ``t``, sorted by ``|effect|`` descending.
+        ``se``, ``t``, ``low``, ``high``, sorted by ``|effect|`` descending.
     """
     rows = list(rows)
     if not rows:
@@ -254,54 +263,70 @@ def effects_estimates(
         except (TypeError, ValueError) as e:
             raise ValueError(f"response value {r[response]!r} is not numeric") from e
 
-    # Pooled residual: subtract each factor's main-effect prediction.
     grand_mean = sum(y) / len(y)
-    effects: list[dict[str, object]] = []
+    n = len(y)
+
+    # Determine each factor's (low, high). Prefer the caller-supplied
+    # orientation; otherwise fall back to the sorted min/max of observed
+    # values (which can flip the sign for categorical / reversed levels).
     levels_per_factor: dict[str, tuple[object, object]] = {}
     for f in factors:
         vals: list[Any] = []
         for r in rows:
             if r[f] not in vals:
                 vals.append(r[f])
-        # Two-level factors are expected; if there are 3 (center point),
-        # use the min and max as low/high.
         if len(vals) < 2:
             continue
-        try:
-            sorted_vals = sorted(vals)
-        except TypeError:
-            sorted_vals = vals
-        lo, hi = sorted_vals[0], sorted_vals[-1]
+        if levels and f in levels:
+            lo, hi = levels[f]
+        else:
+            try:
+                sorted_vals = sorted(vals)
+            except TypeError:
+                sorted_vals = vals
+            lo, hi = sorted_vals[0], sorted_vals[-1]
         levels_per_factor[f] = (lo, hi)
 
-    # Sample sizes per factor level (exclude center points implicitly when
-    # the run has neither lo nor hi).
+    # First pass: signed effect and level counts per factor.
+    per_factor: dict[str, tuple[object, object, float, int, int]] = {}
     for f, (lo, hi) in levels_per_factor.items():
         y_lo = [yi for yi, r in zip(y, rows) if r[f] == lo]
         y_hi = [yi for yi, r in zip(y, rows) if r[f] == hi]
         n_lo, n_hi = len(y_lo), len(y_hi)
         if n_lo == 0 or n_hi == 0:
             continue
-        mean_lo = sum(y_lo) / n_lo
-        mean_hi = sum(y_hi) / n_hi
-        effect = mean_hi - mean_lo
+        effect = sum(y_hi) / n_hi - sum(y_lo) / n_lo
+        per_factor[f] = (lo, hi, effect, n_lo, n_hi)
 
-        # Pooled variance from within-level deviations.
-        ss_within = sum((yi - mean_lo) ** 2 for yi in y_lo) + sum(
-            (yi - mean_hi) ** 2 for yi in y_hi
-        )
-        df = n_lo + n_hi - 2
-        if df <= 0:
+    # Pooled residual variance from the JOINT main-effects model. Each factor's
+    # coded column is +/-1 at high/low (0 at a center point), so the fitted
+    # value is grand_mean + sum_f (effect_f / 2) * code_f. Using this residual
+    # (df = n - 1 - k) instead of each factor's within-level scatter stops one
+    # factor's real effect from inflating another factor's standard error.
+    k = len(per_factor)
+    resid_ss = 0.0
+    for yi, r in zip(y, rows):
+        pred = grand_mean
+        for f, (lo, hi, effect, _nlo, _nhi) in per_factor.items():
+            if r[f] == hi:
+                pred += effect / 2.0
+            elif r[f] == lo:
+                pred -= effect / 2.0
+        resid_ss += (yi - pred) ** 2
+    df_resid = n - 1 - k
+    sigma2 = resid_ss / df_resid if df_resid > 0 else float("nan")
+
+    effects: list[dict[str, object]] = []
+    for f, (lo, hi, effect, n_lo, n_hi) in per_factor.items():
+        if df_resid > 0 and sigma2 >= 0.0:
+            se = math.sqrt(sigma2 * (1.0 / n_lo + 1.0 / n_hi))
+            t = effect / se if se > 0 else float("nan")
+        else:
             se = float("nan")
             t = float("nan")
-        else:
-            var_pool = ss_within / df
-            se = math.sqrt(var_pool * (1.0 / n_lo + 1.0 / n_hi))
-            t = effect / se if se > 0 else float("nan")
         effects.append({"factor": f, "effect": effect, "se": se, "t": t, "low": lo, "high": hi})
 
     effects.sort(key=lambda d: abs(float(cast(float, d["effect"]))), reverse=True)
-    _ = grand_mean  # silence linter; used as reference for callers
     return effects
 
 

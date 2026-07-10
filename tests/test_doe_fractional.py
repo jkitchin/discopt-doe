@@ -107,6 +107,49 @@ def test_recovers_main_effects_on_linear_response():
     assert by_factor["D"] == pytest.approx(0.0, abs=0.1)
 
 
+def test_effect_se_not_inflated_by_other_factors():
+    """SE uses the joint-model residual, so big B/C effects don't inflate A's t.
+
+    Regression: the within-level scatter for A included B's and C's variation,
+    deflating every factor's t toward 'not significant'.
+    """
+    from discopt.doe import factorial_2level_design
+
+    factors = {n: (-1.0, 1.0) for n in ["A", "B", "C"]}
+    d = factorial_2level_design(factors, seed=1)
+    # Large effects on all three, tiny noise -> all should be highly significant.
+    for i, row in enumerate(d.rows):
+        if row.get("is_center"):
+            continue
+        row["y"] = (
+            5.0 * float(row["A"])
+            + 5.0 * float(row["B"])
+            + 5.0 * float(row["C"])
+            + (0.001 if i % 2 else -0.001)
+        )
+    est = {e["factor"]: e for e in effects_estimates(d.rows, response="y")}
+    for f in ("A", "B", "C"):
+        assert abs(est[f]["t"]) > 100.0  # would be tiny under the pooled-scatter bug
+
+
+def test_effect_orientation_via_levels():
+    """`levels` fixes the sign for reversed-orientation factors."""
+    rows = [
+        {"cat": "B", "y": 10.0},
+        {"cat": "B", "y": 10.0},
+        {"cat": "A", "y": 2.0},
+        {"cat": "A", "y": 2.0},
+    ]
+    # Declared orientation: low="B", high="A" -> effect = mean(A) - mean(B) = -8.
+    est = effects_estimates(rows, response="y", levels={"cat": ("B", "A")})[0]
+    assert est["low"] == "B"
+    assert est["high"] == "A"
+    assert est["effect"] == pytest.approx(-8.0)
+    # Sorted fallback (alphabetical A < B) flips it to +8.
+    est_sorted = effects_estimates(rows, response="y")[0]
+    assert est_sorted["effect"] == pytest.approx(8.0)
+
+
 def test_categorical_factors_round_trip():
     """Categorical low/high values appear in the output rows."""
     factors = {
