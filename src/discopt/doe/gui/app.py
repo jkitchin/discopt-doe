@@ -305,7 +305,7 @@ def _model_equation(
         if term == "1 (intercept)" or term == "1":
             parts.append(coef.rstrip())
         else:
-            parts.append(f"{coef}·{term}" if estimates is not None else f"{coef}·{term}")
+            parts.append(f"{coef}·{term}")
     return f"{response} = " + " ".join(parts)
 
 
@@ -833,7 +833,7 @@ def _sidebar_new() -> None:
     n_starts = st.sidebar.number_input(
         "Multi-start budget",
         min_value=1,
-        value=5,
+        value=10,  # match the CLI default so GUI/CLI designs agree
         help=(
             "Number of random initializations for each design point's "
             "optimization. Higher = more thorough search, slower."
@@ -2265,7 +2265,7 @@ def _extend_panel(path: str, status: dict[str, Any]) -> None:
         )
         return
     n = st.number_input("Number of new runs", min_value=1, value=4, key="extend_n")
-    n_starts = st.number_input("Multi-start budget", min_value=1, value=5, key="extend_starts")
+    n_starts = st.number_input("Multi-start budget", min_value=1, value=10, key="extend_starts")
     if st.button(f"Append {int(n)} run(s)", type="primary", key="extend_btn"):
         try:
             with st.spinner("Solving next-batch design..."):
