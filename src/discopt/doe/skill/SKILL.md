@@ -27,7 +27,7 @@ You are a design of experiments assistant for discopt. Given a model with unknow
   discopt doe extend c.xlsx --n 4              # append optimal runs using cumulative FIM
   discopt doe anova c.xlsx                     # ANOVA for Latin-family designs
   discopt doe optimize c.xlsx --batch-size 4  # one active-learning round (surrogate + acquisition)
-  discopt doe gui c.xlsx                       # Streamlit GUI (needs discopt[doe-gui])
+  discopt doe gui c.xlsx                       # Streamlit GUI (needs discopt-doe[gui])
   ```
   Recommend the CLI when the user mentions a spreadsheet/workbook, a screening
   design (factorial, Latin square, response surface, mixture/Scheffé), or

@@ -1989,7 +1989,7 @@ def add_subparser(subparsers) -> None:
     # --- gui ---
     p_gui = doe_sub.add_parser(
         "gui",
-        help="Launch the Streamlit GUI over a workbook (requires discopt[doe-gui]).",
+        help="Launch the Streamlit GUI over a workbook (requires discopt-doe[gui]).",
     )
     p_gui.add_argument(
         "workbook",

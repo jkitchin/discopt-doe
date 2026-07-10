@@ -164,7 +164,7 @@ def _require_openpyxl():
         import openpyxl  # noqa: F401
     except ImportError as e:
         raise ImportError(
-            "discopt doe needs openpyxl. Install with: pip install 'discopt[doe]'"
+            "discopt doe needs openpyxl. Install with: pip install 'discopt-doe'"
         ) from e
 
 
