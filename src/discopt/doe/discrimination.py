@@ -491,22 +491,31 @@ def _criterion_hunter_reiner(
 def _criterion_buzzi_ferraris(
     preds: dict[str, _ModelPrediction], weights: dict[str, float]
 ) -> tuple[float, np.ndarray]:
-    """``Σ w_i w_j (ŷ_i − ŷ_j)^T (Σ_y + V_i + V_j)^{-1} (ŷ_i − ŷ_j)``."""
+    """Buzzi-Ferraris–Forzatti (1984) pairwise statistic.
+
+    ``T_ij = Δᵀ S⁻¹ Δ + tr(2Σ S⁻¹)`` with ``Δ = ŷ_i − ŷ_j`` and
+    ``S = 2Σ + V_i + V_j`` (Olofsson et al. 2019). The ``2Σ`` reflects that
+    ``Δ`` is a difference of two future *noisy* observations, and the trace
+    term is the criterion's expected-value offset. Σ is symmetrized across the
+    pair so the statistic is order-independent when the models declare
+    different measurement errors.
+    """
     names = list(preds.keys())
     M = len(names)
     pw = np.zeros((M, M))
     for i, j in combinations(range(M), 2):
         ni, nj = names[i], names[j]
-        # Common Σ_y: averaging is well-defined since both come from the same
-        # ExperimentModel.measurement_error mapping; if response_names align.
         if preds[ni].response_names != preds[nj].response_names:
             raise ValueError(
                 f"Models {ni!r} and {nj!r} have different response names; "
                 "discrimination requires the same response namespace."
             )
         diff = preds[ni].y_hat - preds[nj].y_hat
-        cov = preds[ni].Sigma_y + preds[ni].V + preds[nj].V
-        contrib = float(diff @ np.linalg.solve(cov, diff))
+        sigma = 0.5 * (preds[ni].Sigma_y + preds[nj].Sigma_y)
+        S = 2.0 * sigma + preds[ni].V + preds[nj].V
+        S_inv_diff = np.linalg.solve(S, diff)
+        trace_term = float(np.trace(np.linalg.solve(S, 2.0 * sigma)))
+        contrib = float(diff @ S_inv_diff) + trace_term
         pw[i, j] = pw[j, i] = contrib
     total = sum(
         weights[names[i]] * weights[names[j]] * pw[i, j] for i, j in combinations(range(M), 2)
