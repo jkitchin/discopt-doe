@@ -49,12 +49,20 @@ class ExplorationResult:
             Design variable values at the best grid point.
         """
         values = self.metrics[criterion]
+        if np.all(np.isnan(values)):
+            raise ValueError(
+                f"no feasible grid point for criterion {criterion!r}: the FIM "
+                "could not be evaluated at any point in the grid."
+            )
+        # Use nan-aware argmax/argmin: infeasible points are left NaN, and
+        # plain np.argmax/argmin would return the first NaN (NaN compares
+        # greater than everything), silently reporting a failed point as best.
         if criterion in ("log_det_fim", "min_eigenvalue"):
             # Maximize
-            best_idx = np.unravel_index(np.argmax(values), values.shape)
+            best_idx = np.unravel_index(np.nanargmax(values), values.shape)
         else:
             # Minimize
-            best_idx = np.unravel_index(np.argmin(values), values.shape)
+            best_idx = np.unravel_index(np.nanargmin(values), values.shape)
 
         idx_tuple = best_idx if isinstance(best_idx, tuple) else (best_idx,)
 

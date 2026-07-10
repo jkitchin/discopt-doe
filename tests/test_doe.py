@@ -263,6 +263,24 @@ class TestExploreDesignSpace:
         best = result.best_point("log_det_fim")
         assert best["x"] == pytest.approx(10.0)
 
+    def test_best_point_ignores_nan_grid_points(self):
+        """A failed (NaN) grid point must not be returned as the best.
+
+        Regression: plain np.argmax returns the index of the first NaN, so a
+        single infeasible point silently became 'best'. nanargmax skips them.
+        """
+        grid = {"x": np.array([1.0, 2.0, 3.0])}
+        metrics = {"log_det_fim": np.array([0.0, np.nan, 2.0])}
+        res = ExplorationResult(grid=grid, metrics=metrics, design_names=["x"])
+        assert res.best_point("log_det_fim")["x"] == pytest.approx(3.0)
+
+    def test_best_point_all_nan_raises(self):
+        grid = {"x": np.array([1.0, 2.0])}
+        metrics = {"log_det_fim": np.array([np.nan, np.nan])}
+        res = ExplorationResult(grid=grid, metrics=metrics, design_names=["x"])
+        with pytest.raises(ValueError, match="no feasible"):
+            res.best_point("log_det_fim")
+
     def test_monotonic_d_optimal_for_linear(self):
         """For y=k*x, D-optimality increases monotonically with |x|."""
         exp = DesignableExperiment()
