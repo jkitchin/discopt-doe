@@ -234,8 +234,9 @@ def compute_fim(
         Sensitivity computation method: ``"autodiff"`` (exact JAX) or
         ``"finite_difference"`` (central differences, for validation).
     fd_step : float, default 1e-5
-        Relative perturbation size for finite differences (only used
-        when ``method="finite_difference"``).
+        Relative perturbation size for finite differences: the actual step
+        for each parameter is ``fd_step * max(|value|, 1)`` (only used when
+        ``method="finite_difference"``).
 
     Returns
     -------
@@ -918,8 +919,13 @@ def _compute_jacobian_fd(response_fns, x_flat, p_flat, param_indices, step):
     J = np.zeros((n_responses, n_params))
 
     for j, idx in enumerate(param_indices):
-        x_plus = x_flat.at[idx].set(x_flat[idx] + step)
-        x_minus = x_flat.at[idx].set(x_flat[idx] - step)
-        J[:, j] = (response_vector(x_plus) - response_vector(x_minus)) / (2 * step)
+        # Scale the step by the parameter magnitude so it is a genuine relative
+        # perturbation (as documented). A fixed absolute step causes
+        # catastrophic cancellation for large parameters and a ~100%
+        # perturbation for tiny ones.
+        h = step * max(abs(float(x_flat[idx])), 1.0)
+        x_plus = x_flat.at[idx].set(x_flat[idx] + h)
+        x_minus = x_flat.at[idx].set(x_flat[idx] - h)
+        J[:, j] = (response_vector(x_plus) - response_vector(x_minus)) / (2 * h)
 
     return J
