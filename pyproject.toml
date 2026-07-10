@@ -65,8 +65,12 @@ namespaces = true
 # has discopt.doe removed — branches that still ship discopt.doe would
 # overwrite this package's files in site-packages. REMOVE this block when
 # discopt v0.6.0 is published.
+#
+# Pinned to an immutable commit (rev) rather than the branch name so a re-lock
+# still resolves after the branch is merged or deleted. Bump the rev when the
+# extraction branch advances; drop the whole block at the 0.6.0 release.
 [tool.uv.sources]
-discopt = { git = "https://github.com/jkitchin/discopt", branch = "refactor/389-extract-doe" }
+discopt = { git = "https://github.com/jkitchin/discopt", rev = "fd6106e63c8fb15f82533d0a29d6321b9232af41" }
 
 [tool.setuptools.package-data]
 "discopt.doe" = ["gui/discopt-logo.png", "skill/SKILL.md", "skill/agents/*.md"]
