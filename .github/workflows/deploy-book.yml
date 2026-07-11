@@ -1,0 +1,44 @@
+name: deploy-book
+
+# Build the Jupyter Book and publish it to GitHub Pages on every push to main.
+on:
+  push:
+    branches: [main]
+  # Allow manual runs from the Actions tab.
+  workflow_dispatch:
+
+# Grant GITHUB_TOKEN the permissions the Pages deploy needs.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Serialize deploys; don't cancel an in-progress one (a half-published site is worse).
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      # --all-extras pulls jupyter-book and the ml/gui deps some notebooks import.
+      # discopt>=0.6 resolves from the pinned git rev in [tool.uv.sources].
+      - run: uv sync --python 3.12 --all-extras
+      # -W turns Sphinx warnings (broken refs, missing citations) into failures.
+      - run: uv run jupyter-book build docs/ -W
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/_build/html
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
