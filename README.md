@@ -1,5 +1,7 @@
 # discopt-doe
 
+![discopt-doe banner](docs/doe-banner.png)
+
 [![ci](https://github.com/jkitchin/discopt-doe/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jkitchin/discopt-doe/actions/workflows/ci.yml)
 
 Design-of-experiments plugin for the [discopt](https://github.com/jkitchin/discopt)
