@@ -470,3 +470,20 @@ def test_categorical_formula_level_stored_as_text(tmp_path: Path) -> None:
     ci = headers.index("cat")
     vals = [row[ci].value for row in sheet.iter_rows(min_row=2) if row[0].value is not None]
     assert "=A" in vals  # stored literally, not evaluated to a formula error
+
+
+def test_anova_rejects_nonfinite_response():
+    """Non-finite / extreme responses give a clean error, not OverflowError.
+
+    Fuzz-found: a bare Python-float ``x ** 2`` raises OverflowError for
+    |x| ~ 1e154+, so anova_report crashed on adversarial response values.
+    """
+    for bad in (float("inf"), float("nan"), 1e300):
+        rows = [
+            {"g": "A", "y": 1.0},
+            {"g": "A", "y": 2.0},
+            {"g": "B", "y": bad},
+            {"g": "B", "y": 3.0},
+        ]
+        with pytest.raises(ValueError, match="non-finite or extreme"):
+            anova_report(rows, response="y", factors=["g"])

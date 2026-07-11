@@ -36,6 +36,8 @@ from dataclasses import dataclass
 from itertools import product
 from typing import Iterable, Mapping, Sequence, cast
 
+import numpy as np
+
 
 @dataclass(frozen=True)
 class AnovaEffect:
@@ -170,6 +172,17 @@ def anova_report(
             y.append(float(cast(float, r[response])))
         except (TypeError, ValueError) as e:
             raise ValueError(f"response value {r[response]!r} is not numeric") from e
+
+    # Reject non-finite or extreme response values up front: a bare Python-float
+    # ``x ** 2`` raises OverflowError for |x| ~ 1e154+, so validate before the
+    # sum-of-squares computations below rather than crashing on adversarial data.
+    y_arr = np.asarray(y, dtype=float)
+    with np.errstate(over="ignore", invalid="ignore"):
+        if not np.all(np.isfinite(y_arr)) or not np.isfinite(float(np.sum(y_arr**2))):
+            raise ValueError(
+                "response column contains non-finite or extreme values (inf/nan, "
+                "or magnitudes too large to form sums of squares); check the data"
+            )
 
     n = len(y)
     grand_mean = sum(y) / n

@@ -464,6 +464,12 @@ def do_new(params: NewParams) -> dict[str, Any]:
 
     _validate_new_column_names(params)
 
+    if params.mixture_total is not None and float(params.mixture_total) <= 0.0:
+        raise DoEError(
+            f"mixture-total must be positive (got {params.mixture_total}); it is the "
+            "required sum of the component values."
+        )
+
     if params.template == "factorial-2level":
         return _do_new_factorial(params)
     if params.template == "optimize":
@@ -1020,7 +1026,9 @@ def _cmd_new(args) -> int:
     )
     try:
         out = do_new(params)
-    except (DoEError, ValueError, TypeError, FileNotFoundError, ImportError) as e:
+    except (DoEError, ValueError, TypeError, FileNotFoundError, ImportError, RuntimeError) as e:
+        # RuntimeError: the optimal-design search can fail to find a non-singular
+        # FIM (too few runs, unidentifiable model); surface it as a clean error.
         return _fail(args, str(e), workbook_path=str(output))
     if args.json:
         print(_dump_json(out, indent=2))
@@ -1476,7 +1484,7 @@ def _design_row(
 def _cmd_fit(args) -> int:
     try:
         out = do_fit({"workbook": args.workbook})
-    except (DoEError, FileNotFoundError, OSError, ValueError, TypeError) as e:
+    except (DoEError, FileNotFoundError, OSError, ValueError, TypeError, RuntimeError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
     if args.json:
         print(_dump_json(out, indent=2))
@@ -1579,7 +1587,7 @@ def _cmd_anova(args) -> int:
                 "interactions": interactions,
             }
         )
-    except (DoEError, FileNotFoundError, OSError, ValueError, TypeError) as e:
+    except (DoEError, FileNotFoundError, OSError, ValueError, TypeError, RuntimeError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
     if args.json:
         print(_dump_json({k: v for k, v in out.items() if k != "summary"}, indent=2))
@@ -1701,7 +1709,7 @@ def _cmd_extend(args) -> int:
                 n_starts=int(args.n_starts),
             )
         )
-    except (DoEError, FileNotFoundError, OSError, ValueError, TypeError) as e:
+    except (DoEError, FileNotFoundError, OSError, ValueError, TypeError, RuntimeError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
     for _w in out.get("warnings", []):
         print(f"warning: {_w}", file=sys.stderr)
@@ -1761,7 +1769,7 @@ def _cmd_optimize(args) -> int:
                 custom_surrogate_kwargs=custom_kwargs,
             )
         )
-    except (DoEError, FileNotFoundError, OSError, ValueError, TypeError) as e:
+    except (DoEError, FileNotFoundError, OSError, ValueError, TypeError, RuntimeError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
     for _w in out.get("warnings", []):
         print(f"warning: {_w}", file=sys.stderr)

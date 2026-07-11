@@ -826,3 +826,45 @@ def test_new_optimize_default_n_succeeds(tmp_path):
     )
     assert args.n >= 2
     assert args.doe_func(args) == 0
+
+
+# ──────────────────────────────────────────────────────────────────
+# Fuzz-found robustness fixes
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_do_new_rejects_nonpositive_mixture_total(tmp_path):
+    """mixture_total <= 0 is a clean error, not a downstream RuntimeError."""
+    with pytest.raises(DoEError, match="mixture-total must be positive"):
+        do_new(
+            NewParams(
+                output=tmp_path / "m.xlsx",
+                n=6,
+                inputs=[("A", 0.0, 1.0), ("B", 0.0, 1.0), ("C", 0.0, 1.0)],
+                response_name="y",
+                measurement_error=0.1,
+                criterion="determinant",
+                seed=0,
+                n_starts=3,
+                template="scheffe-quadratic",
+                mixture_total=0.0,
+            )
+        )
+
+
+def test_cmd_new_catches_runtime_error(tmp_path, monkeypatch):
+    """A RuntimeError from the design search exits cleanly (exit 1), no traceback."""
+    import argparse
+
+    import discopt.doe.cli as cli
+
+    def boom(_params):
+        raise RuntimeError("No feasible design point found")
+
+    monkeypatch.setattr(cli, "do_new", boom)
+    top = argparse.ArgumentParser()
+    cli.add_subparser(top.add_subparsers(dest="cmd"))
+    args = top.parse_args(
+        ["doe", "new", "linear", "-o", str(tmp_path / "z.xlsx"), "--input", "x:0:1"]
+    )
+    assert args.doe_func(args) == 1

@@ -89,6 +89,8 @@ import random
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence, cast
 
+import numpy as np
+
 
 @dataclass(frozen=True)
 class FactorialDesign:
@@ -262,6 +264,15 @@ def effects_estimates(
             y.append(float(cast(float, r[response])))
         except (TypeError, ValueError) as e:
             raise ValueError(f"response value {r[response]!r} is not numeric") from e
+
+    # Guard against non-finite / extreme responses (bare float ** 2 overflows).
+    y_arr = np.asarray(y, dtype=float)
+    with np.errstate(over="ignore", invalid="ignore"):
+        if not np.all(np.isfinite(y_arr)) or not np.isfinite(float(np.sum(y_arr**2))):
+            raise ValueError(
+                "response column contains non-finite or extreme values (inf/nan, "
+                "or magnitudes too large to form sums of squares); check the data"
+            )
 
     grand_mean = sum(y) / len(y)
     n = len(y)

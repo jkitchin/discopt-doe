@@ -225,3 +225,13 @@ def test_runs_order_is_shuffled_deterministically():
     assert sig1 == sig2
     # Different seed should usually permute (sets equal, list possibly differs).
     assert sorted(sig1) == sorted(sig3)
+
+
+def test_effects_estimates_rejects_nonfinite_response():
+    """effects_estimates rejects non-finite/extreme responses (fuzz-found)."""
+    from discopt.doe import effects_estimates
+
+    for bad in (float("inf"), float("nan"), 1e300):
+        rows = [{"A": -1, "y": 1.0}, {"A": 1, "y": bad}]
+        with pytest.raises(ValueError, match="non-finite or extreme"):
+            effects_estimates(rows, response="y")
