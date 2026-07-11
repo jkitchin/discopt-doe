@@ -22,6 +22,8 @@ from discopt.doe import (
     compute_fim,
     explore_design_space,
     optimal_experiment,
+    project_to_simplex,
+    sum_constraint,
 )
 from discopt.estimate import Experiment, ExperimentModel
 
@@ -82,9 +84,101 @@ class TwoParamDesignExperiment(Experiment):
         )
 
 
+class MixtureExperiment(Experiment):
+    """y = a*x1 + b*x2 at mixture point (x1, x2). Estimate a and b."""
+
+    def create_model(self, **kwargs):
+        m = dm.Model("mixture")
+        a = m.continuous("a", lb=-20, ub=20)
+        b = m.continuous("b", lb=-20, ub=20)
+        x1 = m.continuous("x1", lb=0.0, ub=1.0)
+        x2 = m.continuous("x2", lb=0.0, ub=1.0)
+
+        return ExperimentModel(
+            model=m,
+            unknown_parameters={"a": a, "b": b},
+            design_inputs={"x1": x1, "x2": x2},
+            responses={"y": a * x1 + b * x2},
+            measurement_error={"y": 0.1},
+        )
+
+
 # ──────────────────────────────────────────────────────────
 # TestOptimalExperiment
 # ──────────────────────────────────────────────────────────
+
+
+def test_optimal_experiment_surfaces_root_cause(monkeypatch):
+    """When FIM evaluation fails everywhere, the real error is chained.
+
+    Regression: _scan_candidates swallowed the batch exception, so the user
+    only saw a generic 'No feasible design point found'.
+    """
+    import discopt.doe.design as design_mod
+
+    def boom(*a, **k):
+        raise RuntimeError("kaboom in FIM")
+
+    monkeypatch.setattr(design_mod, "compute_fim_batch", boom)
+    monkeypatch.setattr(design_mod, "compute_fim", boom)
+
+    exp = DesignableExperiment()
+    with pytest.raises(RuntimeError, match="No feasible design point") as ei:
+        optimal_experiment(exp, {"k": 2.0}, {"x": (0.1, 10.0)})
+    assert isinstance(ei.value.__cause__, RuntimeError)
+    assert "kaboom" in str(ei.value.__cause__)
+
+
+class TestConstrainedOptimalExperiment:
+    """Regression: constrained designs must actually satisfy the constraints."""
+
+    def _bounds(self):
+        return {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}
+
+    def test_returns_feasible_via_slsqp_without_projection(self):
+        """Even with no feasible_projection, the result must satisfy the sum.
+
+        Previously the multi-start scan ranked by criterion only, and the
+        feasible SLSQP design was accepted only if it *beat* the infeasible
+        incumbent — so an infeasible design was returned.
+        """
+        exp = MixtureExperiment()
+        g = sum_constraint(["x1", "x2"], 1.0)
+        design = optimal_experiment(
+            exp,
+            {"a": 1.0, "b": 1.0},
+            self._bounds(),
+            equality_constraints=[g],
+        )
+        assert abs(design.design["x1"] + design.design["x2"] - 1.0) < 1e-4
+
+    def test_returns_feasible_with_projection(self):
+        from functools import partial
+
+        exp = MixtureExperiment()
+        g = sum_constraint(["x1", "x2"], 1.0)
+        design = optimal_experiment(
+            exp,
+            {"a": 1.0, "b": 1.0},
+            self._bounds(),
+            equality_constraints=[g],
+            feasible_projection=partial(
+                project_to_simplex, variables=["x1", "x2"], total=1.0
+            ),
+        )
+        assert abs(design.design["x1"] + design.design["x2"] - 1.0) < 1e-4
+
+    def test_no_feasible_seed_and_no_refine_raises(self):
+        exp = MixtureExperiment()
+        g = sum_constraint(["x1", "x2"], 1.0)
+        with pytest.raises(RuntimeError, match="feasible"):
+            optimal_experiment(
+                exp,
+                {"a": 1.0, "b": 1.0},
+                self._bounds(),
+                equality_constraints=[g],
+                local_refine=False,
+            )
 
 
 class TestOptimalExperiment:
@@ -189,6 +283,24 @@ class TestExploreDesignSpace:
         )
         best = result.best_point("log_det_fim")
         assert best["x"] == pytest.approx(10.0)
+
+    def test_best_point_ignores_nan_grid_points(self):
+        """A failed (NaN) grid point must not be returned as the best.
+
+        Regression: plain np.argmax returns the index of the first NaN, so a
+        single infeasible point silently became 'best'. nanargmax skips them.
+        """
+        grid = {"x": np.array([1.0, 2.0, 3.0])}
+        metrics = {"log_det_fim": np.array([0.0, np.nan, 2.0])}
+        res = ExplorationResult(grid=grid, metrics=metrics, design_names=["x"])
+        assert res.best_point("log_det_fim")["x"] == pytest.approx(3.0)
+
+    def test_best_point_all_nan_raises(self):
+        grid = {"x": np.array([1.0, 2.0])}
+        metrics = {"log_det_fim": np.array([np.nan, np.nan])}
+        res = ExplorationResult(grid=grid, metrics=metrics, design_names=["x"])
+        with pytest.raises(ValueError, match="no feasible"):
+            res.best_point("log_det_fim")
 
     def test_monotonic_d_optimal_for_linear(self):
         """For y=k*x, D-optimality increases monotonically with |x|."""

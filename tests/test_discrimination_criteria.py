@@ -102,6 +102,96 @@ class TestBuzziFerraris:
         )
         assert r.design["x"] == pytest.approx(2.0, abs=1e-4)
 
+    def test_bf_closed_form_value(self):
+        """Scalar 2-model case: T = Δ²/S + 2σ²/S with S = 2σ² + V_i + V_j.
+
+        Regression: the old code used S = σ² + V_i + V_j and dropped the
+        trace term, so it was not the Buzzi-Ferraris-Forzatti statistic.
+        """
+        from discopt.doe.discrimination import _ModelPrediction, _criterion_buzzi_ferraris
+
+        sigma2 = 0.25
+        vi, vj = 0.1, 0.3
+        yi, yj = 2.0, 0.5
+        preds = {
+            "i": _ModelPrediction(
+                y_hat=np.array([yi]),
+                V=np.array([[vi]]),
+                Sigma_y=np.array([[sigma2]]),
+                response_names=["y"],
+                fim_result=None,
+            ),
+            "j": _ModelPrediction(
+                y_hat=np.array([yj]),
+                V=np.array([[vj]]),
+                Sigma_y=np.array([[sigma2]]),
+                response_names=["y"],
+                fim_result=None,
+            ),
+        }
+        total, pw = _criterion_buzzi_ferraris(preds, {"i": 0.5, "j": 0.5})
+        S = 2 * sigma2 + vi + vj
+        expected_T = (yi - yj) ** 2 / S + 2 * sigma2 / S
+        assert pw[0, 1] == pytest.approx(expected_T)
+        assert total == pytest.approx(0.5 * 0.5 * expected_T)
+
+    def test_bf_symmetric_in_model_order(self):
+        """The pairwise statistic is order-independent even with unequal σ."""
+        from discopt.doe.discrimination import _ModelPrediction, _criterion_buzzi_ferraris
+
+        def pred(y, v, s):
+            return _ModelPrediction(
+                y_hat=np.array([y]),
+                V=np.array([[v]]),
+                Sigma_y=np.array([[s]]),
+                response_names=["y"],
+                fim_result=None,
+            )
+
+        a, b = pred(2.0, 0.1, 0.2), pred(0.5, 0.3, 0.6)
+        t_ab, _ = _criterion_buzzi_ferraris({"i": a, "j": b}, {"i": 0.5, "j": 0.5})
+        t_ba, _ = _criterion_buzzi_ferraris({"i": b, "j": a}, {"i": 0.5, "j": 0.5})
+        assert t_ab == pytest.approx(t_ba)
+
+    def test_prior_fim_shrinks_prediction_covariance(self):
+        """Supplying a larger prior FIM reduces the prediction covariance V.
+
+        Regression: without prior_fims, V came from the single candidate FIM
+        and was independent of how well the parameters are actually known.
+        """
+        from discopt.doe.discrimination import _predict_with_covariance
+
+        exp = LinearExp()
+        pv, dv = {"a": 1.0}, {"x": 1.5}
+        small = _predict_with_covariance(exp, pv, dv, prior_fim=np.array([[1.0]]))
+        large = _predict_with_covariance(exp, pv, dv, prior_fim=np.array([[100.0]]))
+        assert large.V[0, 0] < small.V[0, 0]
+
+    def test_misaligned_response_names_raise(self):
+        """All criteria index responses positionally; mismatched names error."""
+        from discopt.doe.discrimination import _predict_all_models
+
+        class ExpY(Experiment):
+            def create_model(self, **kw):
+                m = dm.Model("y")
+                a = m.continuous("a", lb=0.1, ub=5.0)
+                x = m.continuous("x", lb=0.0, ub=2.0)
+                return ExperimentModel(m, {"a": a}, {"x": x}, {"y": a * x}, {"y": 0.5})
+
+        class ExpZ(Experiment):
+            def create_model(self, **kw):
+                m = dm.Model("z")
+                a = m.continuous("a", lb=0.1, ub=5.0)
+                x = m.continuous("x", lb=0.0, ub=2.0)
+                return ExperimentModel(m, {"a": a}, {"x": x}, {"z": a * x}, {"z": 0.5})
+
+        with pytest.raises(ValueError, match="response namespace"):
+            _predict_all_models(
+                {"m1": ExpY(), "m2": ExpZ()},
+                {"m1": {"a": 1.0}, "m2": {"a": 1.0}},
+                {"x": 1.0},
+            )
+
     def test_bf_argmax_matches_hr_argmax_on_symmetric_problem(self):
         """On a symmetric problem where prediction covariances are
         equal across models, the BF criterion and HR criterion share
@@ -274,6 +364,10 @@ class TestValidation:
         with pytest.raises(ValueError, match="non-empty"):
             discriminate_design(EXPS, PE, {})
 
+    def test_unknown_design_bound_key_raises(self):
+        with pytest.raises(ValueError, match="not design inputs"):
+            discriminate_design(EXPS, PE, {"temperture": (0.0, 2.0)})
+
     def test_dt_not_callable_as_plain_criterion(self):
         with pytest.raises(ValueError, match="discriminate_compound"):
             discriminate_design(EXPS, PE, BOUNDS, criterion=DiscriminationCriterion.DT)
@@ -285,6 +379,34 @@ class TestValidation:
     def test_model_priors_zero_sum(self):
         with pytest.raises(ValueError, match="positive"):
             discriminate_design(EXPS, PE, BOUNDS, model_priors={"linear": 0.0, "quadratic": 0.0})
+
+    def test_all_candidates_failing_raises(self):
+        """When every candidate fails, raise instead of returning a garbage best.
+
+        Regression: the finite _SINGULAR_SENTINEL was accepted as a real 'best'
+        value, so a failing design was returned silently.
+        """
+
+        class ExpY(Experiment):
+            def create_model(self, **kw):
+                m = dm.Model("y")
+                a = m.continuous("a", lb=0.1, ub=5.0)
+                x = m.continuous("x", lb=0.0, ub=2.0)
+                return ExperimentModel(m, {"a": a}, {"x": x}, {"y": a * x}, {"y": 0.5})
+
+        class ExpZ(Experiment):
+            def create_model(self, **kw):
+                m = dm.Model("z")
+                a = m.continuous("a", lb=0.1, ub=5.0)
+                x = m.continuous("x", lb=0.0, ub=2.0)
+                return ExperimentModel(m, {"a": a}, {"x": x}, {"z": a * x}, {"z": 0.5})
+
+        with pytest.raises(RuntimeError, match="No feasible design"):
+            discriminate_design(
+                {"m1": ExpY(), "m2": ExpZ()},
+                {"m1": {"a": 1.0}, "m2": {"a": 1.0}},
+                BOUNDS,
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────

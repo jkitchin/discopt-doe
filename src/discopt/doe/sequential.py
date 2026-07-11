@@ -9,6 +9,7 @@ Alternates between parameter estimation and optimal design in a loop:
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Callable, Union
 
@@ -93,13 +94,37 @@ def sequential_doe(
         Function ``f(design_dict) -> data_dict`` that runs an experiment
         at the given design conditions and returns observed data.
         If None, the loop returns after the first recommendation.
+
+        .. important::
+           The returned ``data_dict`` is merged into the cumulative data by
+           response key and handed to :func:`~discopt.estimate.estimate_parameters`,
+           which treats repeated values under one key as **replicate
+           observations at the model's fixed conditions** -- the design values
+           are *not* attached to the data. So if your model has design inputs
+           and ``run_experiment`` returns the *same* response keys each round
+           (e.g. always ``{"y": value}``), observations taken at *different*
+           designed conditions are silently fitted as replicates at one
+           condition, corrupting the estimates and every subsequent design.
+
+           The correct pattern is a *stateful* ``Experiment`` whose
+           ``create_model`` exposes a fresh response (and its design condition)
+           per accumulated observation, with ``run_experiment`` appending a new
+           observation under a new response key each round. See
+           ``tests/test_discrimination_sequential.py`` for a worked example.
+           When ``design_bounds`` is non-empty and a returned key already
+           exists, this function warns that replicate-confusion may be
+           occurring.
     callback : callable, optional
         Called with each ``DoERound`` after it completes.
 
     Returns
     -------
     list[DoERound]
-        History of all rounds.
+        History of all rounds. Each round estimates parameters *before*
+        collecting that round's data, so ``history[-1].estimation`` does not
+        include the final round's ``data_collected``. Re-run
+        :func:`~discopt.estimate.estimate_parameters` on the accumulated data
+        (or start another loop) if you need the fully-updated estimate.
     """
     if experiments_per_round < 1:
         raise ValueError(f"experiments_per_round must be >= 1, got {experiments_per_round}")
@@ -107,7 +132,6 @@ def sequential_doe(
     history = []
     current_guess = dict(initial_guess)
     all_data = dict(initial_data)
-    prior_fim = None
 
     for round_idx in range(n_rounds):
         # Step 1: Estimate parameters from all data
@@ -117,8 +141,11 @@ def sequential_doe(
             initial_guess=current_guess,
         )
 
-        # Accumulate FIM as prior
-        prior_fim = est.fim if prior_fim is None else prior_fim + est.fim
+        # Information already collected: est.fim is fit on *all* accumulated
+        # data, so it is the cumulative prior for designing the next point.
+        # (Summing est.fim across rounds would double-count earlier data,
+        # since each round's est.fim already includes it.)
+        prior_fim = est.fim
 
         # Step 2: Design next experiment(s)
         design: DesignResult | BatchDesignResult
@@ -169,6 +196,17 @@ def sequential_doe(
             # Merge round data into cumulative data
             for key, round_arr in collected.items():
                 if key in all_data:
+                    if design_bounds:
+                        warnings.warn(
+                            f"run_experiment returned response key {key!r} that "
+                            "already has data, while design_bounds is non-empty. "
+                            "estimate_parameters will fit these as replicates at "
+                            "one fixed condition, ignoring the differing designed "
+                            "conditions. Use a stateful Experiment that exposes a "
+                            "fresh response key per observation (see the "
+                            "sequential_doe docstring).",
+                            stacklevel=2,
+                        )
                     all_data[key] = np.concatenate([np.atleast_1d(all_data[key]), round_arr])
                 else:
                     all_data[key] = round_arr

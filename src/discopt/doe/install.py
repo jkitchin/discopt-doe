@@ -27,7 +27,9 @@ def install_skill(claude_dir: Path, force: bool = False) -> list[Path]:
     if dest.exists() and not force:
         print(f"skill already installed: {dest}\n  (use --force to overwrite)")
     else:
-        dest.write_text(_skill_root().joinpath("SKILL.md").read_text())
+        dest.write_text(
+            _skill_root().joinpath("SKILL.md").read_text(encoding="utf-8"), encoding="utf-8"
+        )
         print(f"installed skill -> {dest}")
         installed.append(dest)
 
@@ -40,7 +42,7 @@ def install_skill(claude_dir: Path, force: bool = False) -> list[Path]:
         if adest.exists() and not force:
             print(f"agent already installed: {adest} (use --force to overwrite)")
             continue
-        adest.write_text(agent.read_text())
+        adest.write_text(agent.read_text(encoding="utf-8"), encoding="utf-8")
         print(f"installed agent -> {adest}")
         installed.append(adest)
 

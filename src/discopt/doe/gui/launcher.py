@@ -46,7 +46,7 @@ def _streamlit_available() -> bool:
 def _missing_dep_message() -> str:
     return (
         "The discopt DoE GUI requires Streamlit. Install it with:\n"
-        "    pip install 'discopt[doe-gui]'\n"
+        "    pip install 'discopt-doe[gui]'\n"
         "or:\n"
         "    pip install streamlit pandas openpyxl"
     )

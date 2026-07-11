@@ -33,6 +33,11 @@ from discopt.doe.surrogate import (
 )
 from discopt.doe.workbook import InputSpec, Workbook
 
+# Every test here exercises the scikit-learn surrogate presets/adapter, which
+# live in the optional 'ml' extra. Skip the whole module on a core install
+# rather than failing with ModuleNotFoundError.
+pytest.importorskip("sklearn")
+
 _lwb = pytest.importorskip("openpyxl").load_workbook
 
 # ──────────────────────────────────────────────────────────────────
@@ -352,3 +357,71 @@ def test_optimize_round_user_supplied_estimator(tmp_path):
     )
     assert len(result.next_designs) == 1
     assert result.surrogate_mode == "return_std"
+
+
+def test_gp_preset_missing_sklearn_gives_actionable_error(monkeypatch):
+    """coerce_surrogate('gp') without scikit-learn names the [ml] extra."""
+    import sys
+
+    from discopt.doe.surrogate import coerce_surrogate
+
+    # Force `import sklearn` to fail even though it is installed here.
+    monkeypatch.setitem(sys.modules, "sklearn", None)
+    with pytest.raises(ImportError, match=r"discopt-doe\[ml\]"):
+        coerce_surrogate("gp")
+
+
+def test_call_acquisition_rejects_typo_kwarg():
+    """A misspelled tuning kwarg must error, not silently no-op.
+
+    Regression: built-in acquisitions used **_ and the dispatch swallowed
+    TypeError, so acquisition_kwargs={'kapa': ...} was silently ignored.
+    """
+    from discopt.doe.acquisition import call_acquisition, confidence_bound
+
+    s = coerce_surrogate("gp")
+    s.fit(*_quad_data())
+    cands = np.array([[0.0], [1.0]])
+    with pytest.raises(TypeError, match="kapa"):
+        call_acquisition(
+            confidence_bound, s, cands, direction=1, y_best=0.0, acq_kwargs={"kapa": 2.5}
+        )
+
+
+def test_call_acquisition_passes_valid_kwarg():
+    from discopt.doe.acquisition import call_acquisition, confidence_bound
+
+    s = coerce_surrogate("gp")
+    s.fit(*_quad_data())
+    cands = np.array([[0.0], [1.0], [2.0]])
+    lo = call_acquisition(confidence_bound, s, cands, direction=1, y_best=0.0, acq_kwargs={"kappa": 0.0})
+    hi = call_acquisition(confidence_bound, s, cands, direction=1, y_best=0.0, acq_kwargs={"kappa": 5.0})
+    # Larger kappa rewards uncertainty, so scores differ (kwarg took effect).
+    assert not np.allclose(lo, hi)
+
+
+def test_call_acquisition_propagates_internal_typeerror():
+    """A TypeError raised *inside* a custom acquisition is not masked."""
+    from discopt.doe.acquisition import call_acquisition
+
+    def broken(surrogate, X, *, direction, y_best):
+        raise TypeError("genuine bug inside acquisition")
+
+    s = coerce_surrogate("gp")
+    s.fit(*_quad_data())
+    with pytest.raises(TypeError, match="genuine bug"):
+        call_acquisition(broken, s, np.array([[0.0]]), direction=1, y_best=0.0)
+
+
+def test_adapter_does_not_mutate_user_estimator():
+    """coerce_surrogate + fit must not train the caller's estimator in place."""
+    from sklearn.gaussian_process import GaussianProcessRegressor
+
+    user_gp = GaussianProcessRegressor(normalize_y=True)
+    s = coerce_surrogate(user_gp)
+    X, y = _quad_data()
+    s.fit(X, y)
+    # The adapter fits a clone, so the user's instance is untouched: X_train_ is
+    # only set by GaussianProcessRegressor.fit.
+    assert not hasattr(user_gp, "X_train_")
+    assert s.estimator is not user_gp

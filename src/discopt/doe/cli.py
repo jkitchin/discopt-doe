@@ -1,6 +1,6 @@
 """``discopt doe`` — Excel-workbook-driven optimal experimental design.
 
-Five verbs make up the loop:
+Eight verbs make up the CLI:
 
 * ``discopt doe templates`` — list the available template models.
 * ``discopt doe new TEMPLATE [args] -o file.xlsx --n N`` — start a
@@ -9,8 +9,12 @@ Five verbs make up the loop:
   pending, and what to do next.
 * ``discopt doe fit file.xlsx`` — estimate parameters from completed
   runs and refresh the FIM.
+* ``discopt doe anova file.xlsx`` — ANOVA F-table for latin/factorial designs.
 * ``discopt doe extend file.xlsx --n M`` — append M more optimal runs
   using the cumulative FIM as the prior.
+* ``discopt doe optimize file.xlsx`` — one active-learning round on an
+  optimize-template workbook.
+* ``discopt doe gui file.xlsx`` — launch the Streamlit workbook GUI.
 
 Each verb is split into a pure ``do_<verb>(params: dict) -> dict``
 function and a ``_cmd_<verb>(args)`` argparse wrapper. The pure
@@ -165,16 +169,24 @@ class NewParams:
     optimize_criterion: str = "maximize"
     optimize_surrogate: str = "gp"
     optimize_acquisition: str = "expected_improvement"
+    # Overwrite an existing output workbook (the CLI maps --force here).
+    force: bool = False
 
 
 @dataclass
 class OptimizeParams:
-    """Inputs to :func:`do_optimize`."""
+    """Inputs to :func:`do_optimize`.
+
+    ``criterion``, ``surrogate`` and ``acquisition`` default to ``None``,
+    meaning "use whatever the workbook was created with" (the values stored
+    in ``template_args`` by ``discopt doe new optimize``). Pass an explicit
+    value to override the stored setting for this round.
+    """
 
     workbook: Path
-    criterion: str = "maximize"
-    surrogate: str = "gp"
-    acquisition: str = "expected_improvement"
+    criterion: str | None = None
+    surrogate: str | None = None
+    acquisition: str | None = None
     batch_size: int = 4
     n_candidates: int = 2048
     seed: int | None = None
@@ -288,20 +300,31 @@ def _cumulative_fim_from_completed(
     parameter_names: list[str],
     completed_runs: list[dict[str, Any]],
     input_names: list[str],
+    param_values: dict[str, float] | None = None,
 ) -> np.ndarray:
     """Sum FIMs over every completed run. Adds a ridge so first-batch
     FIMs stay non-singular when fewer runs than parameters have come in.
+
+    ``param_values`` is the point at which each per-run FIM is evaluated; for a
+    nonlinear model it must be the fitted/guessed parameters (the FIM at θ=0 is
+    meaningless there). Rows whose FIM cannot be evaluated are skipped with a
+    warning rather than dropped silently.
     """
     from discopt.doe.fim import compute_fim
 
     n_p = len(parameter_names)
     fim = _RIDGE * np.eye(n_p)
-    param_values = {name: 0.0 for name in parameter_names}
+    if param_values is None:
+        param_values = {name: 0.0 for name in parameter_names}
     for row in completed_runs:
         design = {nm: float(row[nm]) for nm in input_names}
         try:
             r = compute_fim(experiment, param_values, design)
-        except Exception:
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"warning: skipping run {row.get('run_id')} in prior-FIM sum ({e})",
+                file=sys.stderr,
+            )
             continue
         fim = fim + np.asarray(r.fim)
     return fim
@@ -389,7 +412,7 @@ def do_templates(_params: dict[str, Any] | None = None) -> dict[str, Any]:
 def _cmd_templates(args) -> int:
     out = do_templates()
     if args.json:
-        print(json.dumps(out, indent=2))
+        print(_dump_json(out, indent=2))
     else:
         for entry in out["templates"]:
             print(f"{entry['name']}")
@@ -402,9 +425,50 @@ def _cmd_templates(args) -> int:
 # ──────────────────────────────────────────────────────────────────
 
 
+def _validate_new_column_names(params: NewParams) -> None:
+    """Reject duplicate factor/input names or collisions with reserved columns.
+
+    Runs before any design work so all templates fail with the same clear
+    message instead of an opaque downstream error (or silent corruption).
+    """
+    from discopt.doe.templates import COMBINATORIAL_TEMPLATES
+
+    if params.template == "factorial-2level":
+        names = list((params.factor_pairs or {}).keys())
+    elif params.template in COMBINATORIAL_TEMPLATES:
+        names = list((params.levels or {}).keys())
+    else:
+        names = [s[0] for s in params.inputs]
+
+    reserved = {"run_id", "batch", "measured_at", "replicate", params.response_name}
+    seen: set[str] = set()
+    for name in names:
+        if name in reserved:
+            raise DoEError(
+                f"column name {name!r} is reserved (response is "
+                f"{params.response_name!r}); rename the input/factor."
+            )
+        if name in seen:
+            raise DoEError(f"duplicate factor/input name {name!r}; names must be unique.")
+        seen.add(name)
+
+
 def do_new(params: NewParams) -> dict[str, Any]:
     from discopt.doe import batch_optimal_experiment
     from discopt.doe.templates import COMBINATORIAL_TEMPLATES
+
+    # Guard here too (not only in _cmd_new) so direct callers such as the GUI
+    # don't silently clobber an existing campaign.
+    if Path(params.output).exists() and not params.force:
+        raise DoEError(f"{params.output} already exists; pass force=True to overwrite.")
+
+    _validate_new_column_names(params)
+
+    if params.mixture_total is not None and float(params.mixture_total) <= 0.0:
+        raise DoEError(
+            f"mixture-total must be positive (got {params.mixture_total}); it is the "
+            "required sum of the component values."
+        )
 
     if params.template == "factorial-2level":
         return _do_new_factorial(params)
@@ -564,9 +628,13 @@ def _do_new_factorial(params: NewParams) -> dict[str, Any]:
         response_name=params.response_name,
         module_callable=None,
         param_initial_guess=None,
+        extra_columns=["replicate"],
     )
 
-    designs = [{n: row[n] for n in factor_names} for row in design.rows]
+    designs = [
+        {**{n: row[n] for n in factor_names}, "replicate": row.get("replicate")}
+        for row in design.rows
+    ]
     new_ids = wb.append_runs(1, designs)
     wb.log(
         "new",
@@ -699,7 +767,29 @@ def do_optimize(params: OptimizeParams) -> dict[str, Any]:
             "use `discopt doe new optimize` to create one"
         )
 
-    surrogate_obj: object = params.surrogate
+    # Resolve criterion/surrogate/acquisition from the settings the workbook
+    # was created with, unless the caller explicitly overrode them. Without
+    # this, a workbook made with `--optimize-criterion minimize` would be
+    # silently *maximized* by the argparse default.
+    stored = wb.template_args()
+    warnings: list[str] = []
+
+    def _resolve(name: str, given: object, fallback: str) -> str:
+        stored_val = stored.get(name, fallback)
+        if given is None:
+            return str(stored_val)
+        if str(given) != str(stored_val):
+            warnings.append(
+                f"{name} overridden: workbook was created with "
+                f"{stored_val!r}, using {given!r} for this round."
+            )
+        return str(given)
+
+    criterion = _resolve("criterion", params.criterion, "maximize")
+    acquisition = _resolve("acquisition", params.acquisition, "expected_improvement")
+    surrogate = _resolve("surrogate", params.surrogate, "gp")
+
+    surrogate_obj: object = surrogate
     if params.custom_surrogate_path:
         surrogate_obj = _instantiate_dotted(
             params.custom_surrogate_path, params.custom_surrogate_kwargs or {}
@@ -707,9 +797,9 @@ def do_optimize(params: OptimizeParams) -> dict[str, Any]:
 
     result = _optimize_round(
         workbook=wb,
-        criterion=OptimizationCriterion(params.criterion),
+        criterion=OptimizationCriterion(criterion),
         surrogate=surrogate_obj,
-        acquisition=params.acquisition,
+        acquisition=acquisition,
         batch_size=int(params.batch_size),
         n_candidates=int(params.n_candidates),
         seed=params.seed,
@@ -718,11 +808,12 @@ def do_optimize(params: OptimizeParams) -> dict[str, Any]:
 
     return {
         "workbook_path": str(wb.path),
-        "criterion": params.criterion,
-        "acquisition": params.acquisition,
+        "criterion": criterion,
+        "acquisition": acquisition,
         "surrogate": (
-            params.custom_surrogate_path if params.custom_surrogate_path else params.surrogate
+            params.custom_surrogate_path if params.custom_surrogate_path else surrogate
         ),
+        "warnings": warnings,
         "surrogate_mode": result.surrogate_mode,
         "batch_size": int(params.batch_size),
         "n_completed": result.n_completed,
@@ -841,9 +932,13 @@ def _do_new_latin(params: NewParams) -> dict[str, Any]:
         response_name=params.response_name,
         module_callable=None,
         param_initial_guess=None,
+        extra_columns=["replicate"],
     )
 
-    designs = [{n: row[n] for n in factor_names} for row in design.rows]
+    designs = [
+        {**{n: row[n] for n in factor_names}, "replicate": row.get("replicate")}
+        for row in design.rows
+    ]
     new_ids = wb.append_runs(1, designs)
     wb.log(
         "new",
@@ -883,6 +978,13 @@ def _cmd_new(args) -> int:
             f"{output} already exists. Pass --force to overwrite.",
             workbook_path=str(output),
         )
+    if float(args.error) <= 0.0:
+        return _fail(
+            args,
+            f"--error must be positive (got {args.error}); it is the "
+            "measurement standard deviation and appears as 1/sigma^2 in the FIM.",
+            workbook_path=str(output),
+        )
     is_module = bool(getattr(args, "_is_module", False))
     inputs: list[tuple[str, float, float]] = list(getattr(args, "input", None) or []) + list(
         getattr(args, "bounds", None) or []
@@ -897,13 +999,15 @@ def _cmd_new(args) -> int:
         factor_pairs = {name: (lo, hi) for name, lo, hi in factor_arg}
     params = NewParams(
         output=output,
-        n=int(args.n),
+        # --n / --criterion / --n-starts are only registered for the templates
+        # that use them (see the subparser wiring); default the rest.
+        n=int(getattr(args, "n", 1) or 1),
         inputs=inputs,
         response_name=args.response,
         measurement_error=float(args.error),
-        criterion=_normalize_criterion(args.criterion),
+        criterion=_normalize_criterion(getattr(args, "criterion", _DEFAULT_CRITERION)),
         seed=int(args.seed),
-        n_starts=int(args.n_starts),
+        n_starts=int(getattr(args, "n_starts", 10) or 10),
         template=None if is_module else getattr(args, "template", None),
         degree=getattr(args, "degree", None),
         mixture_total=getattr(args, "mixture_total", None),
@@ -918,13 +1022,16 @@ def _cmd_new(args) -> int:
         optimize_acquisition=(
             getattr(args, "optimize_acquisition", "expected_improvement") or "expected_improvement"
         ),
+        force=bool(getattr(args, "force", False)),
     )
     try:
         out = do_new(params)
-    except (DoEError, ValueError, TypeError, FileNotFoundError, ImportError) as e:
+    except (DoEError, ValueError, TypeError, FileNotFoundError, ImportError, RuntimeError) as e:
+        # RuntimeError: the optimal-design search can fail to find a non-singular
+        # FIM (too few runs, unidentifiable model); surface it as a clean error.
         return _fail(args, str(e), workbook_path=str(output))
     if args.json:
-        print(json.dumps(out, indent=2))
+        print(_dump_json(out, indent=2))
     else:
         _print_new_human(out)
     return 0
@@ -969,19 +1076,37 @@ def do_status(params: dict[str, Any]) -> dict[str, Any]:
     fitted = wb.read_parameters()
     fim_data = wb.read_fim()
 
+    # The analysis verb depends on the template family: combinatorial designs
+    # use `anova` (fit/extend explicitly reject them), the active-learning
+    # template uses `optimize`, and parametric templates use `fit`/`extend`.
+    from discopt.doe.templates import COMBINATORIAL_TEMPLATES
+
+    template = wb.template_name() or ""
+    if template == "optimize":
+        analyze_verb = "optimize"
+    elif template in COMBINATORIAL_TEMPLATES:
+        analyze_verb = "anova"
+    else:
+        analyze_verb = "fit"
+
     if pending:
         if completed:
-            next_command = f"discopt doe fit {wb.path}  # {len(pending)} run(s) still pending"
+            next_command = (
+                f"discopt doe {analyze_verb} {wb.path}  # {len(pending)} run(s) still pending"
+            )
         else:
             next_command = (
                 f"# fill in '{response}' column for run_ids "
                 f"{', '.join(str(r['run_id']) for r in pending)}, save, then: "
-                f"discopt doe fit {wb.path}"
+                f"discopt doe {analyze_verb} {wb.path}"
             )
-    elif completed and not fitted:
-        next_command = f"discopt doe fit {wb.path}"
-    elif fitted:
-        next_command = f"discopt doe extend {wb.path} --n N"
+    elif completed:
+        # Parametric campaigns fit, then extend for the next batch; anova and
+        # optimize workbooks just re-run their single analysis verb.
+        if analyze_verb == "fit" and fitted:
+            next_command = f"discopt doe extend {wb.path} --n N"
+        else:
+            next_command = f"discopt doe {analyze_verb} {wb.path}"
     else:
         next_command = f"discopt doe new ... -o {wb.path}"
 
@@ -991,6 +1116,7 @@ def do_status(params: dict[str, Any]) -> dict[str, Any]:
         "template_args": wb.template_args(),
         "module_callable": wb.module_callable(),
         "response_name": response,
+        "seed": wb.seed(),
         "input_specs": [s.to_dict() for s in wb.input_specs()],
         "n_total": len(all_runs),
         "n_completed": len(completed),
@@ -1009,12 +1135,22 @@ def _cmd_status(args) -> int:
     except (FileNotFoundError, ValueError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
     if args.json:
-        print(json.dumps(out, indent=2))
+        print(_dump_json(out, indent=2))
     else:
         label = out["template"] or out["module_callable"] or "(unknown model)"
         print(f"{out['workbook_path']}")
         print(f"  model:       {label}")
-        inputs_str = ", ".join(f"{s['name']} in [{s['lb']}, {s['ub']}]" for s in out["input_specs"])
+        # For combinatorial designs the factors are categorical/level-based;
+        # show the actual levels instead of the synthesized numeric bounds
+        # (which would misleadingly print e.g. 'treatment in [0.0, 3.0]').
+        levels = (out.get("template_args") or {}).get("levels") or {}
+        parts = []
+        for s in out["input_specs"]:
+            if s["name"] in levels:
+                parts.append(f"{s['name']} in {{{', '.join(map(str, levels[s['name']]))}}}")
+            else:
+                parts.append(f"{s['name']} in [{s['lb']}, {s['ub']}]")
+        inputs_str = ", ".join(parts)
         print(f"  inputs:      {inputs_str}")
         print(f"  response:    {out['response_name']}")
         print(
@@ -1072,6 +1208,18 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
     sigma = wb.measurement_error()
     n_p = len(parameter_names)
     n_obs = len(completed)
+
+    # A completed row (non-blank response) with a blanked-out input would raise
+    # a bare TypeError from float(None) deep in the design-matrix build; give an
+    # actionable message naming the run and column instead.
+    for row in completed:
+        for nm in input_names:
+            v = row.get(nm)
+            if v is None or (isinstance(v, str) and not v.strip()):
+                raise DoEError(
+                    f"run {row.get('run_id')} has a blank value for input {nm!r}; "
+                    "fill it in (or clear the response to mark the run pending)."
+                )
 
     X = np.array(
         [
@@ -1336,10 +1484,10 @@ def _design_row(
 def _cmd_fit(args) -> int:
     try:
         out = do_fit({"workbook": args.workbook})
-    except (DoEError, FileNotFoundError, ValueError) as e:
+    except (DoEError, FileNotFoundError, OSError, ValueError, TypeError, RuntimeError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
     if args.json:
-        print(json.dumps(out, indent=2))
+        print(_dump_json(out, indent=2))
     else:
         print(f"fit complete: {out['workbook_path']}")
         print(f"  observations: {out['n_observations']}")
@@ -1380,6 +1528,16 @@ def do_anova(params: dict[str, Any]) -> dict[str, Any]:
         factors = [s.name for s in wb.input_specs()]
 
     include_replicate = params.get("include_replicate", False)
+    if include_replicate:
+        if not any(r.get("replicate") is not None for r in completed):
+            raise DoEError(
+                "--include-replicate was given but this workbook has no "
+                "replicate column with data. Recreate the design with "
+                "--replicates > 1."
+            )
+        # anova_report only auto-adds "replicate" when factors is None; we pass
+        # an explicit factor list, so add it here as a blocking factor.
+        factors = [*factors, "replicate"]
     interactions = params.get("interactions") or None
     rows: list[dict[str, Any]] = []
     for r in completed:
@@ -1429,10 +1587,10 @@ def _cmd_anova(args) -> int:
                 "interactions": interactions,
             }
         )
-    except (DoEError, FileNotFoundError, ValueError) as e:
+    except (DoEError, FileNotFoundError, OSError, ValueError, TypeError, RuntimeError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
     if args.json:
-        print(json.dumps({k: v for k, v in out.items() if k != "summary"}, indent=2))
+        print(_dump_json({k: v for k, v in out.items() if k != "summary"}, indent=2))
     else:
         print(f"ANOVA on {out['workbook_path']}")
         print(f"  response:   {out['response']}")
@@ -1458,15 +1616,30 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
     bounds = {s.name: (s.lb, s.ub) for s in input_specs}
     completed = wb.completed_runs()
 
+    # Offset the search seed by the batch index so two consecutive extends
+    # (with no new data) don't recommend the identical set of points.
+    batch_idx = wb.next_batch_index()
+    design_seed = wb.seed() + batch_idx
+
+    warnings_out: list[str] = []
+    pending = wb.pending_runs()
+    if pending:
+        warnings_out.append(
+            f"{len(pending)} run(s) are still pending; they contribute no "
+            "information to the prior FIM, so the recommended batch may overlap "
+            "them. Fill in their responses before extending for best results."
+        )
+
+    param_values = _param_values_for_design(parameter_names, wb)
+
     cached = wb.read_fim()
     if cached is not None and cached[1] == parameter_names:
         prior_fim = cached[0]
     else:
         prior_fim = _cumulative_fim_from_completed(
-            experiment, parameter_names, completed, input_names
+            experiment, parameter_names, completed, input_names, param_values
         )
 
-    param_values = _param_values_for_design(parameter_names, wb)
     template = wb.template_name()
     template_args = wb.template_args()
     mixture_total = template_args.get("mixture_total")
@@ -1487,7 +1660,7 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
             equality_constraints=eq_cons,
             feasible_projection=proj,
             n_starts=params.n_starts,
-            seed=wb.seed(),
+            seed=design_seed,
         )
         designs = [single.design]
         criterion_value = float(single.criterion_value)
@@ -1502,12 +1675,11 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
             equality_constraints=eq_cons,
             feasible_projection=proj,
             n_starts=params.n_starts,
-            seed=wb.seed(),
+            seed=design_seed,
         )
         designs = list(batch.designs)
         criterion_value = float(batch.criterion_value)
 
-    batch_idx = wb.next_batch_index()
     new_ids = wb.append_runs(batch_idx, designs)
     wb.log("extend", {"n": params.n, "batch": batch_idx})
     wb.save()
@@ -1523,6 +1695,7 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
         "criterion": wb.criterion(),
         "criterion_value": criterion_value,
         "parameter_names": parameter_names,
+        "warnings": warnings_out,
         "next_command": f"discopt doe status {wb.path}",
     }
 
@@ -1536,10 +1709,12 @@ def _cmd_extend(args) -> int:
                 n_starts=int(args.n_starts),
             )
         )
-    except (DoEError, FileNotFoundError, ValueError) as e:
+    except (DoEError, FileNotFoundError, OSError, ValueError, TypeError, RuntimeError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
+    for _w in out.get("warnings", []):
+        print(f"warning: {_w}", file=sys.stderr)
     if args.json:
-        print(json.dumps(out, indent=2))
+        print(_dump_json(out, indent=2))
     else:
         print(f"extended workbook: {out['workbook_path']}")
         new_ids = out["new_run_ids"]
@@ -1594,10 +1769,12 @@ def _cmd_optimize(args) -> int:
                 custom_surrogate_kwargs=custom_kwargs,
             )
         )
-    except (DoEError, FileNotFoundError, ValueError) as e:
+    except (DoEError, FileNotFoundError, OSError, ValueError, TypeError, RuntimeError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
+    for _w in out.get("warnings", []):
+        print(f"warning: {_w}", file=sys.stderr)
     if args.json:
-        print(json.dumps(out, indent=2, default=str))
+        print(_dump_json(out, indent=2, default=str))
     else:
         print(f"optimized workbook: {out['workbook_path']}")
         print(
@@ -1643,12 +1820,36 @@ def _cmd_gui(args) -> int:
 # ──────────────────────────────────────────────────────────────────
 
 
+def _sanitize_json(obj: Any) -> Any:
+    """Replace non-finite floats (NaN, +/-inf) with None, recursively.
+
+    ``json.dumps`` emits the literals ``NaN``/``Infinity`` by default, which
+    are invalid JSON that ``jq`` and strict parsers reject. DoE outputs contain
+    NaN criterion values (factorial/latin `new`) and -inf log-dets, so sanitize
+    before dumping.
+    """
+    import math as _math
+
+    if isinstance(obj, float):
+        return obj if _math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_json(v) for v in obj]
+    return obj
+
+
+def _dump_json(obj: Any, **kwargs: Any) -> str:
+    """``json.dumps`` that never emits NaN/Infinity (invalid JSON)."""
+    return json.dumps(_sanitize_json(obj), allow_nan=False, **kwargs)
+
+
 def _fail(args, msg: str, *, workbook_path: str | None = None) -> int:
     if getattr(args, "json", False):
         payload: dict[str, Any] = {"error": msg}
         if workbook_path is not None:
             payload["workbook_path"] = workbook_path
-        print(json.dumps(payload, indent=2), file=sys.stdout)
+        print(_dump_json(payload, indent=2), file=sys.stdout)
     else:
         print(f"error: {msg}", file=sys.stderr)
     return 1
@@ -1754,6 +1955,14 @@ def add_subparser(subparsers) -> None:
                 help="Required sum of the component values (default 1.0).",
             )
         _add_common_new_options(sp)
+        # --n applies to parametric + optimize (initial batch), not to
+        # combinatorial designs (run count = levels/factors x replicates). The
+        # optimize template needs >= 2 seed points to fit a surrogate.
+        if tmpl not in COMBINATORIAL_TEMPLATES:
+            _add_run_count_option(sp, default=4 if tmpl == "optimize" else 1)
+        # --criterion / --n-starts govern the parametric D-optimal search only.
+        if tmpl not in COMBINATORIAL_TEMPLATES and tmpl != "optimize":
+            _add_design_search_options(sp)
         sp.set_defaults(doe_func=_cmd_new, _is_module=False, bounds=None, params=None, module=None)
 
     # Escape-hatch: --module
@@ -1781,6 +1990,8 @@ def add_subparser(subparsers) -> None:
         help="Prior parameter value as NAME=VALUE (repeatable).",
     )
     _add_common_new_options(p_module)
+    _add_run_count_option(p_module)
+    _add_design_search_options(p_module)
     p_module.set_defaults(doe_func=_cmd_new, _is_module=True, input=None, degree=None)
 
     # --- status ---
@@ -1828,14 +2039,17 @@ def add_subparser(subparsers) -> None:
     p_opt.add_argument("workbook", help="Path to the .xlsx workbook (template=optimize).")
     p_opt.add_argument(
         "--criterion",
-        default="maximize",
+        default=None,
         choices=("maximize", "minimize"),
-        help="Optimization direction (default 'maximize').",
+        help="Optimization direction (default: whatever the workbook was created with).",
     )
     p_opt.add_argument(
         "--surrogate",
-        default="gp",
-        help="Surrogate preset name (e.g. 'gp', 'rf', 'linear'); see SURROGATE_PRESETS.",
+        default=None,
+        help=(
+            "Surrogate preset name ('gp' or 'response-surface'); see "
+            "SURROGATE_PRESETS. Default: whatever the workbook was created with."
+        ),
     )
     p_opt.add_argument(
         "--custom-surrogate",
@@ -1854,8 +2068,11 @@ def add_subparser(subparsers) -> None:
     )
     p_opt.add_argument(
         "--acquisition",
-        default="expected_improvement",
-        help="Acquisition function: 'expected_improvement', 'confidence_bound', 'steepest_ascent'.",
+        default=None,
+        help=(
+            "Acquisition function: 'expected_improvement', 'confidence_bound', "
+            "'steepest_ascent'. Default: whatever the workbook was created with."
+        ),
     )
     p_opt.add_argument(
         "--acquisition-kwarg",
@@ -1903,7 +2120,7 @@ def add_subparser(subparsers) -> None:
     # --- gui ---
     p_gui = doe_sub.add_parser(
         "gui",
-        help="Launch the Streamlit GUI over a workbook (requires discopt[doe-gui]).",
+        help="Launch the Streamlit GUI over a workbook (requires discopt-doe[gui]).",
     )
     p_gui.add_argument(
         "workbook",
@@ -1926,8 +2143,8 @@ def add_subparser(subparsers) -> None:
 
 
 def _add_common_new_options(sp) -> None:
+    """Options that apply to every ``new`` template."""
     sp.add_argument("-o", "--output", required=True, help="Output .xlsx path.")
-    sp.add_argument("--n", type=int, default=1, help="Number of initial runs (default 1).")
     sp.add_argument(
         "--response",
         default="y",
@@ -1939,21 +2156,36 @@ def _add_common_new_options(sp) -> None:
         default=1.0,
         help="Measurement error stdev (default 1.0).",
     )
+    sp.add_argument("--seed", type=int, default=42, help="Random seed (default 42).")
+    sp.add_argument("--force", action="store_true", help="Overwrite existing output file.")
+    _add_json(sp)
+
+
+def _add_run_count_option(sp, *, default: int = 1) -> None:
+    """``--n`` applies to parametric and optimize templates (initial batch).
+
+    Combinatorial designs derive their run count from levels/factors x
+    replicates, so they do not accept ``--n``.
+    """
+    sp.add_argument(
+        "--n", type=int, default=default, help=f"Number of initial runs (default {default})."
+    )
+
+
+def _add_design_search_options(sp) -> None:
+    """``--criterion``/``--n-starts`` govern the parametric D-optimal search."""
     sp.add_argument(
         "--criterion",
         default=_DEFAULT_CRITERION,
         choices=(*_CRITERION_CHOICES, *_CRITERION_ALIASES.keys()),
         help="Optimality criterion (default determinant aka D).",
     )
-    sp.add_argument("--seed", type=int, default=42, help="Random seed (default 42).")
     sp.add_argument(
         "--n-starts",
         type=int,
         default=10,
         help="Multi-start budget for each single-design search (default 10).",
     )
-    sp.add_argument("--force", action="store_true", help="Overwrite existing output file.")
-    _add_json(sp)
 
 
 def _add_json(sp) -> None:
@@ -1977,11 +2209,13 @@ __all__ = [
     "DoEError",
     "ExtendParams",
     "NewParams",
+    "OptimizeParams",
     "add_subparser",
     "do_anova",
     "do_extend",
     "do_fit",
     "do_new",
+    "do_optimize",
     "do_status",
     "do_templates",
     "run",

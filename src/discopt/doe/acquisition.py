@@ -94,7 +94,6 @@ def upper_confidence_bound(
     X_candidates: np.ndarray,
     *,
     kappa: float = 2.0,
-    **_: object,
 ) -> np.ndarray:
     """``μ + κ σ`` -- maximize when ``direction = +1``."""
     mu, sigma = surrogate.predict(np.asarray(X_candidates, dtype=float))
@@ -106,7 +105,6 @@ def lower_confidence_bound(
     X_candidates: np.ndarray,
     *,
     kappa: float = 2.0,
-    **_: object,
 ) -> np.ndarray:
     """``-(μ - κ σ)`` -- larger is *better* under minimization."""
     mu, sigma = surrogate.predict(np.asarray(X_candidates, dtype=float))
@@ -119,7 +117,6 @@ def confidence_bound(
     *,
     direction: Direction,
     kappa: float = 2.0,
-    **_: object,
 ) -> np.ndarray:
     """Direction-aware UCB/LCB. Higher score = better candidate."""
     if direction == 1:
@@ -135,7 +132,6 @@ def steepest_ascent(
     *,
     direction: Direction,
     y_best: float | None = None,
-    **_: object,
 ) -> np.ndarray:
     """Predicted improvement only -- ignores uncertainty.
 
@@ -151,6 +147,12 @@ def steepest_ascent(
     return int(direction) * (mu - float(y_best))
 
 
+# Note: "ucb" and "lcb" both resolve to the *direction-aware* confidence_bound
+# wrapper, which picks upper (maximize) or lower (minimize) from the round's
+# direction. So under maximization "lcb" still computes the UCB (and vice
+# versa) -- the names are aliases for "confidence bound", not a hard choice of
+# upper vs lower. Use the raw upper_confidence_bound / lower_confidence_bound
+# callables directly if you need a fixed side.
 ACQUISITIONS: dict[str, Callable[..., np.ndarray]] = {
     "expected_improvement": expected_improvement,
     "ei": expected_improvement,
@@ -171,6 +173,41 @@ def resolve_acquisition(name_or_fn):
         raise ValueError(
             f"unknown acquisition {name_or_fn!r}; available: {sorted(set(ACQUISITIONS))}"
         ) from e
+
+
+def call_acquisition(acq_fn, surrogate, X_candidates, *, direction, y_best, acq_kwargs=None):
+    """Invoke an acquisition, passing only the arguments it accepts.
+
+    Replaces a ``try/except TypeError`` dispatch that both masked genuine
+    errors raised *inside* an acquisition and silently discarded the caller's
+    tuning kwargs. ``direction``/``y_best`` are injected only when the callable
+    declares them (or has ``**kwargs``), and user ``acq_kwargs`` that the
+    callable cannot consume raise a clear error instead of being swallowed.
+    """
+    import inspect
+
+    acq_kwargs = dict(acq_kwargs or {})
+    params = inspect.signature(acq_fn).parameters
+    has_var_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    named = {
+        n
+        for n, p in params.items()
+        if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+    if not has_var_kw:
+        bad = [k for k in acq_kwargs if k not in named]
+        if bad:
+            tunable = sorted(named - {"surrogate", "X_candidates", "direction", "y_best"})
+            raise TypeError(
+                f"acquisition {getattr(acq_fn, '__name__', acq_fn)!r} got unexpected "
+                f"keyword(s) {bad}; it accepts {tunable}."
+            )
+    call_kwargs = dict(acq_kwargs)
+    if "direction" in named or has_var_kw:
+        call_kwargs["direction"] = direction
+    if "y_best" in named or has_var_kw:
+        call_kwargs["y_best"] = y_best
+    return acq_fn(surrogate, X_candidates, **call_kwargs)
 
 
 __all__ = [

@@ -62,10 +62,40 @@ def _set_workbook(path: str | Path | None) -> None:
     st.session_state["last_error"] = None
 
 
+def _flash(message: str, kind: str = "success") -> None:
+    """Queue a message to show after the next rerun.
+
+    ``st.rerun()`` raises immediately, so a message shown right before it never
+    renders. Stash it and let :func:`_render_flash` display it on the next run.
+    """
+    st.session_state.setdefault("_flash", []).append((kind, message))
+
+
+def _render_flash() -> None:
+    for kind, message in st.session_state.pop("_flash", []):
+        getattr(st, kind, st.info)(message)
+
+
 def _safe_status(path: str) -> dict[str, Any] | None:
+    import zipfile
+
+    from openpyxl.utils.exceptions import InvalidFileException
+
     try:
         return do_status({"workbook": path})
-    except (FileNotFoundError, ValueError, DoEError) as e:
+    except (
+        FileNotFoundError,
+        ValueError,
+        DoEError,
+        OSError,
+        KeyError,
+        InvalidFileException,
+        zipfile.BadZipFile,
+    ) as e:
+        # openpyxl raises InvalidFileException for a wrong file type and
+        # zipfile.BadZipFile for a corrupt/half-written .xlsx (both subclass
+        # Exception directly); catch them so the recovery UI ("Forget this
+        # workbook") stays reachable instead of dumping a traceback.
         st.session_state["last_error"] = str(e)
         return None
 
@@ -275,7 +305,7 @@ def _model_equation(
         if term == "1 (intercept)" or term == "1":
             parts.append(coef.rstrip())
         else:
-            parts.append(f"{coef}·{term}" if estimates is not None else f"{coef}·{term}")
+            parts.append(f"{coef}·{term}")
     return f"{response} = " + " ".join(parts)
 
 
@@ -599,7 +629,7 @@ def _sidebar_open() -> None:
     if col_open.button(
         "Open",
         help="Load the workbook at the path above into the GUI.",
-        use_container_width=True,
+        width="stretch",
     ):
         candidate = Path(path_input).expanduser().resolve()
         if not candidate.is_file():
@@ -610,7 +640,7 @@ def _sidebar_open() -> None:
     if col_browse.button(
         "Browse…",
         help="Open a native OS file picker.",
-        use_container_width=True,
+        width="stretch",
     ):
         picked = _native_file_picker()
         if picked is None:
@@ -803,7 +833,7 @@ def _sidebar_new() -> None:
     n_starts = st.sidebar.number_input(
         "Multi-start budget",
         min_value=1,
-        value=5,
+        value=10,  # match the CLI default so GUI/CLI designs agree
         help=(
             "Number of random initializations for each design point's "
             "optimization. Higher = more thorough search, slower."
@@ -1282,9 +1312,28 @@ def _resolve_template(
     return gui_choice
 
 
+def _set_output_dir(path: Path) -> None:
+    """Point the output-folder browser at ``path`` (from a browse button).
+
+    Streamlit forbids writing a widget's session-state key after the widget is
+    instantiated, and the browse buttons run *after* the folder text_input. So
+    we stage the target and let ``_output_path_picker`` apply it to the widget
+    key at the top of the next run, before the text_input is created. Without
+    this, the stale typed value is written back on rerun and reverts the click.
+    """
+    resolved = str(Path(path).expanduser())
+    st.session_state["output_dir"] = resolved
+    st.session_state["_output_dir_pending"] = resolved
+
+
 def _output_path_picker() -> tuple[str, str]:
     """Sidebar widget: directory browser + filename → (dir, filename)."""
     st.sidebar.markdown("**Output workbook**")
+
+    # Apply a staged browse navigation to the text_input key before the widget
+    # is instantiated (setting it afterwards raises StreamlitAPIException).
+    if "_output_dir_pending" in st.session_state:
+        st.session_state["output_dir_input"] = st.session_state.pop("_output_dir_pending")
 
     if "output_dir" not in st.session_state:
         st.session_state["output_dir"] = str(Path.cwd())
@@ -1325,14 +1374,14 @@ def _output_path_picker() -> tuple[str, str]:
             disabled=current_dir.parent == current_dir,
             help="Navigate up one directory.",
         ):
-            st.session_state["output_dir"] = str(current_dir.parent)
+            _set_output_dir(current_dir.parent)
             st.rerun()
 
         if subdirs:
             st.caption("Subfolders")
             for d in subdirs[:50]:
                 if st.button(f"📁 {d.name}", key=f"browse_dir_{d}"):
-                    st.session_state["output_dir"] = str(d)
+                    _set_output_dir(d)
                     st.rerun()
             if len(subdirs) > 50:
                 st.caption(f"…and {len(subdirs) - 50} more (type the path above).")
@@ -1556,9 +1605,9 @@ def _rename_panel(path: str, status: dict[str, Any]) -> None:
             msg_parts.append("factors: " + ", ".join(f"{a}→{b}" for a, b in input_renames.items()))
         if response_rename:
             msg_parts.append(f"response: {response_rename[0]}→{response_rename[1]}")
-        st.success("Renamed " + " · ".join(msg_parts) + ".")
+        _flash("Renamed " + " · ".join(msg_parts) + ".", "success")
         if has_fit:
-            st.info("Fit artifacts cleared — run **Fit** again to repopulate.")
+            _flash("Fit artifacts cleared — run **Fit** again to repopulate.", "info")
         st.rerun()
 
 
@@ -1599,7 +1648,7 @@ def _runs_editor(path: str, status: dict[str, Any]) -> None:
         if n == 0:
             st.info("No changes detected.")
         else:
-            st.success(f"Updated {n} cell(s).")
+            _flash(f"Updated {n} cell(s).", "success")
             st.rerun()
     if col_b.button("Reload from disk"):
         st.rerun()
@@ -1668,6 +1717,10 @@ def _anova_panel(path: str, status: dict[str, Any]) -> None:
 
     out = cast("dict[str, Any] | None", st.session_state.get("last_anova_result"))
     if not out:
+        return
+    # Guard against showing a cached ANOVA table for a different workbook
+    # (the optimize panel guards the same way). The payload carries its source.
+    if out.get("workbook_path") and out["workbook_path"] != str(Path(path)):
         return
     cols = st.columns(3)
     cols[0].metric("Observations", out["n_observations"])
@@ -1806,12 +1859,18 @@ def _optimize_panel(path: str, status: dict[str, Any]) -> None:
             )
         )
 
+    # Default to the campaign seed offset by the number of completed runs so
+    # each round samples a *different* Sobol candidate pool (do_status now
+    # returns "seed"; previously this key was absent and the default was always
+    # 1, giving an identical candidate pool every round).
+    default_seed = int(status.get("seed", 0)) + int(status.get("n_completed", 0)) + 1
     seed = int(
         st.number_input(
             "Random seed",
-            value=int(status.get("seed", 0)) + 1,
+            value=default_seed,
             step=1,
-            help="Seed for the Sobol candidate pool.",
+            help="Seed for the Sobol candidate pool. Defaults to campaign "
+            "seed + completed-run count so each round explores new candidates.",
         )
     )
 
@@ -1848,7 +1907,7 @@ def _optimize_panel(path: str, status: dict[str, Any]) -> None:
             st.error(str(e))
             return
         st.session_state["last_optimize_result"] = out
-        st.success(f"Appended {len(out['next_designs'])} new pending runs.")
+        _flash(f"Appended {len(out['next_designs'])} new pending runs.", "success")
         st.rerun()
 
     out = cast("dict[str, Any] | None", st.session_state.get("last_optimize_result"))
@@ -2120,7 +2179,7 @@ def _render_fit_results(
         if parity is None or parity.empty:
             st.info("Parity plot needs completed runs and a fitted model.")
         else:
-            st.altair_chart(_parity_chart(parity), use_container_width=True)
+            st.altair_chart(_parity_chart(parity), width="stretch")
             st.caption(
                 "Each point is one completed run; the diagonal is perfect "
                 "prediction. Points far off the line indicate fit error or "
@@ -2132,7 +2191,7 @@ def _render_fit_results(
         if parity is None or parity.empty:
             st.info("Residual plot needs completed runs and a fitted model.")
         else:
-            st.altair_chart(_residual_chart(parity), use_container_width=True)
+            st.altair_chart(_residual_chart(parity), width="stretch")
             st.caption(
                 "Residual = observed − predicted, plotted vs predicted. "
                 "Look for trends or fanning out (signs of model "
@@ -2206,7 +2265,7 @@ def _extend_panel(path: str, status: dict[str, Any]) -> None:
         )
         return
     n = st.number_input("Number of new runs", min_value=1, value=4, key="extend_n")
-    n_starts = st.number_input("Multi-start budget", min_value=1, value=5, key="extend_starts")
+    n_starts = st.number_input("Multi-start budget", min_value=1, value=10, key="extend_starts")
     if st.button(f"Append {int(n)} run(s)", type="primary", key="extend_btn"):
         try:
             with st.spinner("Solving next-batch design..."):
@@ -2267,6 +2326,7 @@ def main() -> None:
     if _LOGO_PATH.is_file():
         st.logo(str(_LOGO_PATH), size="large", link=_ISSUES_URL.rsplit("/", 1)[0])
     _init_state()
+    _render_flash()
     if _LOGO_PATH.is_file():
         st.sidebar.image(str(_LOGO_PATH), width=120)
     _sidebar()

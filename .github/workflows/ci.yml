@@ -8,10 +8,35 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      # --all-extras pulls streamlit/pandas/scikit-learn so the gui and ml
-      # tests run instead of skipping. Requires discopt>=0.6 on PyPI.
-      - run: uv sync --python 3.12 --all-extras
+      # --all-extras pulls streamlit/pandas/scikit-learn/matplotlib so the gui
+      # and ml tests run instead of skipping. discopt>=0.6 is resolved from the
+      # pinned git rev in [tool.uv.sources], not PyPI (see pyproject.toml).
+      - run: uv sync --python ${{ matrix.python-version }} --all-extras
       - run: uv run pytest tests/ -q
+
+  # Core install (no optional extras): the ml/gui-dependent tests must skip,
+  # not fail, so a plain install stays usable.
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --python 3.12
+      - run: uv run pytest tests/ -q
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --python 3.12 --all-extras
+      # -W turns Sphinx warnings (broken cross-refs, missing citations) into
+      # build failures so doc rot is caught in CI.
+      - run: uv run jupyter-book build docs/ -W

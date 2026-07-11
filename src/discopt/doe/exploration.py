@@ -15,6 +15,19 @@ from discopt.doe.fim import compute_fim
 from discopt.estimate import Experiment
 
 
+def _import_pyplot():
+    """Import matplotlib.pyplot with an actionable error when it's missing."""
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as e:
+        raise ImportError(
+            "plotting requires matplotlib. Install it with: pip install "
+            "matplotlib (it ships with the 'gui' extra: "
+            'pip install "discopt-doe[gui]").'
+        ) from e
+    return plt
+
+
 @dataclass
 class ExplorationResult:
     """Result of design space exploration.
@@ -49,12 +62,20 @@ class ExplorationResult:
             Design variable values at the best grid point.
         """
         values = self.metrics[criterion]
+        if np.all(np.isnan(values)):
+            raise ValueError(
+                f"no feasible grid point for criterion {criterion!r}: the FIM "
+                "could not be evaluated at any point in the grid."
+            )
+        # Use nan-aware argmax/argmin: infeasible points are left NaN, and
+        # plain np.argmax/argmin would return the first NaN (NaN compares
+        # greater than everything), silently reporting a failed point as best.
         if criterion in ("log_det_fim", "min_eigenvalue"):
             # Maximize
-            best_idx = np.unravel_index(np.argmax(values), values.shape)
+            best_idx = np.unravel_index(np.nanargmax(values), values.shape)
         else:
             # Minimize
-            best_idx = np.unravel_index(np.argmin(values), values.shape)
+            best_idx = np.unravel_index(np.nanargmin(values), values.shape)
 
         idx_tuple = best_idx if isinstance(best_idx, tuple) else (best_idx,)
 
@@ -89,7 +110,7 @@ class ExplorationResult:
         -------
         matplotlib.axes.Axes
         """
-        import matplotlib.pyplot as plt
+        plt = _import_pyplot()
 
         if len(self.design_names) != 2:
             raise ValueError("plot_heatmap requires exactly 2 design variables")
@@ -130,7 +151,7 @@ class ExplorationResult:
         -------
         matplotlib.axes.Axes
         """
-        import matplotlib.pyplot as plt
+        plt = _import_pyplot()
 
         if ax is None:
             _, ax = plt.subplots()

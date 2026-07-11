@@ -51,14 +51,26 @@ sub = d_optimal_subset(experiment, param_values, k=3, method="auto")
 ```
 
 ### Key files
-- `python/discopt/doe/estimability.py` — all four public functions, `EstimabilityResult`, the scaling recipe in `_scaled_sensitivity`, enumeration loop in `_dopt_enumerate`.
-- `python/discopt/doe/fim.py::compute_fim` — underlying Jacobian via JAX autodiff.
-- `python/discopt/estimate.py::ExperimentModel` — supplies `measurement_error` (the `σ` in the scaling) and `unknown_parameters` (the columns).
+- `src/discopt/doe/estimability.py` — all four public functions, `EstimabilityResult`, the scaling recipe in `_scaled_sensitivity`, enumeration loop in `_dopt_enumerate`.
+- `src/discopt/doe/fim.py::compute_fim` — underlying Jacobian via JAX autodiff.
+- `discopt.estimate` module (`ExperimentModel`) — supplies `measurement_error` (the `σ` in the scaling) and `unknown_parameters` (the columns).
 
 ### What `EstimabilityResult` tells you
+`EstimabilityResult` is a plain dataclass (no `summary()` method); read its fields directly:
+
 ```python
 rank = estimability_rank(exp, params)
-rank.summary()  # formatted table
+# rank.ranking             -> list[str], most- to least-estimable
+# rank.projected_norms     -> np.ndarray, |diag(R)| in ranking order
+# rank.recommended_subset  -> list[str], parameters above the cutoff
+# rank.collinearity_index  -> float, Brun gamma_K of the recommended subset
+# rank.parameter_names     -> list[str], original (unranked) order
+
+# Print a simple table yourself:
+for name, norm in zip(rank.ranking, rank.projected_norms):
+    print(f"  {name:>8s}  projected_norm={norm:.4g}")
+print(f"recommended subset: {rank.recommended_subset}  "
+      f"gamma_K={rank.collinearity_index:.2f}")
 
 # Interpret projected_norms[i]:
 #   the "residual sensitivity magnitude" after removing information from the
@@ -86,11 +98,9 @@ for k in range(1, len(nominal) + 1):
 # 4. Decide your cutoff based on gamma.
 ```
 
-## Context: Crucible Knowledge Base
+## Background Reading
 
-- `.crucible/wiki/methods/parameter-estimability.org` — Yao / Brun / Chu-Hahn in depth.
-- `.crucible/wiki/concepts/fisher-information-matrix.org` — the FIM theory underneath all three.
-- `.crucible/wiki/methods/algebraic-model-identifiability.org` — the identifiability sibling.
+The Yao / Brun / Chu-Hahn methods are covered in the primary literature below. All three rest on the FIM / scaled-sensitivity theory shared with `doe-expert` and the identifiability sibling `identifiability-expert`.
 
 ## Primary Literature
 
@@ -110,6 +120,6 @@ for k in range(1, len(nominal) + 1):
 ## When to Defer
 
 - **"Is my model identifiable at all?"** → `identifiability-expert`.
-- **"Fit parameters, interpret the CIs"** → `estimation-expert`.
+- **"Fit parameters, interpret the CIs"** → fit with `discopt.estimate.estimate_parameters` directly.
 - **"Design an experiment that raises a parameter's estimability"** → `doe-expert`.
 - **"Pick between two candidate model structures"** → `model-discrimination-expert`.

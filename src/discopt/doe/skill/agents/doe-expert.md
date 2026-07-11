@@ -27,11 +27,11 @@ You are an expert on model-based design of experiments (MBDoE) using `discopt.do
 - `from discopt.estimate import Experiment, ExperimentModel` — the shared model contract.
 
 ### Key files
-- `python/discopt/doe/fim.py` — `compute_fim`, `FIMResult` with `d_optimal`, `a_optimal`, `e_optimal`, `me_optimal`, `metrics` properties.
-- `python/discopt/doe/design.py` — `optimal_experiment`, `batch_optimal_experiment`, `DesignResult`, `BatchDesignResult` (both with `.summary()`, `.parameter_covariance`, `.predicted_standard_errors`).
-- `python/discopt/doe/sequential.py` — `sequential_doe` + `DoERound` (round index, estimation, design, data_collected).
-- `python/discopt/doe/exploration.py` — grid over design ranges; returns all four metrics per point.
-- `python/discopt/estimate.py` — `ExperimentModel` metadata (`unknown_parameters`, `design_inputs`, `responses`, `measurement_error`), `Experiment.create_model()` factory.
+- `src/discopt/doe/fim.py` — `compute_fim`, `FIMResult` with `d_optimal`, `a_optimal`, `e_optimal`, `me_optimal`, `metrics` properties.
+- `src/discopt/doe/design.py` — `optimal_experiment`, `batch_optimal_experiment`, `DesignResult`, `BatchDesignResult` (both with `.summary()`, `.parameter_covariance`, `.predicted_standard_errors`).
+- `src/discopt/doe/sequential.py` — `sequential_doe` + `DoERound` (round index, estimation, design, data_collected).
+- `src/discopt/doe/exploration.py` — grid over design ranges; returns all four metrics per point.
+- `discopt.estimate` module — `ExperimentModel` metadata (`unknown_parameters`, `design_inputs`, `responses`, `measurement_error`), `Experiment.create_model()` factory.
 
 ### Criterion constants
 ```python
@@ -55,13 +55,9 @@ history = sequential_doe(exp, initial_data, {"k": 0.3}, {"T": (300, 500)},
                          n_rounds=5, run_experiment=lab_callback)
 ```
 
-## Context: Crucible Knowledge Base
+## Background Reading
 
-- `.crucible/wiki/concepts/model-based-doe.org` — MBDoE taxonomy, where discopt fits.
-- `.crucible/wiki/concepts/fisher-information-matrix.org` — FIM theory, Cramér-Rao.
-- `.crucible/wiki/concepts/sloppy-models.org` — when the FIM has long flat directions.
-- `.crucible/wiki/methods/algebraic-model-identifiability.org` — identifiability precursor to DoE.
-- `.crucible/wiki/methods/parameter-estimability.org` — estimability ranking companion.
+The MBDoE taxonomy, FIM/Cramér-Rao theory, and the sloppy-model picture (long flat FIM directions) are covered in the primary literature below. Identifiability and estimability are companion analyses handled by the sibling agents `identifiability-expert` and `estimability-expert`.
 
 ## Primary Literature
 
@@ -83,6 +79,5 @@ history = sequential_doe(exp, initial_data, {"k": 0.3}, {"T": (300, 500)},
 - **Identifiability (structural / practical, profile likelihood)** → `identifiability-expert`.
 - **Estimability ranking, Yao, Brun collinearity, D-optimal subset** → `estimability-expert`.
 - **Designing to distinguish rival models** → `model-discrimination-expert`.
-- **Fitting parameters, interpreting CIs, regression diagnostics** → `estimation-expert`.
-- **Underlying NLP failing or slow** → `nlp-expert` / `ipopt-expert` / `jax-ipm-expert`.
-- **HiGHS/SCIP internals** → `highs-expert` / `scip-expert`.
+- **Fitting parameters, interpreting CIs, regression diagnostics** → fit with `discopt.estimate.estimate_parameters` directly.
+- **Underlying NLP or solver failing / slow** → consult the core `discopt` optimization docs.

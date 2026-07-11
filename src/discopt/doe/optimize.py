@@ -140,7 +140,7 @@ from typing import Any, Callable, Sequence
 
 import numpy as np
 
-from discopt.doe.acquisition import resolve_acquisition
+from discopt.doe.acquisition import call_acquisition, resolve_acquisition
 from discopt.doe.surrogate import Surrogate, coerce_surrogate
 from discopt.doe.workbook import Workbook
 
@@ -273,13 +273,14 @@ def optimize_round(
     incumbent_for_acq = incumbent_y
 
     for _ in range(int(batch_size)):
-        kw = dict(acq_kwargs)
-        kw["y_best"] = incumbent_for_acq
-        kw["direction"] = direction
-        try:
-            scores = acq_fn(s, candidates, **kw)
-        except TypeError:
-            scores = acq_fn(s, candidates, direction=direction)
+        scores = call_acquisition(
+            acq_fn,
+            s,
+            candidates,
+            direction=direction,
+            y_best=incumbent_for_acq,
+            acq_kwargs=acq_kwargs,
+        )
         scores = np.asarray(scores, dtype=float).ravel()
         if chosen_idx:
             scores[chosen_idx] = -np.inf

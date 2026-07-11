@@ -90,12 +90,16 @@ def sequential_discrimination(
        accumulated so far.
     2. Score the fits with :func:`discopt.doe.selection.model_selection`
        using ``selection_method``.
-    3. If ``max(weights) >= stop_when_dominant``, stop and return.
-    4. Otherwise call :func:`discriminate_design` to pick the next
-       design; if ``run_experiment`` is supplied, run it, accumulate
-       the returned data, and loop. If not, the final round carries
-       the recommended design and the caller is expected to run it and
-       re-enter the loop with the updated data.
+    3. If ``max(weights) >= stop_when_dominant``, stop and return; this is
+       the only stop whose round carries ``design=None`` (no further
+       experiment is needed).
+    4. Otherwise call :func:`discriminate_design` to pick the next design.
+       Every non-converged round carries a design, including the final one.
+       If ``run_experiment`` is supplied it is run each round (including the
+       last) and the data accumulated; with a runner, ``n_rounds`` rounds run
+       ``n_rounds`` experiments. If ``run_experiment`` is ``None`` (caller-
+       driven mode) the function returns after the first round with the
+       recommended design for the caller to run before re-entering the loop.
 
     Parameters
     ----------
@@ -149,13 +153,9 @@ def sequential_discrimination(
         selection = model_selection(estimation_results, method=selection_method)
         top_weight = max(selection.weights.values()) if selection.weights else 0.0
 
-        if top_weight >= stop_when_dominant or k == n_rounds - 1:
-            # Stop. No design for this round unless the caller explicitly
-            # wants the "final recommendation" semantics; we omit it for
-            # clarity. If the stop came from max_weight, design is None;
-            # if from n_rounds exhaustion and there is still a run_experiment
-            # callback, we still leave design = None since there's no next
-            # iteration to consume it.
+        if top_weight >= stop_when_dominant:
+            # Converged: one model dominates, so no further experiment is
+            # needed. This is the only stop that carries design=None.
             round_record = DiscriminationRound(
                 round=k,
                 estimation_results=estimation_results,
@@ -168,8 +168,13 @@ def sequential_discrimination(
                 callback(round_record)
             break
 
-        # Design next experiment using the current parameter estimates.
+        # Not converged: always propose the next design (even on the final
+        # round, so the caller has a recommendation to run).
         param_estimates = {name: dict(res.parameters) for name, res in estimation_results.items()}
+        # Propagate parameter uncertainty from the data collected so far into the
+        # prediction covariances (each res.fim is ordered by that model's
+        # parameter names, matching discriminate_design's convention).
+        prior_fims = {name: np.asarray(res.fim) for name, res in estimation_results.items()}
         round_seed = int(rng.integers(0, 2**31 - 1))
         design = discriminate_design(
             experiments=experiments,
@@ -177,6 +182,7 @@ def sequential_discrimination(
             design_bounds=design_bounds,
             criterion=criterion,
             model_priors=selection.weights,  # posterior-like weighting
+            prior_fims=prior_fims,
             n_starts=n_starts,
             local_refine=local_refine,
             mi_samples=mi_samples,

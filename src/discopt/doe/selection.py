@@ -87,6 +87,16 @@ def model_selection(
     ``n_observations``). The deviance convention of
     :func:`discopt.estimate.estimate_parameters` makes these one-liners.
 
+    .. warning::
+       ``res.objective`` is the σ-weighted deviance ``Σ ((y − ŷ)/σ)²``; it
+       drops the additive constant ``Σ log(2π σ²)``, which depends on each
+       model's declared ``measurement_error``. These scores are therefore
+       only comparable across candidates that share the **same measurement-
+       error model**. A model that declares a larger σ gets an artificially
+       smaller deviance for the same misfit and would win AIC/BIC spuriously.
+       ``EstimationResult`` does not carry σ, so this precondition cannot be
+       checked here -- it is the caller's responsibility.
+
     Parameters
     ----------
     estimation_results : dict[str, EstimationResult]
@@ -355,9 +365,16 @@ def _per_obs_loglik(experiment: Experiment, result: EstimationResult, data: dict
         if name not in data:
             continue
         fn = compile_expression(em.responses[name], em.model)
-        y_hat.append(float(np.asarray(fn(x_flat, p_flat)).flat[0]))
-        sigma.append(float(em.measurement_error[name]))
-        y_obs.append(float(np.asarray(data[name]).flat[0]))
+        yh = float(np.asarray(fn(x_flat, p_flat)).flat[0])
+        sig = float(em.measurement_error[name])
+        # A response may carry replicate observations (a 1-D array); each is an
+        # independent measurement sharing the same prediction and noise, so
+        # expand them all rather than keeping only the first (which truncated
+        # the Vuong statistic to one value per response name).
+        for obs in np.atleast_1d(np.asarray(data[name], dtype=float)).ravel():
+            y_hat.append(yh)
+            sigma.append(sig)
+            y_obs.append(float(obs))
 
     y_hat_arr = np.array(y_hat)
     sigma_arr = np.array(sigma)

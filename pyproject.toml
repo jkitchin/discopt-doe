@@ -20,7 +20,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gui = ["streamlit>=1.30", "pandas>=2.0"]   # altair ships with streamlit
+# The GUI needs matplotlib (history / surrogate diagnostic plots) and
+# scikit-learn (its optimize round fits a GP surrogate), so the gui extra
+# pulls in the ml extra's dependency too.
+# streamlit >= 1.49: the app uses st.logo (added 1.35) and the width="stretch"
+# element API (string width literals, ~1.49); older versions crash at startup.
+gui = ["streamlit>=1.49", "pandas>=2.0", "matplotlib>=3.5", "scikit-learn>=1.0"]
 ml = ["scikit-learn>=1.0"]                 # surrogate.py sklearn estimators
 
 [project.scripts]
@@ -37,6 +42,8 @@ doe = "discopt.doe.cli"
 dev = [
     "pytest>=8",
     "pytest-timeout",
+    # tutorial notebooks and exploration.plot_* use matplotlib
+    "matplotlib>=3.5",
     # notebook build scripts (scripts/build_*_notebook.py)
     "nbformat>=5",
     "nbclient>=0.10",
@@ -60,8 +67,12 @@ namespaces = true
 # has discopt.doe removed — branches that still ship discopt.doe would
 # overwrite this package's files in site-packages. REMOVE this block when
 # discopt v0.6.0 is published.
+#
+# Pinned to an immutable commit (rev) rather than the branch name so a re-lock
+# still resolves after the branch is merged or deleted. Bump the rev when the
+# extraction branch advances; drop the whole block at the 0.6.0 release.
 [tool.uv.sources]
-discopt = { git = "https://github.com/jkitchin/discopt", branch = "refactor/389-extract-doe" }
+discopt = { git = "https://github.com/jkitchin/discopt", rev = "fd6106e63c8fb15f82533d0a29d6321b9232af41" }
 
 [tool.setuptools.package-data]
 "discopt.doe" = ["gui/discopt-logo.png", "skill/SKILL.md", "skill/agents/*.md"]

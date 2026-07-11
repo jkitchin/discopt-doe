@@ -22,9 +22,11 @@ from discopt.doe.cli import (  # noqa: E402
     DoEError,
     ExtendParams,
     NewParams,
+    OptimizeParams,
     do_extend,
     do_fit,
     do_new,
+    do_optimize,
     do_status,
     do_templates,
 )
@@ -435,3 +437,434 @@ def test_fim_persisted_and_used_by_extend(tmp_path):
     assert names == ["b0", "b1", "b2", "b11", "b22", "b12"]
     eigvals = np.linalg.eigvalsh(fim)
     assert (eigvals > 0).all()
+
+
+# ──────────────────────────────────────────────────────────────────
+# do_optimize — resolves settings from the workbook (issue #1)
+# ──────────────────────────────────────────────────────────────────
+
+
+def _new_optimize_workbook(tmp_path, *, direction):
+    """Create an optimize-template workbook created with the given direction."""
+    return do_new(
+        NewParams(
+            output=Path(tmp_path) / "opt.xlsx",
+            n=3,
+            inputs=[("x", -5.0, 5.0)],
+            response_name="y",
+            measurement_error=0.05,
+            criterion="determinant",
+            seed=0,
+            n_starts=1,
+            template="optimize",
+            optimize_criterion=direction,
+        )
+    )
+
+
+def test_do_optimize_uses_stored_direction(tmp_path):
+    """A minimize workbook must be minimized when no --criterion is given.
+
+    Regression for the P0 bug where do_optimize ignored the workbook's stored
+    direction and always used the argparse default ('maximize').
+    """
+    pytest.importorskip("sklearn")
+    wb_path = Path(tmp_path) / "opt.xlsx"
+    _new_optimize_workbook(tmp_path, direction="minimize")
+    _fill_response(wb_path, "y", lambda row: (row["x"] - 1.0) ** 2)
+
+    out = do_optimize(OptimizeParams(workbook=wb_path))
+
+    assert out["criterion"] == "minimize"
+    assert out["warnings"] == []
+
+
+def test_do_optimize_explicit_override_warns(tmp_path):
+    """Passing --criterion that differs from the stored value warns but obeys."""
+    pytest.importorskip("sklearn")
+    wb_path = Path(tmp_path) / "opt.xlsx"
+    _new_optimize_workbook(tmp_path, direction="minimize")
+    _fill_response(wb_path, "y", lambda row: (row["x"] - 1.0) ** 2)
+
+    out = do_optimize(OptimizeParams(workbook=wb_path, criterion="maximize"))
+
+    assert out["criterion"] == "maximize"
+    assert any("criterion overridden" in w for w in out["warnings"])
+
+
+# ──────────────────────────────────────────────────────────────────
+# Excel formula cells in the response column (issue #2)
+# ──────────────────────────────────────────────────────────────────
+
+
+def _formula_workbook(tmp_path):
+    out = do_new(_new_params(tmp_path, template="linear", inputs=[("x", 0.0, 10.0)], n=3))
+    return Path(out["workbook_path"])
+
+
+def test_formula_response_without_cached_value_raises(tmp_path):
+    """A response formula openpyxl can't resolve is a loud error, not a drop.
+
+    Regression for the P0 bug where '=AVERAGE(...)' in a response cell was
+    silently classified as a pending run and dropped from fit/anova/optimize.
+    """
+    wb_path = _formula_workbook(tmp_path)
+    book = openpyxl.load_workbook(wb_path)
+    runs = book["runs"]
+    headers = [c.value for c in runs[1]]
+    resp_col = headers.index("y") + 1
+    for r in runs.iter_rows(min_row=2):
+        if r[0].value is None:
+            continue
+        r[resp_col - 1].value = "=AVERAGE(1,2)"
+        break
+    book.save(wb_path)
+
+    with pytest.raises(ValueError, match="formula"):
+        Workbook.open(wb_path).completed_runs()
+
+
+def test_formula_response_with_cached_value_is_read(tmp_path, monkeypatch):
+    """A response formula with an Excel-cached value is read as that value."""
+    wb_path = _formula_workbook(tmp_path)
+    book = openpyxl.load_workbook(wb_path)
+    runs = book["runs"]
+    headers = [c.value for c in runs[1]]
+    resp_col = headers.index("y") + 1
+    data_rows = [r for r in runs.iter_rows(min_row=2) if r[0].value is not None]
+    for r in data_rows[:-1]:
+        r[resp_col - 1].value = 5.0
+    data_rows[-1][resp_col - 1].value = "=1+2"  # Excel would cache 3.0
+    book.save(wb_path)
+
+    # Stub the data_only view as if Excel had computed the formula: read the
+    # formula-preserving rows and substitute the cached result.
+    def fake(self):
+        sheet = self._wb["runs"]
+        rows = [list(r) for r in sheet.iter_rows(min_row=2, values_only=True)]
+        for row in rows:
+            for j, v in enumerate(row):
+                if isinstance(v, str) and v.startswith("="):
+                    row[j] = 3.0
+        return rows
+
+    monkeypatch.setattr(Workbook, "_cached_runs_rows", fake)
+
+    completed = Workbook.open(wb_path).completed_runs()
+    assert sorted(float(r["y"]) for r in completed) == [3.0, 5.0, 5.0]
+
+
+# ──────────────────────────────────────────────────────────────────
+# In-place save safety: backup + chart/image warning (issue #10)
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_save_writes_one_time_backup(tmp_path):
+    out = do_new(_new_params(tmp_path, template="linear", inputs=[("x", 0.0, 10.0)], n=3))
+    wb_path = Path(out["workbook_path"])
+    original = wb_path.read_bytes()
+
+    wb = Workbook.open(wb_path)
+    wb.append_runs(2, [{"x": 5.0}])
+    wb.save()
+
+    bak = wb_path.with_name(wb_path.name + ".bak")
+    assert bak.exists()
+    assert bak.read_bytes() == original
+
+
+def test_open_warns_on_embedded_chart(tmp_path):
+    from openpyxl.chart import BarChart, Reference
+
+    out = do_new(_new_params(tmp_path, template="linear", inputs=[("x", 0.0, 10.0)], n=3))
+    wb_path = Path(out["workbook_path"])
+    book = openpyxl.load_workbook(wb_path)
+    chart = BarChart()
+    chart.add_data(Reference(book["runs"], min_col=1, min_row=1, max_row=2))
+    book["runs"].add_chart(chart, "H2")
+    book.save(wb_path)
+
+    with pytest.warns(UserWarning, match="charts or images"):
+        Workbook.open(wb_path)
+
+
+# ──────────────────────────────────────────────────────────────────
+# Falsy metadata round-trips; --error validation (issue #11)
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_seed_zero_survives_round_trip(tmp_path):
+    out = do_new(_new_params(tmp_path, template="linear", inputs=[("x", 0.0, 10.0)], n=3))
+    wb_path = Path(out["workbook_path"])
+    wb = Workbook.open(wb_path)
+    # _new_params uses seed=0; it must not be silently replaced with 42.
+    assert wb.seed() == 0
+
+
+def test_measurement_error_half_survives(tmp_path):
+    out = do_new(
+        _new_params(tmp_path, template="linear", inputs=[("x", 0.0, 10.0)], n=3, error=0.5)
+    )
+    wb = Workbook.open(Path(out["workbook_path"]))
+    assert wb.measurement_error() == 0.5
+
+
+def test_cli_new_rejects_nonpositive_error(tmp_path, capsys):
+    import argparse
+
+    from discopt.doe.cli import add_subparser
+
+    top = argparse.ArgumentParser()
+    add_subparser(top.add_subparsers(dest="cmd"))
+    args = top.parse_args(
+        [
+            "doe",
+            "new",
+            "linear",
+            "-o",
+            str(tmp_path / "z.xlsx"),
+            "--input",
+            "x:0:1",
+            "--error",
+            "0",
+        ]
+    )
+    assert args.doe_func(args) == 1
+    assert not (tmp_path / "z.xlsx").exists()
+
+
+# ──────────────────────────────────────────────────────────────────
+# --json output is always valid JSON (issue #36)
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_json_new_factorial_is_valid_json(tmp_path, capsys):
+    """`new factorial-2level --json` embeds a NaN criterion_value; the emitted
+    JSON must still parse strictly (no bare NaN)."""
+    import argparse
+    import json
+
+    from discopt.doe.cli import add_subparser
+
+    top = argparse.ArgumentParser()
+    add_subparser(top.add_subparsers(dest="cmd"))
+    args = top.parse_args(
+        [
+            "doe",
+            "new",
+            "factorial-2level",
+            "-o",
+            str(tmp_path / "f.xlsx"),
+            "--factor",
+            "A:-1:1",
+            "--factor",
+            "B:-1:1",
+            "--json",
+        ]
+    )
+    assert args.doe_func(args) == 0
+    out = capsys.readouterr().out
+    # Strict parse: parse_constant fires on NaN/Infinity, so raise if present.
+    def _boom(x):
+        raise ValueError(f"non-finite literal {x!r} in JSON")
+
+    parsed = json.loads(out, parse_constant=_boom)
+    assert parsed["template"] == "factorial-2level"
+
+
+# ──────────────────────────────────────────────────────────────────
+# Column-name collision validation (issue #40)
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_input_named_like_response_rejected(tmp_path):
+    """An input named 'y' would collide with the default response column."""
+    with pytest.raises(DoEError, match="reserved"):
+        do_new(_new_params(tmp_path, template="linear", inputs=[("y", 0.0, 1.0)], n=2))
+
+
+def test_duplicate_input_names_rejected(tmp_path):
+    with pytest.raises(DoEError, match="duplicate"):
+        do_new(
+            _new_params(
+                tmp_path,
+                template="linear",
+                inputs=[("x", 0.0, 1.0), ("x", 2.0, 3.0)],
+                n=2,
+            )
+        )
+
+
+def test_fit_blank_input_gives_actionable_error(tmp_path):
+    """A completed row with a blanked input errors clearly, not a raw traceback.
+
+    Regression for issue #41 (float(None) TypeError surfaced as a stack trace).
+    """
+    out = do_new(_new_params(tmp_path, template="linear", inputs=[("x", 0.0, 10.0)], n=3))
+    wb_path = Path(out["workbook_path"])
+    book = openpyxl.load_workbook(wb_path)
+    runs = book["runs"]
+    headers = [c.value for c in runs[1]]
+    x_idx = headers.index("x")
+    y_idx = headers.index("y")
+    for row in runs.iter_rows(min_row=2):
+        if row[0].value is None:
+            continue
+        row[y_idx].value = 1.0  # mark completed
+        row[x_idx].value = None  # but blank the input
+    book.save(wb_path)
+
+    with pytest.raises(DoEError, match="blank value for input"):
+        do_fit({"workbook": str(wb_path)})
+
+
+# ──────────────────────────────────────────────────────────────────
+# status recommends the right verb per template (issue #37)
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_status_recommends_anova_for_latin(tmp_path):
+    do_new(
+        NewParams(
+            output=tmp_path / "l.xlsx",
+            n=9,
+            inputs=[],
+            response_name="y",
+            measurement_error=1.0,
+            criterion="anova",
+            seed=0,
+            n_starts=1,
+            template="latin-square",
+            levels={"row": [1, 2, 3], "col": [1, 2, 3], "t": ["A", "B", "C"]},
+            replicates=1,
+        )
+    )
+    out = do_status({"workbook": str(tmp_path / "l.xlsx")})
+    assert "anova" in out["next_command"]
+    assert " fit " not in out["next_command"]
+
+
+def test_fit_on_optimize_workbook_points_to_optimize(tmp_path):
+    from discopt.doe.workbook import Workbook
+
+    do_new(
+        NewParams(
+            output=tmp_path / "o.xlsx",
+            n=3,
+            inputs=[("x", 0.0, 1.0)],
+            response_name="y",
+            measurement_error=0.1,
+            criterion="determinant",
+            seed=0,
+            n_starts=1,
+            template="optimize",
+        )
+    )
+    with pytest.raises(ValueError, match="discopt doe optimize"):
+        Workbook.open(tmp_path / "o.xlsx").rebuild_experiment()
+
+
+def test_do_status_exposes_seed(tmp_path):
+    """do_status returns the campaign seed (GUI optimize default relies on it)."""
+    out = do_new(
+        NewParams(
+            output=tmp_path / "s.xlsx",
+            n=3,
+            inputs=[("x", 0.0, 1.0)],
+            response_name="y",
+            measurement_error=0.1,
+            criterion="determinant",
+            seed=7,
+            n_starts=1,
+            template="linear",
+        )
+    )
+    status = do_status({"workbook": out["workbook_path"]})
+    assert status["seed"] == 7
+
+
+def test_extend_warns_when_pending_runs_exist(tmp_path):
+    """Extending while runs are still pending warns the user (issue #38).
+
+    Pending runs contribute nothing to the prior FIM, so a second extend can
+    re-recommend overlapping points; surface that instead of doing it silently.
+    """
+
+    def predict(row):
+        return 2.0 + 3.0 * row["x"]
+
+    out = do_new(_new_params(tmp_path, template="linear", inputs=[("x", 0.0, 10.0)], n=4, error=0.05))
+    wb_path = Path(out["workbook_path"])
+    _fill_response(wb_path, "y", predict)
+    do_fit({"workbook": str(wb_path)})
+
+    e1 = do_extend(ExtendParams(workbook=wb_path, n=2, n_starts=3))
+    assert e1["warnings"] == []  # nothing pending yet
+    # batch 2 is now pending; a second extend must warn.
+    e2 = do_extend(ExtendParams(workbook=wb_path, n=2, n_starts=3))
+    assert any("pending" in w for w in e2["warnings"])
+
+
+def test_do_new_refuses_to_overwrite(tmp_path):
+    """do_new must not silently clobber an existing workbook (issue #69)."""
+    p = _new_params(tmp_path, template="linear", inputs=[("x", 0.0, 1.0)], n=2)
+    do_new(p)
+    with pytest.raises(DoEError, match="already exists"):
+        do_new(_new_params(tmp_path, template="linear", inputs=[("x", 0.0, 1.0)], n=2))
+
+
+def test_new_optimize_default_n_succeeds(tmp_path):
+    """`new optimize` with no --n must not fail (default is >= 2) (issue #70)."""
+    import argparse
+
+    from discopt.doe.cli import add_subparser
+
+    top = argparse.ArgumentParser()
+    add_subparser(top.add_subparsers(dest="cmd"))
+    args = top.parse_args(
+        ["doe", "new", "optimize", "-o", str(tmp_path / "o.xlsx"), "--input", "x:0:1"]
+    )
+    assert args.n >= 2
+    assert args.doe_func(args) == 0
+
+
+# ──────────────────────────────────────────────────────────────────
+# Fuzz-found robustness fixes
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_do_new_rejects_nonpositive_mixture_total(tmp_path):
+    """mixture_total <= 0 is a clean error, not a downstream RuntimeError."""
+    with pytest.raises(DoEError, match="mixture-total must be positive"):
+        do_new(
+            NewParams(
+                output=tmp_path / "m.xlsx",
+                n=6,
+                inputs=[("A", 0.0, 1.0), ("B", 0.0, 1.0), ("C", 0.0, 1.0)],
+                response_name="y",
+                measurement_error=0.1,
+                criterion="determinant",
+                seed=0,
+                n_starts=3,
+                template="scheffe-quadratic",
+                mixture_total=0.0,
+            )
+        )
+
+
+def test_cmd_new_catches_runtime_error(tmp_path, monkeypatch):
+    """A RuntimeError from the design search exits cleanly (exit 1), no traceback."""
+    import argparse
+
+    import discopt.doe.cli as cli
+
+    def boom(_params):
+        raise RuntimeError("No feasible design point found")
+
+    monkeypatch.setattr(cli, "do_new", boom)
+    top = argparse.ArgumentParser()
+    cli.add_subparser(top.add_subparsers(dest="cmd"))
+    args = top.parse_args(
+        ["doe", "new", "linear", "-o", str(tmp_path / "z.xlsx"), "--input", "x:0:1"]
+    )
+    assert args.doe_func(args) == 1

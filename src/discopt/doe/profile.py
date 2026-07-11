@@ -69,7 +69,7 @@ class ProfileLikelihoodResult:
     confidence_level : float
         Nominal confidence level used to set the threshold.
     threshold : float
-        The deviance threshold ``D(theta_hat) + chi2.ppf(alpha, 1)``.
+        The deviance threshold ``D(theta_hat) + chi2.ppf(confidence_level, 1)``.
     shape : str
         One of ``"bounded"``, ``"one_sided_lower"``,
         ``"one_sided_upper"``, ``"flat"``.
@@ -154,8 +154,10 @@ def profile_likelihood(
     if initial_step is None:
         idx = initial_estimate.parameter_names.index(parameter_name)
         fim_diag = float(initial_estimate.fim[idx, idx])
-        # D(theta_hat + h) ~ D(theta_hat) + 2 * fim_diag * h^2
-        # (factor 2 because D is deviance, not NLL)
+        # Deviance curvature: D(theta_hat + h) ~ D(theta_hat) + fim_diag * h^2
+        # (D = 2*NLL and NLL curvature ~ 0.5*fim_diag). The extra factor 2 below
+        # makes this a deliberately conservative (smaller) first step; the
+        # adaptive loop grows it as needed.
         if fim_diag > 0:
             initial_step = np.sqrt(target_delta_loglik / (2.0 * fim_diag))
         else:

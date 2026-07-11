@@ -261,6 +261,26 @@ class TestVuong:
         assert res.z_statistic < 0
         assert res.best_model == "quad"
 
+    def test_per_obs_loglik_expands_replicates(self):
+        """Array-valued (replicate) response data yields one loglik per obs.
+
+        Regression: only the first value of each response was used, truncating
+        the Vuong statistic to one value per response name.
+        """
+        from discopt.doe.selection import _per_obs_loglik
+
+        class OneResp(Experiment):
+            def create_model(self, **kw):
+                m = dm.Model("one")
+                b = m.continuous("b", lb=-50, ub=50)
+                return ExperimentModel(m, {"b": b}, {}, {"y": b + 0.0 * b}, {"y": 0.5})
+
+        exp = OneResp()
+        data = {"y": np.array([1.0, 2.0, 3.0])}
+        res = estimate_parameters(exp, data)
+        ll = _per_obs_loglik(exp, res, data)
+        assert ll.shape == (3,)
+
     def test_returns_z_and_p(self, linear_data):
         xs, data = linear_data
         est_lin = estimate_parameters(LinearAB(xs), data)

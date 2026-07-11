@@ -24,8 +24,8 @@ Sheets
     :meth:`Workbook.rebuild_experiment`.
 
 ``parameters``
-    Written by ``fit`` and ``extend``. Columns: ``name``, ``estimate``,
-    ``std_error``, ``ci_lower_95``, ``ci_upper_95``, ``updated_at``.
+    Written by ``fit``. Columns: ``name``, ``estimate``, ``std_error``,
+    ``ci_lower_95``, ``ci_upper_95``, ``updated_at``.
 
 ``fim``
     The latest cumulative Fisher Information Matrix, labelled
@@ -164,7 +164,7 @@ def _require_openpyxl():
         import openpyxl  # noqa: F401
     except ImportError as e:
         raise ImportError(
-            "discopt doe needs openpyxl. Install with: pip install 'discopt[doe]'"
+            "discopt doe needs openpyxl. Install with: pip install 'discopt-doe'"
         ) from e
 
 
@@ -187,6 +187,7 @@ class Workbook:
     def __init__(self, path: Path, wb: Any) -> None:
         self.path = Path(path)
         self._wb = wb
+        self._backed_up = False
 
     # ------------------------------------------------------------------
     # Construction / open / save
@@ -206,9 +207,27 @@ class Workbook:
         response_name: str,
         module_callable: str | None = None,
         param_initial_guess: dict[str, float] | None = None,
+        extra_columns: Sequence[str] = (),
     ) -> "Workbook":
         _require_openpyxl()
         from openpyxl import Workbook as _OpenpyxlWorkbook
+
+        # Validate column names up front: duplicates or collisions with the
+        # reserved/bookkeeping columns silently corrupt the runs sheet
+        # (dict(zip(headers, row)) keeps only the last duplicate, so reads pick
+        # the wrong column).
+        reserved = {"run_id", "batch", "measured_at", response_name}
+        input_names = [s.name for s in input_specs]
+        seen: set[str] = set()
+        for name in [*input_names, *extra_columns]:
+            if name in reserved:
+                raise ValueError(
+                    f"column name {name!r} is reserved (response is "
+                    f"{response_name!r}); rename the input/factor."
+                )
+            if name in seen:
+                raise ValueError(f"duplicate column name {name!r}; names must be unique.")
+            seen.add(name)
 
         path = Path(path)
         wb = _OpenpyxlWorkbook()
@@ -252,10 +271,15 @@ class Workbook:
         for k, v in meta_rows:
             meta_sheet.append([k, v])
 
-        # Runs header row
+        # Runs header row. Any ``extra_columns`` (e.g. "replicate" bookkeeping
+        # for factorial/latin designs) sit between the design inputs and the
+        # response so ``anova_report`` can pick them up as blocking factors.
         runs_sheet = wb[SHEET_RUNS]
         header = (
-            ["run_id", "batch"] + [s.name for s in input_specs] + [response_name, "measured_at"]
+            ["run_id", "batch"]
+            + [s.name for s in input_specs]
+            + list(extra_columns)
+            + [response_name, "measured_at"]
         )
         runs_sheet.append(header)
 
@@ -294,9 +318,40 @@ class Workbook:
         missing = required - set(wb.sheetnames)
         if missing:
             raise ValueError(f"workbook {path} is missing required sheets: {sorted(missing)}")
-        return cls(path, wb)
+        obj = cls(path, wb)
+        if obj._has_embedded_objects():
+            import warnings
+
+            warnings.warn(
+                f"workbook {path.name} contains charts or images; openpyxl "
+                "cannot preserve them across a load+save, so they will be lost "
+                "the next time this campaign writes to the file (fit/extend/"
+                "optimize). Keep plots in a separate file. A one-time backup is "
+                "written to the .bak sibling before the first save.",
+                stacklevel=2,
+            )
+        return obj
+
+    def _has_embedded_objects(self) -> bool:
+        """True if any sheet carries charts or images openpyxl would drop."""
+        for ws in self._wb.worksheets:
+            if getattr(ws, "_charts", None) or getattr(ws, "_images", None):
+                return True
+        return False
 
     def save(self) -> None:
+        # Back up the pre-session file once, before the first in-place write.
+        # openpyxl load+save silently drops charts/images and other unsupported
+        # content, so the .bak preserves whatever the user had.
+        if not self._backed_up and self.path.exists():
+            import shutil
+
+            backup = self.path.with_name(self.path.name + ".bak")
+            try:
+                shutil.copy2(self.path, backup)
+            except OSError:
+                pass  # a failed backup must not block saving results
+            self._backed_up = True
         self._wb.save(self.path)
 
     # ------------------------------------------------------------------
@@ -341,13 +396,20 @@ class Workbook:
         return out
 
     def criterion(self) -> str:
-        return str(self.metadata().get("criterion") or "determinant")
+        v = self.metadata().get("criterion")
+        return "determinant" if v is None or v == "" else str(v)
 
     def measurement_error(self) -> float:
-        return float(self.metadata().get("measurement_error") or 1.0)
+        # `or 1.0` would turn a legitimately-stored 0.0 into 1.0; guard on
+        # None/"" only so falsy-but-valid values survive the round-trip.
+        v = self.metadata().get("measurement_error")
+        return 1.0 if v is None or v == "" else float(v)
 
     def seed(self) -> int:
-        return int(self.metadata().get("seed") or 42)
+        # `or 42` would turn a stored seed of 0 into 42, breaking
+        # reproducibility of campaigns created with --seed 0.
+        v = self.metadata().get("seed")
+        return 42 if v is None or v == "" else int(v)
 
     # ------------------------------------------------------------------
     # Runs
@@ -364,7 +426,11 @@ class Workbook:
     def append_runs(self, batch_idx: int, runs: Sequence[Mapping[str, object]]) -> list[int]:
         """Append a batch of pending runs to the workbook. Returns the new run_ids."""
         sheet = self._wb[SHEET_RUNS]
-        input_names = self._input_column_names()
+        # Header layout is run_id, batch, <inputs...>, <extra...>, response,
+        # measured_at. The middle columns (inputs plus any extra bookkeeping
+        # columns such as "replicate") are written from each run mapping.
+        headers = self._runs_headers()
+        middle = headers[2:-2] if len(headers) >= 4 else self._input_column_names()
         # Determine next run_id
         existing_ids = []
         for row in sheet.iter_rows(min_row=2, values_only=True):
@@ -377,8 +443,8 @@ class Workbook:
         new_ids: list[int] = []
         for run in runs:
             row = [next_id, int(batch_idx)]
-            for nm in input_names:
-                v = run[nm]
+            for nm in middle:
+                v = run.get(nm)
                 if isinstance(v, (int, float)) and not isinstance(v, bool):
                     row.append(float(v))
                 else:
@@ -386,18 +452,64 @@ class Workbook:
             row.append(None)  # response (blank => pending)
             row.append(None)  # measured_at
             sheet.append(row)
+            # A string level like "=A" would be stored by openpyxl as a live
+            # formula (spreadsheet-injection). Force such cells to plain text.
+            written = sheet[sheet.max_row]
+            for cell in written:
+                if isinstance(cell.value, str) and cell.value.startswith(("=", "+", "-", "@")):
+                    cell.data_type = "s"
             new_ids.append(next_id)
             next_id += 1
         return new_ids
 
+    def _cached_runs_rows(self) -> list[list[Any]]:
+        """On-disk *computed* values of the runs sheet (Excel formula results).
+
+        openpyxl returns the formula *text* for formula cells unless the
+        workbook is opened with ``data_only=True``, which reads the value
+        Excel cached when it last saved the file. We keep the ordinary
+        (formula-preserving) handle for writing and consult this view only to
+        resolve formula cells, so user-entered formulas survive round-trips.
+        """
+        from openpyxl import load_workbook
+
+        dwb = load_workbook(self.path, data_only=True)
+        sheet = dwb[SHEET_RUNS]
+        return [list(r) for r in sheet.iter_rows(min_row=2, values_only=True)]
+
     def all_runs(self) -> list[dict[str, Any]]:
-        """Return every run as a dict (including pending rows)."""
+        """Return every run as a dict (including pending rows).
+
+        Formula cells (e.g. a response entered as ``=AVERAGE(...)`` in Excel)
+        are resolved to their cached computed values. A formula in the
+        response column with no stored value raises a clear error rather than
+        being silently treated as a pending run.
+        """
         sheet = self._wb[SHEET_RUNS]
         headers = self._runs_headers()
+        response = self.response_name()
+        resp_idx = headers.index(response) if response in headers else None
+        cached_rows: list[list[Any]] | None = None
         out: list[dict[str, Any]] = []
-        for row in sheet.iter_rows(min_row=2, values_only=True):
+        for r_i, row in enumerate(sheet.iter_rows(min_row=2, values_only=True)):
             if not row or row[0] is None:
                 continue
+            row = list(row)
+            for c_i, val in enumerate(row):
+                if not (isinstance(val, str) and val.startswith("=")):
+                    continue
+                if cached_rows is None:
+                    cached_rows = self._cached_runs_rows()
+                cached = cached_rows[r_i][c_i] if r_i < len(cached_rows) else None
+                if cached is None and c_i == resp_idx:
+                    raise ValueError(
+                        f"run {row[0]}: response cell {headers[c_i]!r} contains "
+                        f"the formula {val!r} but no computed value is stored. "
+                        "Open the workbook in Excel/LibreOffice and save it so "
+                        "the formula is evaluated, or enter a numeric value "
+                        "directly."
+                    )
+                row[c_i] = cached
             out.append(dict(zip(headers, row)))
         return out
 
@@ -609,6 +721,11 @@ class Workbook:
             raise ValueError(
                 f"workbook uses combinatorial template {template!r}; use `discopt doe anova` "
                 "instead of fit/extend"
+            )
+        if template == "optimize":
+            raise ValueError(
+                "workbook uses the active-learning 'optimize' template; use "
+                "`discopt doe optimize` instead of fit/extend"
             )
         specs = self.input_specs()
         response = self.response_name()

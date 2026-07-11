@@ -13,8 +13,8 @@ Three complementary entry points:
    acquisition function (EI, UCB, steepest ascent), track everything in an
    Excel workbook.
 2. **"Does this factor matter?"** — classical designs: 2-level full/fractional
-   factorials, Plackett–Burman, mixture designs, Latin squares/hypercubes,
-   main-effect estimates, ANOVA.
+   factorials, mixture designs, Latin/Graeco-Latin squares, main-effect
+   estimates, ANOVA.
 3. **"How precisely can I estimate the model parameters?"** — model-based DoE:
    exact D/A/E-optimal design from the Fisher Information Matrix (JAX
    autodiff), identifiability/estimability diagnostics, profile likelihood,
@@ -24,6 +24,29 @@ Parameter estimation (`discopt.estimate`) lives in the base package; both
 share the same `Experiment` interface.
 
 ## Install
+
+> **Pre-release:** neither `discopt-doe` nor its `discopt>=0.6` dependency is
+> on PyPI yet, so the plain `pip install discopt-doe` shown below does **not
+> work today** — it can't resolve `discopt>=0.6`. Until the 0.6 release, use
+> the uv or git install below.
+
+Recommended (uv, resolves the pinned `discopt` automatically):
+
+```bash
+git clone https://github.com/jkitchin/discopt-doe
+cd discopt-doe
+uv sync --all-extras        # core + gui + ml + dev
+```
+
+With pip, install the pre-release `discopt` first, then this package:
+
+```bash
+pip install "git+https://github.com/jkitchin/discopt@refactor/389-extract-doe"
+pip install "git+https://github.com/jkitchin/discopt-doe"          # core
+pip install "git+https://github.com/jkitchin/discopt-doe#egg=discopt-doe[gui]"  # + GUI
+```
+
+Once `discopt>=0.6` and `discopt-doe` are published, the usual form applies:
 
 ```bash
 pip install discopt-doe            # core
@@ -85,9 +108,28 @@ discopt doe templates                 # list workbook templates
 discopt doe new linear -o run.xlsx --input T:300:400 --n 8
 discopt doe status run.xlsx
 discopt doe fit run.xlsx              # fit parameters to completed rows
+discopt doe anova run.xlsx           # ANOVA F-table (latin/factorial designs)
 discopt doe extend run.xlsx --n 4     # design the next batch
+discopt doe optimize run.xlsx        # one active-learning round (optimize template)
 discopt doe gui run.xlsx              # Streamlit GUI (needs [gui] extra)
 ```
+
+## GUI
+
+`discopt doe gui [workbook.xlsx]` launches a Streamlit app over a campaign
+workbook (install the `[gui]` extra, which also pulls scikit-learn for the
+active-learning round). It wraps the same `do_*` functions as the CLI:
+
+- **Create** a new campaign from a template, browsing to an output folder.
+- **Edit responses** in-app or in Excel, then Save; the **Rename** panel can
+  rename factors/response — note this clears the fit artifacts, so re-run Fit.
+- **Fit / Extend / Optimize / ANOVA** panels drive the corresponding verb, and
+  a **History** panel shows the workbook's audit log.
+
+Flags: `--port N`, `--no-browser`. The `DISCOPT_DOE_WORKBOOK` environment
+variable pre-selects a workbook. Keep charts in a separate file — the CLI/GUI
+rewrite the workbook and openpyxl does not preserve embedded charts (a `.bak`
+is written before the first save).
 
 ## Development
 

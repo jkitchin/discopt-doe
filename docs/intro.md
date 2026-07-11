@@ -15,10 +15,9 @@ different question:
    append the batch to an Excel workbook for execution.
 
 2. **"Does this factor matter?"** — 2-level full and fractional factorial
-   screening designs {cite:p}`BoxHunter2005,Montgomery2017`, Plackett–Burman
-   designs {cite:p}`PlackettBurman1946`, signed main-effect estimates, and
-   ANOVA F-tables {cite:p}`Fisher1935`. Mixture designs
-   {cite:p}`Scheffe1958,Cornell2002` and Latin squares/hypercubes
+   screening designs {cite:p}`BoxHunter2005,Montgomery2017`, signed
+   main-effect estimates, and ANOVA F-tables {cite:p}`Fisher1935`. Mixture
+   designs {cite:p}`Scheffe1958,Cornell2002` and Latin / Graeco-Latin squares
    {cite:p}`Cochran1957` round out the classical toolbox.
 
 3. **"How precisely can I estimate the model parameters?"** — exact
@@ -34,6 +33,29 @@ Parameter estimation itself (`discopt.estimate`) lives in the base discopt
 package; both share the same `Experiment` interface.
 
 ## Install
+
+```{warning}
+Pre-release: neither `discopt-doe` nor its `discopt>=0.6` dependency is on
+PyPI yet, so `pip install discopt-doe` cannot resolve `discopt>=0.6` today.
+Until the 0.6 release, use the uv or git install below.
+```
+
+Recommended (uv resolves the pinned `discopt` automatically):
+
+```bash
+git clone https://github.com/jkitchin/discopt-doe
+cd discopt-doe
+uv sync --all-extras        # core + gui + ml + dev
+```
+
+With pip, install the pre-release `discopt` first, then this package:
+
+```bash
+pip install "git+https://github.com/jkitchin/discopt@refactor/389-extract-doe"
+pip install "git+https://github.com/jkitchin/discopt-doe"
+```
+
+Once both are published, the usual form applies:
 
 ```bash
 pip install discopt-doe            # core: FIM design, screening, workbooks

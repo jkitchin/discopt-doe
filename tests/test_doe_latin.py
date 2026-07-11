@@ -43,9 +43,16 @@ def test_latin_square_each_row_col_unique():
 
 def test_graeco_latin_square_orthogonality():
     """Every (a, b) pair appears exactly once in a Graeco-Latin square."""
-    for k in (3, 4, 5, 7):
+    # Includes the prime-power orders 8 (2^3) and 9 (3^2) now supported.
+    for k in (3, 4, 5, 7, 8, 9):
         a, b = graeco_latin_square(k, seed=1)
         assert _check_orthogonal(a, b)
+
+
+def test_graeco_latin_composite_order_honest_error():
+    """A non-prime-power order raises an honest 'not supported' message."""
+    with pytest.raises(ValueError, match="not supported by this MOLS construction"):
+        graeco_latin_square(10)
 
 
 def test_graeco_latin_rejects_k2_and_k6():
@@ -230,6 +237,55 @@ def test_anova_unbalanced_warns():
     assert table.balanced is False
 
 
+def test_anova_aliased_design_raises():
+    """Marginally balanced but perfectly aliased factors -> negative residual.
+
+    Regression: A and B are fully confounded, so each marginal main-effect SS
+    equals the total SS and the implied residual is negative. The per-factor
+    balance check passes, so this must be caught by the orthogonality/residual
+    guard rather than printing a nonsensical table.
+    """
+    rows = [
+        {"A": 0, "B": 0, "y": 0.0},
+        {"A": 0, "B": 0, "y": 0.0},
+        {"A": 1, "B": 1, "y": 2.0},
+        {"A": 1, "B": 1, "y": 2.0},
+    ]
+    with pytest.raises(ValueError, match="negative residual|orthogonal"):
+        with pytest.warns(UserWarning):
+            anova_report(rows, response="y", factors=["A", "B"])
+
+
+def test_anova_excludes_is_center_column():
+    """Auto factor detection must skip the is_center bookkeeping column."""
+    rows = [
+        {"A": -1, "is_center": 0, "y": 1.0},
+        {"A": 1, "is_center": 0, "y": 3.0},
+        {"A": -1, "is_center": 0, "y": 1.2},
+        {"A": 1, "is_center": 0, "y": 3.1},
+    ]
+    table = anova_report(rows, response="y")  # factors=None -> auto-detect
+    sources = [r.source for r in table.rows]
+    assert "is_center" not in sources
+    assert "A" in sources
+
+
+def test_anova_non_orthogonal_warns():
+    """Correlated (non-proportional cross-tab) factors warn but still compute."""
+    rows = [
+        {"A": 0, "B": 0, "y": 0.0},
+        {"A": 0, "B": 0, "y": 2.0},
+        {"A": 0, "B": 1, "y": 1.0},
+        {"A": 1, "B": 0, "y": 1.0},
+        {"A": 1, "B": 1, "y": 8.0},
+        {"A": 1, "B": 1, "y": 10.0},
+    ]
+    with pytest.warns(UserWarning, match="not orthogonal"):
+        table = anova_report(rows, response="y", factors=["A", "B"])
+    by_source = {r.source: r for r in table.rows}
+    assert by_source["Residual"].ss >= 0.0
+
+
 # ──────────────────────────────────────────────────────────────────
 # CLI / workbook round-trip
 # ──────────────────────────────────────────────────────────────────
@@ -310,3 +366,124 @@ def test_cli_latin_rejects_k6_for_graeco(tmp_path: Path) -> None:
                 replicates=1,
             )
         )
+
+
+def test_cli_factorial_replicate_blocking(tmp_path: Path) -> None:
+    """--include-replicate persists a replicate column and blocks on it.
+
+    Regression: the replicate tag was dropped before writing the runs sheet,
+    so --include-replicate silently did nothing.
+    """
+    openpyxl = pytest.importorskip("openpyxl")
+    from discopt.doe.cli import NewParams, do_anova, do_new
+
+    wb_path = tmp_path / "fac.xlsx"
+    do_new(
+        NewParams(
+            output=wb_path,
+            n=1,
+            inputs=[],
+            response_name="y",
+            measurement_error=1.0,
+            criterion="anova",
+            seed=0,
+            n_starts=1,
+            template="factorial-2level",
+            factor_pairs={"A": (-1, 1), "B": (-1, 1)},
+            replicates=2,
+        )
+    )
+    book = openpyxl.load_workbook(wb_path)
+    headers = [c.value for c in book["runs"][1]]
+    assert "replicate" in headers
+
+    sheet = book["runs"]
+    y_idx = headers.index("y")
+    a_idx = headers.index("A")
+    b_idx = headers.index("B")
+    rng = np.random.default_rng(0)
+    for row in sheet.iter_rows(min_row=2):
+        if row[0].value is None:
+            continue
+        row[y_idx].value = float(row[a_idx].value + 0.5 * row[b_idx].value + rng.normal(0, 0.1))
+    book.save(wb_path)
+
+    out = do_anova({"workbook": str(wb_path), "include_replicate": True})
+    sources = [r["source"] for r in out["rows"]]
+    assert "replicate" in sources
+
+
+def test_cli_anova_include_replicate_without_column_errors(tmp_path: Path) -> None:
+    from discopt.doe.cli import DoEError, NewParams, do_anova, do_new
+
+    wb_path = tmp_path / "lin.xlsx"
+    do_new(
+        NewParams(
+            output=wb_path,
+            n=3,
+            inputs=[("x", 0.0, 10.0)],
+            response_name="y",
+            measurement_error=1.0,
+            criterion="determinant",
+            seed=0,
+            n_starts=1,
+            template="linear",
+        )
+    )
+    openpyxl = pytest.importorskip("openpyxl")
+    book = openpyxl.load_workbook(wb_path)
+    sheet = book["runs"]
+    headers = [c.value for c in sheet[1]]
+    y_idx = headers.index("y")
+    for row in sheet.iter_rows(min_row=2):
+        if row[0].value is None:
+            continue
+        row[y_idx].value = 1.0
+    book.save(wb_path)
+
+    with pytest.raises(DoEError, match="replicate"):
+        do_anova({"workbook": str(wb_path), "include_replicate": True})
+
+
+def test_categorical_formula_level_stored_as_text(tmp_path: Path) -> None:
+    """A factor level like '=A' must be stored as text, not a live formula."""
+    openpyxl = pytest.importorskip("openpyxl")
+    from discopt.doe.workbook import InputSpec, Workbook
+
+    wb_path = tmp_path / "inj.xlsx"
+    wb = Workbook.create(
+        wb_path,
+        template=None,
+        template_args={},
+        input_specs=[InputSpec("cat", 0.0, 1.0)],
+        criterion="anova",
+        measurement_error=1.0,
+        seed=0,
+        response_name="y",
+    )
+    wb.append_runs(1, [{"cat": "=A"}, {"cat": "B"}])
+    wb.save()
+
+    book = openpyxl.load_workbook(wb_path)
+    sheet = book["runs"]
+    headers = [c.value for c in sheet[1]]
+    ci = headers.index("cat")
+    vals = [row[ci].value for row in sheet.iter_rows(min_row=2) if row[0].value is not None]
+    assert "=A" in vals  # stored literally, not evaluated to a formula error
+
+
+def test_anova_rejects_nonfinite_response():
+    """Non-finite / extreme responses give a clean error, not OverflowError.
+
+    Fuzz-found: a bare Python-float ``x ** 2`` raises OverflowError for
+    |x| ~ 1e154+, so anova_report crashed on adversarial response values.
+    """
+    for bad in (float("inf"), float("nan"), 1e300):
+        rows = [
+            {"g": "A", "y": 1.0},
+            {"g": "A", "y": 2.0},
+            {"g": "B", "y": bad},
+            {"g": "B", "y": 3.0},
+        ]
+        with pytest.raises(ValueError, match="non-finite or extreme"):
+            anova_report(rows, response="y", factors=["g"])

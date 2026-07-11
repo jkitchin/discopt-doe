@@ -108,6 +108,18 @@ class TestEstimabilityRank:
         # c is in the recommended subset (dominant projected norm).
         assert "c" in res.recommended_subset
 
+    def test_zero_nominal_parameter_not_forced_last(self):
+        """A parameter with nominal 0 keeps its real sensitivity (scale 1.0).
+
+        Regression: 'abs(0.0) or eps' scaled the column by machine-eps, so a
+        zero-valued parameter was always ranked unestimable and dropped.
+        """
+        exp = LinearExperiment([1.0, 2.0, 3.0, 4.0])
+        with pytest.warns(UserWarning, match="scale 0"):
+            res = estimability_rank(exp, {"a": 0.0, "b": 1.0})
+        # 'a' (the constant term) is genuinely estimable from a linear fit.
+        assert set(res.recommended_subset) == {"a", "b"}
+
     def test_parameter_scales_override(self):
         """Passing explicit parameter_scales should not alter ranking
         for an already-well-scaled problem but should not crash either.

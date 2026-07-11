@@ -60,6 +60,49 @@ def test_parametric_surrogate_recovers_quadratic():
     assert abs(s.parameters_["b2"] - (-1.0)) < 0.1
 
 
+def test_parametric_surrogate_underdetermined_raises():
+    """Fewer runs than parameters gives a clear error, not an obscure scipy one.
+
+    Regression: method='lm' raised 'Method lm doesn't work when the number of
+    residuals is less than the number of variables'.
+    """
+    exp = polynomial_1d_template(("x", -5.0, 5.0), degree=2, measurement_error=0.05)
+    s = ParametricSurrogate(exp, input_names=["x"], response_name="y")
+    xs = np.array([[-1.0], [1.0]])  # 2 points, 3 parameters
+    ys = np.array([1.0, 2.0])
+    with pytest.raises(ValueError, match="at least 3"):
+        s.fit(xs, ys)
+
+
+def test_parametric_surrogate_respects_parameter_bounds():
+    """The fitted parameter stays within its declared model bounds.
+
+    Regression: method='lm' ignored bounds; a bounded parameter could be
+    fit to a nonphysical value. y = a*x with a in [0, 1], truth a = 5.
+    """
+    import discopt.modeling as dm
+    from discopt.estimate import Experiment, ExperimentModel
+
+    class BoundedSlope(Experiment):
+        def create_model(self, **kwargs):
+            m = dm.Model("bounded")
+            a = m.continuous("a", lb=0.0, ub=1.0)
+            x = m.continuous("x", lb=-5.0, ub=5.0)
+            return ExperimentModel(
+                model=m,
+                unknown_parameters={"a": a},
+                design_inputs={"x": x},
+                responses={"y": a * x},
+                measurement_error={"y": 0.1},
+            )
+
+    s = ParametricSurrogate(BoundedSlope(), input_names=["x"], response_name="y")
+    xs = np.linspace(1.0, 5.0, 6)[:, None]
+    ys = 5.0 * xs.ravel()  # true slope 5, far outside [0, 1]
+    s.fit(xs, ys)
+    assert 0.0 - 1e-9 <= s.parameters_["a"] <= 1.0 + 1e-9
+
+
 def test_parametric_surrogate_predict_returns_mean_and_std():
     exp = polynomial_1d_template(("x", -5.0, 5.0), degree=2, measurement_error=0.1)
     rng = np.random.default_rng(1)
@@ -251,6 +294,43 @@ def test_model_based_optimize_round_returns_parameters(tmp_path):
     # The batch was appended
     assert len(result.next_designs) == 1
     assert "x" in result.next_designs[0]
+
+
+def test_model_based_report_invariant_to_batch_size(tmp_path):
+    """parameter_se / fim_log_det come from the real-data fit only.
+
+    Regression: they were read from the surrogate after the fantasy loop, so
+    they shrank/inflated with batch_size even though the real data was fixed.
+    """
+
+    def truth(x):
+        return -((x - 2.0) ** 2) + 3.0
+
+    init_xs = np.array([-3.0, -1.0, 0.0, 2.0, 4.0])
+    d1 = tmp_path / "b1"
+    d5 = tmp_path / "b5"
+    d1.mkdir()
+    d5.mkdir()
+    p1 = _make_workbook_polynomial(d1, init_xs, truth)
+    p5 = _make_workbook_polynomial(d5, init_xs, truth)
+
+    r1 = model_based_optimize_round(
+        workbook=p1,
+        criterion=OptimizationCriterion.MAXIMIZE,
+        acquisition="expected_improvement",
+        batch_size=1,
+        seed=0,
+    )
+    r5 = model_based_optimize_round(
+        workbook=p5,
+        criterion=OptimizationCriterion.MAXIMIZE,
+        acquisition="expected_improvement",
+        batch_size=5,
+        seed=0,
+    )
+    assert r5.fim_log_det == pytest.approx(r1.fim_log_det, rel=1e-9)
+    for name in r1.parameter_se:
+        assert r5.parameter_se[name] == pytest.approx(r1.parameter_se[name], rel=1e-9)
 
 
 def test_model_based_optimize_round_diverse_batch(tmp_path):

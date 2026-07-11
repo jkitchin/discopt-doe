@@ -474,3 +474,62 @@ class TestSolveFreeAndBatch:
                 )
 
         assert _make_direct_fim_evaluator(ConstrainedExp(), {"k": 1.0}) is None
+
+
+class _DesignInputExperiment(Experiment):
+    """y = k * x, with x a design input."""
+
+    def create_model(self, **kwargs):
+        m = dm.Model("designed")
+        k = m.continuous("k", lb=0.01, ub=20)
+        x = m.continuous("x", lb=0.0, ub=5.0)
+        return ExperimentModel(
+            model=m,
+            unknown_parameters={"k": k},
+            design_inputs={"x": x},
+            responses={"y": k * x},
+            measurement_error={"y": 0.1},
+        )
+
+
+def test_compute_fim_rejects_unknown_design_key():
+    """A typo'd design key must error, not silently float the real input."""
+    exp = _DesignInputExperiment()
+    with pytest.raises(ValueError, match="unknown design input"):
+        compute_fim(exp, {"k": 2.0}, {"temperture": 1.0})
+
+
+class _BigParamExperiment(Experiment):
+    """y_i = k * x_i with a large-magnitude parameter k."""
+
+    def create_model(self, **kwargs):
+        m = dm.Model("bigparam")
+        k = m.continuous("k", lb=0.0, ub=1e9)
+        responses = {f"y_{i}": k * xi for i, xi in enumerate([1.0, 2.0, 3.0])}
+        errors = {kk: 0.1 for kk in responses}
+        return ExperimentModel(m, {"k": k}, {}, responses, errors)
+
+
+def test_fd_matches_autodiff_at_large_parameter_scale():
+    """Relative FD step keeps FD ~ autodiff even for a ~1e6-scale parameter.
+
+    Regression: an absolute 1e-5 step caused catastrophic cancellation here.
+    """
+    exp = _BigParamExperiment()
+    pv = {"k": 1.0e6}
+    fim_ad = compute_fim(exp, pv, method="autodiff")
+    fim_fd = compute_fim(exp, pv, method="finite_difference")
+    np.testing.assert_allclose(fim_fd.fim, fim_ad.fim, rtol=1e-5)
+
+
+def test_compute_fim_rejects_zero_measurement_error():
+    """A zero measurement error must error (it gives an infinite FIM)."""
+
+    class ZeroErr(Experiment):
+        def create_model(self, **kwargs):
+            m = dm.Model("zeroerr")
+            k = m.continuous("k", lb=0.01, ub=20)
+            return ExperimentModel(m, {"k": k}, {}, {"y": k * 2.0}, {"y": 0.0})
+
+    with pytest.raises(ValueError, match="measurement_error must be positive"):
+        compute_fim(ZeroErr(), {"k": 2.0})

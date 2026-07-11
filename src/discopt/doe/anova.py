@@ -1,12 +1,11 @@
-"""General ANOVA analysis for balanced experimental designs.
+"""ANOVA analysis for orthogonal (balanced) experimental designs.
 
-Computes Type-I (sequential) sums of squares for main effects and
-optional interactions in any balanced design where each level of each
-factor appears the same number of times in the response column. Works
-for Latin-square family designs, full and fractional factorials,
-randomized complete blocks, and one-way layouts. For unbalanced data
-the function still runs but emits a warning -- Type-I SS may then
-depend on factor order.
+Computes the orthogonal sum-of-squares decomposition for main effects and
+optional interactions. Each main effect's SS is the *marginal* (unadjusted)
+SS of its level means about the grand mean; this decomposition is exact
+only when the factor columns are mutually orthogonal, which holds for
+Latin-square family designs, full and fractional factorials, randomized
+complete blocks, and one-way layouts.
 
 The standard decomposition for orthogonal balanced data is
 
@@ -20,6 +19,13 @@ with degrees of freedom
 
 F-statistics and p-values are computed against the residual mean square
 via the F-distribution survival function.
+
+For non-orthogonal data (aliased or correlated columns) the marginal SS do
+not add up: the function emits a warning, and if the implied residual SS is
+negative it raises rather than print a nonsensical table. Marginal balance
+of each factor alone does *not* guarantee orthogonality -- fully aliased
+columns pass a per-factor balance check -- so pairwise cross-tabulation is
+also verified. Fit a joint linear model for genuinely non-orthogonal data.
 """
 
 from __future__ import annotations
@@ -29,6 +35,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from itertools import product
 from typing import Iterable, Mapping, Sequence, cast
+
+import numpy as np
 
 
 @dataclass(frozen=True)
@@ -50,7 +58,8 @@ class AnovaEffect:
     f : float | None
         F-statistic against the residual MS (``None`` for residual/total).
     p : float | None
-        Two-sided p-value via ``scipy.stats.f.sf`` (``None`` for residual/total).
+        Upper-tail (one-sided) p-value via ``scipy.stats.f.sf`` (``None``
+        for residual/total).
     """
 
     source: str
@@ -89,8 +98,16 @@ class AnovaTable:
         return self.summary()
 
 
-def _is_response_column(name: str) -> bool:
-    return name in {"replicate", "run_order"} or name.startswith("_")
+def _is_bookkeeping_column(name: str) -> bool:
+    """Columns excluded from automatic factor detection.
+
+    ``is_center`` marks center-point rows in factorial/fractional designs; if
+    treated as a factor it perfectly confounds with the mid-level of every
+    real factor and produces a wrong table. ``replicate``/``run_order`` are
+    likewise bookkeeping, not factors. ``effects_estimates`` excludes the same
+    set, so the two modules agree.
+    """
+    return name in {"replicate", "run_order", "is_center"} or name.startswith("_")
 
 
 def anova_report(
@@ -141,7 +158,7 @@ def anova_report(
         raise ValueError(f"response column {response!r} missing from rows")
 
     if factors is None:
-        candidates = [k for k in rows[0].keys() if k != response and not _is_response_column(k)]
+        candidates = [k for k in rows[0].keys() if k != response and not _is_bookkeeping_column(k)]
         if include_replicate and "replicate" in rows[0]:
             candidates.append("replicate")
         factors = candidates
@@ -155,6 +172,17 @@ def anova_report(
             y.append(float(cast(float, r[response])))
         except (TypeError, ValueError) as e:
             raise ValueError(f"response value {r[response]!r} is not numeric") from e
+
+    # Reject non-finite or extreme response values up front: a bare Python-float
+    # ``x ** 2`` raises OverflowError for |x| ~ 1e154+, so validate before the
+    # sum-of-squares computations below rather than crashing on adversarial data.
+    y_arr = np.asarray(y, dtype=float)
+    with np.errstate(over="ignore", invalid="ignore"):
+        if not np.all(np.isfinite(y_arr)) or not np.isfinite(float(np.sum(y_arr**2))):
+            raise ValueError(
+                "response column contains non-finite or extreme values (inf/nan, "
+                "or magnitudes too large to form sums of squares); check the data"
+            )
 
     n = len(y)
     grand_mean = sum(y) / n
@@ -182,7 +210,42 @@ def anova_report(
             break
     if not balanced:
         warnings.warn(
-            "ANOVA design is unbalanced; Type-I SS depend on factor order",
+            "ANOVA design is unbalanced; marginal SS may be misleading",
+            stacklevel=2,
+        )
+
+    # Orthogonality check. The marginal SS decomposition below is exact only
+    # when the factor columns are mutually orthogonal, i.e. every pair of
+    # factors has proportional cross-tabulation counts. Per-factor balance
+    # alone does NOT guarantee this (fully aliased columns pass it), so verify
+    # pairwise proportional frequencies. A single factor is trivially
+    # orthogonal (no pairs), so this only fires for >= 2 factors.
+    orthogonal = True
+    factor_seq = list(factors)
+    for i in range(len(factor_seq)):
+        if not orthogonal:
+            break
+        for j in range(i + 1, len(factor_seq)):
+            fi, fj = factor_seq[i], factor_seq[j]
+            cross: dict[tuple[object, object], int] = defaultdict(int)
+            for r in rows:
+                cross[(r[fi], r[fj])] += 1
+            for a in level_lists[fi]:
+                for b in level_lists[fj]:
+                    expected = counts[fi][a] * counts[fj][b] / n
+                    if abs(cross.get((a, b), 0) - expected) > 1e-9:
+                        orthogonal = False
+                        break
+                if not orthogonal:
+                    break
+            if not orthogonal:
+                break
+    if not orthogonal:
+        warnings.warn(
+            "ANOVA factors are not orthogonal (aliased or correlated "
+            "columns); the reported main-effect sums of squares are marginal "
+            "(unadjusted) and do not decompose additively -- interpret with "
+            "caution or fit a joint linear model",
             stacklevel=2,
         )
 
@@ -248,6 +311,14 @@ def anova_report(
 
     df_residual = n - 1 - df_used
     ss_residual = ss_total - ss_explained
+    if ss_residual < -1e-9 * max(1.0, ss_total):
+        raise ValueError(
+            f"negative residual sum of squares ({ss_residual:.6g}): the factor "
+            "columns are not orthogonal, so the marginal SS decomposition is "
+            "invalid (the explained SS exceed the total). This indicates an "
+            "aliased or non-orthogonal design; fit a joint linear model instead."
+        )
+    ss_residual = max(ss_residual, 0.0)
     if df_residual < 1:
         raise ValueError(
             f"no residual degrees of freedom (n={n}, df_used={df_used}); "

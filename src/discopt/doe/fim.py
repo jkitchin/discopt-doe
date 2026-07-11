@@ -61,11 +61,17 @@ class FIMResult:
 
     @property
     def d_optimal(self) -> float:
-        """D-optimality criterion: ``log(det(FIM))``."""
-        det = np.linalg.det(self.fim)
-        if det <= 0:
+        """D-optimality criterion: ``log(det(FIM))``.
+
+        Uses ``slogdet`` rather than ``log(det(...))``: for badly-scaled FIMs
+        (parameters spanning many decades) ``det`` overflows to inf or
+        underflows to 0, whereas ``slogdet`` computes the log-determinant
+        directly and stably.
+        """
+        sign, logdet = np.linalg.slogdet(self.fim)
+        if sign <= 0 or not np.isfinite(logdet):
             return -np.inf
-        return float(np.log(det))
+        return float(logdet)
 
     @property
     def a_optimal(self) -> float:
@@ -94,6 +100,24 @@ class FIMResult:
             "min_eigenvalue": self.e_optimal,
             "condition_number": self.me_optimal,
         }
+
+
+def _measurement_sigma(em: ExperimentModel) -> np.ndarray:
+    """Validated per-response measurement std-devs (sigma > 0).
+
+    A zero (or negative) measurement error makes ``1/sigma**2`` infinite, which
+    silently poisons every FIM-based criterion. Fail loudly instead.
+    """
+    sigma = np.array(
+        [em.measurement_error[name] for name in em.response_names], dtype=np.float64
+    )
+    if np.any(sigma <= 0.0):
+        bad = [n for n in em.response_names if float(em.measurement_error[n]) <= 0.0]
+        raise ValueError(
+            f"measurement_error must be positive; response(s) {bad} have <= 0 "
+            "(a zero measurement error gives an infinite FIM)."
+        )
+    return sigma
 
 
 def _design_source_map(em: ExperimentModel) -> dict | None:
@@ -234,8 +258,9 @@ def compute_fim(
         Sensitivity computation method: ``"autodiff"`` (exact JAX) or
         ``"finite_difference"`` (central differences, for validation).
     fd_step : float, default 1e-5
-        Relative perturbation size for finite differences (only used
-        when ``method="finite_difference"``).
+        Relative perturbation size for finite differences: the actual step
+        for each parameter is ``fd_step * max(|value|, 1)`` (only used when
+        ``method="finite_difference"``).
 
     Returns
     -------
@@ -247,6 +272,18 @@ def compute_fim(
 
     # Build the model at nominal parameter values
     em = experiment.create_model(**param_values)
+
+    # Reject unknown design_values keys. Silently ignoring them (e.g. a typo
+    # like "temperture") would leave the real design input free and compute the
+    # FIM at an arbitrary point -- worse than a crash, since it propagates
+    # meaningless "optima" through optimal_experiment.
+    if design_values:
+        unknown = [name for name in design_values if name not in em.design_inputs]
+        if unknown:
+            raise ValueError(
+                f"unknown design input(s) {unknown} in design_values; "
+                f"model design inputs are {sorted(em.design_inputs)}."
+            )
 
     # Fast path: for a pure explicit response model (no constraints; every
     # variable is an unknown parameter or a design input) the solution point
@@ -297,7 +334,7 @@ def compute_fim(
         raise ValueError(f"Unknown method: {method!r}. Use 'autodiff' or 'finite_difference'.")
 
     # Measurement covariance (diagonal)
-    sigma = np.array([em.measurement_error[name] for name in em.response_names])
+    sigma = _measurement_sigma(em)
     Sigma_inv = np.diag(1.0 / sigma**2)
 
     # FIM = J^T Σ^{-1} J
@@ -369,7 +406,7 @@ def compute_fim_batch(
     J_all = np.asarray(jax.vmap(jax.jacobian(response_vector))(X))
     J_all = J_all[:, :, param_indices]
 
-    sigma = np.array([em.measurement_error[name] for name in em.response_names])
+    sigma = _measurement_sigma(em)
     Sigma_inv = np.diag(1.0 / sigma**2)
 
     results: list[FIMResult] = []
@@ -431,7 +468,7 @@ def _make_direct_fim_evaluator(
     # Compile the Jacobian once; the JIT cache keys on x*'s (fixed) shape, so
     # every subsequent design point reuses the same compiled trace.
     jac = jax.jit(jax.jacobian(response_vector))
-    sigma = np.array([em.measurement_error[name] for name in em.response_names])
+    sigma = _measurement_sigma(em)
     Sigma_inv = np.diag(1.0 / sigma**2)
     param_names = em.parameter_names
     response_names = em.response_names
@@ -906,8 +943,13 @@ def _compute_jacobian_fd(response_fns, x_flat, p_flat, param_indices, step):
     J = np.zeros((n_responses, n_params))
 
     for j, idx in enumerate(param_indices):
-        x_plus = x_flat.at[idx].set(x_flat[idx] + step)
-        x_minus = x_flat.at[idx].set(x_flat[idx] - step)
-        J[:, j] = (response_vector(x_plus) - response_vector(x_minus)) / (2 * step)
+        # Scale the step by the parameter magnitude so it is a genuine relative
+        # perturbation (as documented). A fixed absolute step causes
+        # catastrophic cancellation for large parameters and a ~100%
+        # perturbation for tiny ones.
+        h = step * max(abs(float(x_flat[idx])), 1.0)
+        x_plus = x_flat.at[idx].set(x_flat[idx] + h)
+        x_minus = x_flat.at[idx].set(x_flat[idx] - h)
+        J[:, j] = (response_vector(x_plus) - response_vector(x_minus)) / (2 * h)
 
     return J

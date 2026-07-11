@@ -132,6 +132,76 @@ class TestSequentialDoE:
         for r in history:
             assert r.data_collected is not None
 
+    def test_prior_fim_not_double_counted(self, monkeypatch):
+        """The prior FIM fed to the design step is the cumulative FIM, once.
+
+        Regression: est.fim is already fit on *all* accumulated data, so
+        summing it across rounds (the old behaviour) counted early data
+        multiple times. Each round's prior_fim must equal that round's
+        estimation FIM.
+        """
+        import discopt.doe.sequential as seq
+
+        x_data = np.array([1.0, 2.0, 3.0])
+        exp = SimpleExperiment(x_data)
+        k_true = 2.0
+        data = {f"y_{i}": k_true * x_data[i] for i in range(len(x_data))}
+
+        def runner(design):
+            return {f"y_{i}": k_true * x_data[i] for i in range(len(x_data))}
+
+        captured = []
+        real = seq.optimal_experiment
+
+        def spy(experiment, params, bounds, **kw):
+            captured.append(np.asarray(kw.get("prior_fim")))
+            return real(experiment, params, bounds, **kw)
+
+        monkeypatch.setattr(seq, "optimal_experiment", spy)
+
+        history = sequential_doe(
+            experiment=exp,
+            initial_data=data,
+            initial_guess={"k": 1.0},
+            design_bounds={},
+            n_rounds=3,
+            run_experiment=runner,
+        )
+        assert len(captured) == 3
+        for rnd, cap in zip(history, captured):
+            np.testing.assert_allclose(cap, np.asarray(rnd.estimation.fim), rtol=1e-6)
+
+    def test_warns_on_replicate_confusion_with_design_bounds(self):
+        """Returning an existing response key under real design bounds warns."""
+
+        class DesignedExperiment(Experiment):
+            def create_model(self, **kwargs):
+                m = dm.Model("designed")
+                k = m.continuous("k", lb=0.01, ub=20)
+                x = m.continuous("x", lb=0.0, ub=5.0)
+                return ExperimentModel(
+                    model=m,
+                    unknown_parameters={"k": k},
+                    design_inputs={"x": x},
+                    responses={"y": k * x},
+                    measurement_error={"y": 0.1},
+                )
+
+        exp = DesignedExperiment()
+
+        def runner(design):
+            return {"y": 3.0 * float(design["x"])}  # same key every round (misuse)
+
+        with pytest.warns(UserWarning, match="replicate"):
+            sequential_doe(
+                experiment=exp,
+                initial_data={"y": 3.0},
+                initial_guess={"k": 1.0},
+                design_bounds={"x": (0.0, 5.0)},
+                n_rounds=2,
+                run_experiment=runner,
+            )
+
     def test_fim_accumulates(self):
         """FIM det should increase over rounds (more data)."""
         x_data = np.array([1.0, 2.0, 3.0])

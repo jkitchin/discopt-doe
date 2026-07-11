@@ -293,8 +293,9 @@ class BatchDesignResult:
 
 def _metrics_from_fim(fim: np.ndarray) -> dict[str, float]:
     """All optimality metrics computed from a raw FIM matrix."""
-    det = float(np.linalg.det(fim))
-    log_det = float(np.log(det)) if det > 0 else float("-inf")
+    # slogdet is stable for badly-scaled FIMs where det over/underflows.
+    sign, slog = np.linalg.slogdet(fim)
+    log_det = float(slog) if sign > 0 and np.isfinite(slog) else float("-inf")
     try:
         tr_inv = float(np.trace(np.linalg.inv(fim)))
     except np.linalg.LinAlgError:
@@ -382,22 +383,54 @@ def optimal_experiment(
     design_names = list(design_bounds.keys())
     eq = list(equality_constraints) if equality_constraints else []
     ineq = list(inequality_constraints) if inequality_constraints else []
+    constrained = bool(eq or ineq)
     candidates = _multi_start_candidates(
         design_bounds, n_starts, seed, projection=feasible_projection
     )
 
-    best_design, best_criterion, best_fim_result = _scan_candidates(
+    # Best-by-criterion candidate, ignoring constraints — used only as the
+    # SLSQP refinement seed. The scan ranks purely by the criterion, so when
+    # constraints are present this incumbent is typically infeasible and must
+    # not be returned as-is.
+    seed_design, scan_criterion, scan_fim_result = _scan_candidates(
         experiment, param_values, candidates, criterion, prior_fim
     )
-
-    if best_design is None or best_fim_result is None:
+    if seed_design is None or scan_fim_result is None:
+        # Re-evaluate one candidate to surface the underlying failure (a bad
+        # parameter name, a shape mismatch, ...) instead of a generic message.
+        # _scan_candidates swallows the batch exception to stay robust.
+        try:
+            compute_fim(experiment, param_values, candidates[0], prior_fim=prior_fim)
+        except Exception as e:  # noqa: BLE001 -- surfaced as the cause below
+            raise RuntimeError(
+                "No feasible design point found; the FIM could not be evaluated "
+                "at any candidate (see the chained error for the cause)."
+            ) from e
         raise RuntimeError("No feasible design point found")
+
+    if not constrained:
+        best_design, best_criterion, best_fim_result = (
+            seed_design,
+            scan_criterion,
+            scan_fim_result,
+        )
+    else:
+        # Restrict the incumbent result to constraint-feasible candidates.
+        feasible = [c for c in candidates if _is_feasible(c, eq, ineq)]
+        if feasible:
+            best_design, best_criterion, best_fim_result = _scan_candidates(
+                experiment, param_values, feasible, criterion, prior_fim
+            )
+        else:
+            best_design = None
+            best_criterion = -np.inf if _is_maximization(criterion) else np.inf
+            best_fim_result = None
 
     if local_refine:
         refined = _refine_single_design(
             experiment,
             param_values,
-            best_design,
+            seed_design,
             design_names,
             design_bounds,
             criterion,
@@ -405,8 +438,27 @@ def optimal_experiment(
             equality_constraints=eq,
             inequality_constraints=ineq,
         )
-        if refined is not None and _is_better(refined[1], best_criterion, criterion):
-            best_design, best_criterion, best_fim_result = refined
+        if refined is not None:
+            r_design, r_criterion, r_fim_result = refined
+            # Unconstrained: accept any improvement. Constrained: SLSQP does
+            # not guarantee exact feasibility, so accept only feasible refined
+            # designs — and prefer one whenever we have no feasible incumbent.
+            accept = (
+                _is_better(r_criterion, best_criterion, criterion)
+                if best_design is not None
+                else True
+            )
+            if constrained:
+                accept = accept and _is_feasible(r_design, eq, ineq)
+            if accept:
+                best_design, best_criterion, best_fim_result = refined
+
+    if best_design is None or best_fim_result is None:
+        raise RuntimeError(
+            "No constraint-feasible design point found. Pass "
+            "feasible_projection (e.g. a partial of project_to_simplex) to "
+            "seed the multi-start with constraint-satisfying candidates."
+        )
 
     return DesignResult(
         design=best_design,
@@ -584,6 +636,26 @@ def _is_better(new_val: float, best_val: float, criterion: str) -> bool:
     if _is_maximization(criterion):
         return new_val > best_val
     return new_val < best_val
+
+
+def _is_feasible(
+    design: dict[str, float],
+    equality_constraints: Sequence[DesignConstraint],
+    inequality_constraints: Sequence[DesignConstraint],
+    tol: float = 1e-6,
+) -> bool:
+    """True if ``design`` satisfies all constraints within ``tol``.
+
+    Equality constraints ``g`` require ``|g(design)| <= tol``; inequality
+    constraints ``h`` require ``h(design) >= -tol`` (scipy SLSQP convention).
+    """
+    for g in equality_constraints:
+        if abs(float(g(design))) > tol:
+            return False
+    for h in inequality_constraints:
+        if float(h(design)) < -tol:
+            return False
+    return True
 
 
 def batch_optimal_experiment(

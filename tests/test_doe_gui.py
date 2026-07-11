@@ -129,6 +129,31 @@ def test_app_runs_against_real_workbook(monkeypatch, tmp_path: Path) -> None:
     assert "Reload from disk" in button_labels
 
 
+def test_output_folder_browse_does_not_revert(monkeypatch, tmp_path: Path) -> None:
+    """Clicking a folder-browser button must actually change the output dir.
+
+    Regression: the keyed text_input retained its old value across the rerun
+    and overwrote the navigation, so browsing was a no-op.
+    """
+    pytest.importorskip("streamlit.testing.v1")
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.delenv("DISCOPT_DOE_WORKBOOK", raising=False)
+    start = tmp_path / "start"
+    start.mkdir()
+    monkeypatch.chdir(start)
+
+    app_path = importlib.util.find_spec("discopt.doe.gui.app").origin
+    at = AppTest.from_file(str(app_path), default_timeout=30)
+    at.run()
+    assert not at.exception, [str(e) for e in at.exception]
+    assert Path(at.session_state["output_dir"]) == start
+
+    at.button(key="browse_parent").click().run()
+    assert not at.exception, [str(e) for e in at.exception]
+    assert Path(at.session_state["output_dir"]) == tmp_path
+
+
 def test_resolve_template_mixture() -> None:
     """Mixture template choice dispatches to the right Scheffé form."""
     from discopt.doe.gui.app import _resolve_template
@@ -210,3 +235,23 @@ def test_cli_gui_dispatches_to_launcher(monkeypatch, tmp_path: Path) -> None:
     assert captured["workbook"] == str(wb)
     assert captured["port"] == 1234
     assert captured["open_browser"] is False
+
+
+def test_latin_subparser_rejects_inapplicable_flags():
+    """--n / --criterion / --n-starts must not be accepted for latin-square.
+
+    Regression for issue #39 (they were silently ignored).
+    """
+    import argparse
+
+    from discopt.doe.cli import add_subparser
+
+    top = argparse.ArgumentParser()
+    add_subparser(top.add_subparsers(dest="cmd"))
+    base = ["doe", "new", "latin-square", "-o", "x.xlsx", "--levels", "row:1,2,3"]
+    # These parse fine (applicable flags):
+    top.parse_args([*base, "--replicates", "2"])
+    # These must be rejected (inapplicable to a combinatorial design):
+    for bad in (["--n", "10"], ["--criterion", "trace"], ["--n-starts", "5"]):
+        with pytest.raises(SystemExit):
+            top.parse_args([*base, *bad])
