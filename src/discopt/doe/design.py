@@ -453,6 +453,27 @@ def optimal_experiment(
             if accept:
                 best_design, best_criterion, best_fim_result = refined
 
+        # Constrained fallback: refining only the best-by-criterion seed can
+        # fail when that seed is far from the feasible set — SLSQP may report
+        # "incompatible constraints" and diverge to a singular corner (observed
+        # on some BLAS/LAPACK builds, e.g. macOS/Accelerate), leaving no
+        # feasible design even though one exists. Before giving up, retry SLSQP
+        # from every candidate and keep the best feasible result.
+        if constrained and best_design is None:
+            fallback = _best_feasible_refinement(
+                experiment,
+                param_values,
+                candidates,
+                design_names,
+                design_bounds,
+                criterion,
+                prior_fim,
+                eq,
+                ineq,
+            )
+            if fallback is not None:
+                best_design, best_criterion, best_fim_result = fallback
+
     if best_design is None or best_fim_result is None:
         raise RuntimeError(
             "No constraint-feasible design point found. Pass "
@@ -610,6 +631,48 @@ def _refine_single_design(
     if not np.isfinite(crit_val):
         return None
     return design, crit_val, fim_result
+
+
+def _best_feasible_refinement(
+    experiment: Experiment,
+    param_values: dict[str, float],
+    seeds: Sequence[dict[str, float]],
+    design_names: list[str],
+    design_bounds: dict[str, tuple[float, float]],
+    criterion: str,
+    prior_fim: np.ndarray | None,
+    equality_constraints: Sequence[DesignConstraint],
+    inequality_constraints: Sequence[DesignConstraint],
+) -> tuple[dict[str, float], float, FIMResult] | None:
+    """Refine from each seed via SLSQP; return the best feasible refinement.
+
+    Used as a robustness fallback for constrained problems: refining a single
+    seed can diverge to an infeasible/singular point on some platforms, so we
+    scan every candidate seed and keep the constraint-feasible refined design
+    with the best criterion. Returns ``None`` if no seed yields a feasible
+    refinement.
+    """
+    best: tuple[dict[str, float], float, FIMResult] | None = None
+    for seed in seeds:
+        refined = _refine_single_design(
+            experiment,
+            param_values,
+            seed,
+            design_names,
+            design_bounds,
+            criterion,
+            prior_fim,
+            equality_constraints=equality_constraints,
+            inequality_constraints=inequality_constraints,
+        )
+        if refined is None:
+            continue
+        r_design, r_criterion, _ = refined
+        if not _is_feasible(r_design, equality_constraints, inequality_constraints):
+            continue
+        if best is None or _is_better(r_criterion, best[1], criterion):
+            best = refined
+    return best
 
 
 def _evaluate_criterion(fim_result: FIMResult, criterion: str) -> float:

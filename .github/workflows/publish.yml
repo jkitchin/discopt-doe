@@ -1,0 +1,49 @@
+name: publish
+
+# Build the sdist + wheel and upload them to PyPI when a GitHub release is
+# published. `workflow_dispatch` (with target = testpypi) runs the same build
+# and pushes to TestPyPI for a dry run without cutting a real release.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Index to publish to"
+        type: choice
+        default: testpypi
+        options: [testpypi, pypi]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      # Fail early on broken metadata / long-description before we try to upload.
+      - run: uvx twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # OIDC trusted publishing: no API token is stored. The `pypi`/`testpypi`
+  # environments must be registered as trusted publishers on the respective
+  # index (see the setup steps in CLAUDE.md).
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # A release publish always targets PyPI; a manual run honors the chosen input.
+    environment: ${{ (github.event_name == 'release' || inputs.target == 'pypi') && 'pypi' || 'testpypi' }}
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Empty repository-url -> PyPI. For a TestPyPI dry run, point at TestPyPI.
+          repository-url: ${{ (github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi') && 'https://test.pypi.org/legacy/' || '' }}

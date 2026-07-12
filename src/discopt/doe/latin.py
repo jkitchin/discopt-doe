@@ -111,6 +111,7 @@ def _gf_mols(p: int, m: int) -> list[list[list[int]]]:
     """
     q = p**m
     if m == 1:
+
         def add(a: int, b: int) -> int:
             return (a + b) % p
 

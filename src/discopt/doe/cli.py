@@ -810,9 +810,7 @@ def do_optimize(params: OptimizeParams) -> dict[str, Any]:
         "workbook_path": str(wb.path),
         "criterion": criterion,
         "acquisition": acquisition,
-        "surrogate": (
-            params.custom_surrogate_path if params.custom_surrogate_path else surrogate
-        ),
+        "surrogate": (params.custom_surrogate_path if params.custom_surrogate_path else surrogate),
         "warnings": warnings,
         "surrogate_mode": result.surrogate_mode,
         "batch_size": int(params.batch_size),

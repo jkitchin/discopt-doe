@@ -162,9 +162,7 @@ class TestConstrainedOptimalExperiment:
             {"a": 1.0, "b": 1.0},
             self._bounds(),
             equality_constraints=[g],
-            feasible_projection=partial(
-                project_to_simplex, variables=["x1", "x2"], total=1.0
-            ),
+            feasible_projection=partial(project_to_simplex, variables=["x1", "x2"], total=1.0),
         )
         assert abs(design.design["x1"] + design.design["x2"] - 1.0) < 1e-4
 

@@ -664,6 +664,7 @@ def test_json_new_factorial_is_valid_json(tmp_path, capsys):
     )
     assert args.doe_func(args) == 0
     out = capsys.readouterr().out
+
     # Strict parse: parse_constant fires on NaN/Infinity, so raise if present.
     def _boom(x):
         raise ValueError(f"non-finite literal {x!r} in JSON")
@@ -793,7 +794,9 @@ def test_extend_warns_when_pending_runs_exist(tmp_path):
     def predict(row):
         return 2.0 + 3.0 * row["x"]
 
-    out = do_new(_new_params(tmp_path, template="linear", inputs=[("x", 0.0, 10.0)], n=4, error=0.05))
+    out = do_new(
+        _new_params(tmp_path, template="linear", inputs=[("x", 0.0, 10.0)], n=4, error=0.05)
+    )
     wb_path = Path(out["workbook_path"])
     _fill_response(wb_path, "y", predict)
     do_fit({"workbook": str(wb_path)})

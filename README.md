@@ -27,12 +27,14 @@ share the same `Experiment` interface.
 
 ## Install
 
-> **Pre-release:** neither `discopt-doe` nor its `discopt>=0.6` dependency is
-> on PyPI yet, so the plain `pip install discopt-doe` shown below does **not
-> work today** — it can't resolve `discopt>=0.6`. Until the 0.6 release, use
-> the uv or git install below.
+Its `discopt>=0.6` dependency is on PyPI, so both a from-source install and a
+direct git install resolve without any extra steps.
 
-Recommended (uv, resolves the pinned `discopt` automatically):
+> **Not yet on PyPI:** `discopt-doe` itself has not been published yet, so the
+> plain `pip install discopt-doe` form below works only once the first release
+> is cut. Until then, install from source or git.
+
+Recommended (uv):
 
 ```bash
 git clone https://github.com/jkitchin/discopt-doe
@@ -40,15 +42,14 @@ cd discopt-doe
 uv sync --all-extras        # core + gui + ml + dev
 ```
 
-With pip, install the pre-release `discopt` first, then this package:
+With pip, straight from git:
 
 ```bash
-pip install "git+https://github.com/jkitchin/discopt@refactor/389-extract-doe"
 pip install "git+https://github.com/jkitchin/discopt-doe"          # core
 pip install "git+https://github.com/jkitchin/discopt-doe#egg=discopt-doe[gui]"  # + GUI
 ```
 
-Once `discopt>=0.6` and `discopt-doe` are published, the usual form applies:
+Once `discopt-doe` is published, the usual form applies:
 
 ```bash
 pip install discopt-doe            # core
