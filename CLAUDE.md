@@ -95,9 +95,6 @@ since been removed.)
       `python -m venv /tmp/dd && /tmp/dd/bin/pip install dist/discopt_doe-*.whl`
       then `/tmp/dd/bin/python -c "import discopt.doe"`, run `discopt-doe-install-skill`,
       and exercise `discopt doe --help`.
-- [ ] (Optional but recommended) TestPyPI dry run: Actions → **publish** →
-      *Run workflow* with `target = testpypi`, then
-      `pip install -i https://test.pypi.org/simple/ discopt-doe` in a clean env.
 
 ### 4. Tag & release
 
@@ -117,46 +114,27 @@ since been removed.)
 
 ## PyPI trusted-publisher setup (one-time)
 
-`publish.yml` uses **OIDC trusted publishing** — no API tokens are stored anywhere. Because
-`discopt-doe` is not on PyPI yet, you register a **pending publisher** (a trusted publisher
-for a not-yet-existing project); PyPI creates the project automatically on the first upload.
-The four repo/workflow values must match `publish.yml` exactly.
+`publish.yml` uses **OIDC trusted publishing** — no API tokens are stored anywhere. The four
+repo/workflow values plus the environment must match `publish.yml` exactly, or PyPI refuses
+the upload with *"no corresponding publisher (Publisher with matching claims was not found)"*.
 
-### On PyPI (the real index)
+### On PyPI
 
 1. Log in at https://pypi.org → account menu → **Publishing**
    (https://pypi.org/manage/account/publishing/).
-2. Under **"Add a new pending publisher"**, enter exactly:
+2. Add a publisher (a **pending publisher** if the project does not exist yet — PyPI creates
+   it on first upload) with exactly:
    - **PyPI Project Name:** `discopt-doe`
    - **Owner:** `jkitchin`
    - **Repository name:** `discopt-doe`
    - **Workflow name:** `publish.yml` (filename only, not a path)
    - **Environment name:** `pypi`
-3. Click **Add**. No token is generated. A pending publisher becomes a normal trusted
-   publisher after the first successful upload.
-
-### On TestPyPI (for the dry-run path)
-
-TestPyPI is a **separate site with its own account** — a PyPI login does not carry over.
-
-1. Register / log in at https://test.pypi.org.
-2. Go to https://test.pypi.org/manage/account/publishing/ and add a pending publisher with
-   the same values as above, except **Environment name:** `testpypi`.
-
-This is what makes the `workflow_dispatch → target=testpypi` dry run work.
+3. Click **Add**. No token is generated.
 
 ### On GitHub (the environment side)
 
-The workflow references `environment: pypi` / `testpypi`, so both must exist:
+The workflow references `environment: pypi`, so it must exist:
 
 1. Repo → **Settings → Environments → New environment** → name it `pypi`.
-2. Repeat → name it `testpypi`.
-3. (Recommended for `pypi`) add yourself under **Required reviewers** so a real publish
-   pauses for a one-click approval before uploading. No secrets to add — OIDC handles auth.
-
-### Verify it end-to-end
-
-Once the TestPyPI pending publisher + `testpypi` environment exist:
-GitHub → **Actions → publish → Run workflow** → set **target = `testpypi`** → Run. A
-successful upload confirms the identically-configured real PyPI path will work when you cut
-a `gh release`.
+2. (Recommended) add yourself under **Required reviewers** so a publish pauses for a
+   one-click approval before uploading. No secrets to add — OIDC handles auth.
