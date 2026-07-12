@@ -108,9 +108,7 @@ def _measurement_sigma(em: ExperimentModel) -> np.ndarray:
     A zero (or negative) measurement error makes ``1/sigma**2`` infinite, which
     silently poisons every FIM-based criterion. Fail loudly instead.
     """
-    sigma = np.array(
-        [em.measurement_error[name] for name in em.response_names], dtype=np.float64
-    )
+    sigma = np.array([em.measurement_error[name] for name in em.response_names], dtype=np.float64)
     if np.any(sigma <= 0.0):
         bad = [n for n in em.response_names if float(em.measurement_error[n]) <= 0.0]
         raise ValueError(

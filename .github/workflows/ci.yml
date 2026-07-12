@@ -6,6 +6,15 @@ on:
   pull_request:
 
 jobs:
+  # Run the exact same pre-commit hooks developers run locally, so lint/format
+  # enforcement never drifts between local and CI.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uvx pre-commit run --all-files --show-diff-on-failure
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -16,8 +25,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       # --all-extras pulls streamlit/pandas/scikit-learn/matplotlib so the gui
-      # and ml tests run instead of skipping. discopt>=0.6 is resolved from the
-      # pinned git rev in [tool.uv.sources], not PyPI (see pyproject.toml).
+      # and ml tests run instead of skipping.
       - run: uv sync --python ${{ matrix.python-version }} --all-extras
       - run: uv run pytest tests/ -q
 

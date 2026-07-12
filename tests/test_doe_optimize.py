@@ -394,8 +394,12 @@ def test_call_acquisition_passes_valid_kwarg():
     s = coerce_surrogate("gp")
     s.fit(*_quad_data())
     cands = np.array([[0.0], [1.0], [2.0]])
-    lo = call_acquisition(confidence_bound, s, cands, direction=1, y_best=0.0, acq_kwargs={"kappa": 0.0})
-    hi = call_acquisition(confidence_bound, s, cands, direction=1, y_best=0.0, acq_kwargs={"kappa": 5.0})
+    lo = call_acquisition(
+        confidence_bound, s, cands, direction=1, y_best=0.0, acq_kwargs={"kappa": 0.0}
+    )
+    hi = call_acquisition(
+        confidence_bound, s, cands, direction=1, y_best=0.0, acq_kwargs={"kappa": 5.0}
+    )
     # Larger kappa rewards uncertainty, so scores differ (kwarg took effect).
     assert not np.allclose(lo, hi)
 
