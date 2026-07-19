@@ -3,6 +3,7 @@
 ![discopt-doe banner](docs/doe-banner.png)
 
 [![ci](https://github.com/jkitchin/discopt-doe/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jkitchin/discopt-doe/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/discopt-doe.svg)](https://pypi.org/project/discopt-doe/)
 
 Design-of-experiments plugin for the [discopt](https://github.com/jkitchin/discopt)
 modeling language. Installs as the `discopt.doe` namespace package — code written
