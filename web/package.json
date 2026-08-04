@@ -1,0 +1,13 @@
+{
+  "name": "discopt-doe-web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Browser (Pyodide/WASM) front end for discopt-doe. The pyodide dependency is only used by the test harness; the page itself loads Pyodide from the CDN.",
+  "type": "module",
+  "scripts": {
+    "test": "node test-wasm.mjs ../docs/_build/web"
+  },
+  "devDependencies": {
+    "pyodide": "314.0.3"
+  }
+}

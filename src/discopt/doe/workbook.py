@@ -54,11 +54,12 @@ import datetime as _dt
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import numpy as np
 
-from discopt.estimate import Experiment
+if TYPE_CHECKING:  # `Experiment` is only a return annotation on rebuild_experiment.
+    from discopt.estimate import Experiment
 
 # Sheet names — single source of truth.
 SHEET_RUNS = "runs"
@@ -247,11 +248,18 @@ class Workbook:
         # Instructions
         _write_instructions_sheet(wb[SHEET_INSTRUCTIONS])
 
-        # Metadata
-        import discopt as _discopt
+        # Metadata. The base package is absent in environments that only carry the
+        # `discopt.doe` namespace portion (Pyodide/WASM has no jax, so `discopt`
+        # cannot be installed there); the stamp is provenance, not a dependency.
+        try:
+            import discopt as _discopt
+
+            _discopt_version = _discopt.__version__
+        except (ImportError, AttributeError):
+            _discopt_version = "unknown"
 
         meta_rows: list[tuple[str, Any]] = [
-            ("discopt_version", _discopt.__version__),
+            ("discopt_version", _discopt_version),
             ("created_at", _now_iso()),
             ("template", template or ""),
             ("template_args", json.dumps(template_args, sort_keys=True)),
@@ -706,17 +714,11 @@ class Workbook:
     # Rebuild Experiment from metadata
     # ------------------------------------------------------------------
 
-    def rebuild_experiment(self) -> tuple[Experiment, list[str]]:
-        """Reconstruct the campaign's :class:`Experiment` and parameter-name order.
+    @staticmethod
+    def _reject_non_parametric(template: str) -> None:
+        """Raise when ``template`` is one the fit/extend verbs cannot handle."""
+        from discopt.doe.templates import COMBINATORIAL_TEMPLATES
 
-        Returns ``(experiment, parameter_names)``. Parameter names come
-        from the :class:`ExperimentModel` so they match the order used
-        by FIM / covariance matrices throughout this module.
-        """
-        from discopt.doe.templates import COMBINATORIAL_TEMPLATES, build_template
-
-        meta = self.metadata()
-        template = meta.get("template") or ""
         if template in COMBINATORIAL_TEMPLATES:
             raise ValueError(
                 f"workbook uses combinatorial template {template!r}; use `discopt doe anova` "
@@ -726,6 +728,59 @@ class Workbook:
             raise ValueError(
                 "workbook uses the active-learning 'optimize' template; use "
                 "`discopt doe optimize` instead of fit/extend"
+            )
+
+    def parameter_names(self) -> list[str]:
+        """Return the parameter-name order without constructing an Experiment.
+
+        Same ordering as ``rebuild_experiment()[1]``, derived from the template
+        metadata alone. Every built-in template is linear in its parameters, so
+        the names are a pure function of the template, degree, and input count.
+        Callers that only need the ordering — ``do_fit`` builds its design matrix
+        from it — should prefer this: it stays clear of ``discopt.modeling``, and
+        so works where the base package cannot be installed.
+        """
+        from discopt.doe.templates import template_parameter_names
+
+        template = self.metadata().get("template") or ""
+        self._reject_non_parametric(template)
+        if not template:
+            raise ValueError(
+                "workbook has no template (a --module experiment); parameter names "
+                "come from the model itself, so use rebuild_experiment() instead"
+            )
+        args = self.template_args()
+        degree = args.get("degree")
+        return template_parameter_names(
+            template,
+            degree=int(degree) if degree is not None else None,
+            n_inputs=len(self.input_specs()),
+            basis=args.get("basis"),
+        )
+
+    def rebuild_experiment(self) -> tuple[Experiment, list[str]]:
+        """Reconstruct the campaign's :class:`Experiment` and parameter-name order.
+
+        Returns ``(experiment, parameter_names)``. Parameter names come
+        from the :class:`ExperimentModel` so they match the order used
+        by FIM / covariance matrices throughout this module.
+        """
+        from discopt.doe.templates import CLASSICAL_TEMPLATES, build_template
+
+        meta = self.metadata()
+        template = meta.get("template") or ""
+        self._reject_non_parametric(template)
+        if template in CLASSICAL_TEMPLATES:
+            # A classical design records a regression basis, not a generative
+            # model, so there is no Experiment to rebuild. `fit` works via
+            # parameter_names(); `extend` has no meaning here — augmenting a
+            # central-composite or Box-Behnken design means generating a new
+            # block, not searching for the next most informative point.
+            raise ValueError(
+                f"workbook uses classical design template {template!r}, which carries a "
+                "regression basis rather than a model; `discopt doe fit` and `anova` work, "
+                "but `extend` does not. Generate an additional design block instead, or "
+                "use discopt.doe.linear_design.linear_batch_design for a model-driven batch."
             )
         specs = self.input_specs()
         response = self.response_name()
@@ -762,6 +817,10 @@ def _load_module_callable(spec: str) -> Experiment:
     :class:`Experiment` instance.
     """
     import importlib
+
+    # Runtime isinstance check, so this needs the real class rather than the
+    # TYPE_CHECKING-only import at the top of the module.
+    from discopt.estimate import Experiment
 
     if ":" not in spec:
         raise ValueError(f"--module must be of the form 'pkg.mod:callable', got {spec!r}")

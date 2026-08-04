@@ -23,12 +23,39 @@ user-defined :class:`Experiment`.
 from __future__ import annotations
 
 from itertools import combinations
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
-import discopt.modeling as dm
-from discopt.estimate import Experiment, ExperimentModel
+if TYPE_CHECKING:
+    # Annotations only — the runtime bindings come from _modeling() below.
+    import discopt.modeling as dm
+    from discopt.estimate import Experiment
 
 InputSpec = tuple[str, float, float]
+
+
+def _modeling():
+    """Return ``(discopt.modeling, Experiment, ExperimentModel)``, imported on demand.
+
+    Only the functions that actually *build* an Experiment need the base
+    package. Keeping the import out of module scope is what lets
+    ``template_parameter_names`` — and, through it, ``discopt doe fit`` — run
+    where ``discopt`` cannot be installed at all, notably a WebAssembly build
+    (it ships only platform wheels and depends on jax, jaxlib, and a native
+    solver). See ``tests/test_import_hygiene.py``.
+    """
+    try:
+        import discopt.modeling as dm
+        from discopt.estimate import Experiment, ExperimentModel
+    except ImportError as e:  # pragma: no cover - only fires without base discopt
+        raise ImportError(
+            "building an Experiment requires the base `discopt` package, which has "
+            "no WebAssembly build. Install it with: pip install discopt. The "
+            "classical designs (discopt.doe.classical), the closed-form optimal "
+            "designs (discopt.doe.linear_design), OLS fitting, and ANOVA all work "
+            "without it."
+        ) from e
+    return dm, Experiment, ExperimentModel
+
 
 _PARAM_LB = -1e6
 _PARAM_UB = 1e6
@@ -79,6 +106,8 @@ def linear_template(
     sigma = float(measurement_error)
     spec = list(inputs)
 
+    dm, Experiment, ExperimentModel = _modeling()
+
     class _LinearTemplate(Experiment):
         def create_model(self, **kwargs):
             m = dm.Model("linear_template")
@@ -128,6 +157,8 @@ def polynomial_1d_template(
     d = int(degree)
     param_names = [f"b{j}" for j in range(d + 1)]
     sigma = float(measurement_error)
+
+    dm, Experiment, ExperimentModel = _modeling()
 
     class _Polynomial1DTemplate(Experiment):
         def create_model(self, **kwargs):
@@ -183,6 +214,8 @@ def response_surface_template(
     cross_names = [f"b{i + 1}{j + 1}" for i, j in cross_pairs]
     param_names = ["b0", *main_names, *sq_names, *cross_names]
 
+    dm, Experiment, ExperimentModel = _modeling()
+
     class _ResponseSurfaceTemplate(Experiment):
         def create_model(self, **kwargs):
             m = dm.Model("response_surface_template")
@@ -210,13 +243,20 @@ def response_surface_template(
 
 
 def template_parameter_names(
-    template: str, *, degree: int | None = None, n_inputs: int
+    template: str, *, degree: int | None = None, n_inputs: int, basis: str | None = None
 ) -> list[str]:
     """Return the ordered parameter-name list a template would emit.
 
     Used by the CLI/workbook to populate the ``parameters`` sheet
     layout without constructing an Experiment.
+
+    ``basis`` applies only to the classical design templates, which record
+    the model they are meant to be analysed with rather than defining one.
     """
+    if template in CLASSICAL_TEMPLATES:
+        from discopt.doe.linear_design import basis_parameter_names
+
+        return basis_parameter_names(basis or "quadratic", n_inputs)
     if template == "linear":
         return ["b0"] + [f"b{i + 1}" for i in range(n_inputs)]
     if template == "polynomial-1d":
@@ -387,6 +427,8 @@ def scheffe_linear_template(
     param_names = [f"b{i + 1}" for i in range(q)]
     sigma = float(measurement_error)
 
+    dm, Experiment, ExperimentModel = _modeling()
+
     class _ScheffeLinear(Experiment):
         def create_model(self, **kwargs):
             m = dm.Model("scheffe_linear")
@@ -432,6 +474,8 @@ def scheffe_quadratic_template(
     cross_names = [f"b{i + 1}{j + 1}" for i, j in pair_indices]
     param_names = [*main_names, *cross_names]
     sigma = float(measurement_error)
+
+    dm, Experiment, ExperimentModel = _modeling()
 
     class _ScheffeQuadratic(Experiment):
         def create_model(self, **kwargs):
@@ -482,6 +526,8 @@ def scheffe_special_cubic_template(
     triple_names = [f"b{i + 1}{j + 1}{k + 1}" for i, j, k in triple_indices]
     param_names = [*main_names, *cross_names, *triple_names]
     sigma = float(measurement_error)
+
+    dm, Experiment, ExperimentModel = _modeling()
 
     class _ScheffeSpecialCubic(Experiment):
         def create_model(self, **kwargs):
@@ -597,6 +643,9 @@ TEMPLATE_NAMES = (
     "graeco-latin",
     "hyper-graeco-latin",
     "factorial-2level",
+    "latin-hypercube",
+    "central-composite",
+    "box-behnken",
     "optimize",
 )
 
@@ -606,6 +655,12 @@ TEMPLATE_NAMES = (
 COMBINATORIAL_TEMPLATES = frozenset(
     {"latin-square", "graeco-latin", "hyper-graeco-latin", "factorial-2level"}
 )
+
+# Classical designs over a continuous factor box (see discopt.doe.classical).
+# Like the combinatorial family these skip the FIM search, but unlike it they
+# carry a regression basis in ``template_args["basis"]``, so `fit` works on
+# them where `anova` is the right verb for the combinatorial ones.
+CLASSICAL_TEMPLATES = frozenset({"latin-hypercube", "central-composite", "box-behnken"})
 
 
 __all__ = [

@@ -26,6 +26,15 @@ Three complementary entry points:
 Parameter estimation (`discopt.estimate`) lives in the base package; both
 share the same `Experiment` interface.
 
+## Try it without installing anything
+
+**[jkitchin.github.io/discopt-doe/app/](https://jkitchin.github.io/discopt-doe/app/)**
+runs the design workflow in your browser — pick a design, download the
+spreadsheet, fill in your measurements, upload it back for fitting and ANOVA.
+It is Pyodide running the real package, not a reimplementation, and the
+workbooks it produces are the same ones the CLI reads. Nothing leaves your
+machine. See [docs/browser-app.md](docs/browser-app.md).
+
 ## Install
 
 Both `discopt-doe` and its `discopt` dependency are published on
@@ -112,6 +121,21 @@ discopt doe extend run.xlsx --n 4     # design the next batch
 discopt doe optimize run.xlsx        # one active-learning round (optimize template)
 discopt doe gui run.xlsx              # Streamlit GUI (needs [gui] extra)
 ```
+
+Classical designs over a continuous factor box — space-filling, or built for a
+quadratic response surface — need no model up front:
+
+```bash
+discopt doe new latin-hypercube   -o lhs.xlsx --input T:300:400 --input P:1:5 --n 12
+discopt doe new central-composite -o ccd.xlsx --input T:300:400 --input P:1:5
+discopt doe new box-behnken       -o bbd.xlsx --input T:300:400 --input P:1:5 --input F:0.1:2
+```
+
+`fit` estimates the recorded basis (`--basis linear|quadratic`) by least
+squares, so a Box-Behnken or central-composite campaign goes straight from
+`new` to `fit` with no model definition. Central-composite keeps every run
+inside the bounds you give by default; pass `--outside-bounds` for the textbook
+scaling where the axial points sit beyond them.
 
 ## GUI
 

@@ -19,3 +19,7 @@ docs/_build/
 
 # pytest
 .pytest_cache/
+
+# Browser app: npm deps for the WASM test harness, and the assembled bundle.
+web/node_modules/
+docs/_build/web/

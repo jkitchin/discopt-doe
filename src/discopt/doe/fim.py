@@ -29,6 +29,32 @@ import numpy as np
 
 from discopt.estimate import Experiment, ExperimentModel
 
+
+def _require_jax():
+    """Return ``(jax, jax.numpy)``, or raise with an actionable message.
+
+    Mirrors ``_require_sklearn`` / ``_require_openpyxl`` elsewhere in the
+    package. jax is a hard dependency of a normal install, so this fires only
+    in environments where no jax wheel exists — Pyodide/WASM most notably. The
+    classical designs, ANOVA, and OLS fitting all work there; FIM-based optimal
+    design is what does not, and this says so rather than surfacing a bare
+    ModuleNotFoundError from deep inside a Jacobian call.
+    """
+    try:
+        import jax
+        import jax.numpy as jnp
+    except ImportError as e:  # pragma: no cover - exercised only without jax
+        raise ImportError(
+            "FIM-based optimal design requires jax, which has no WebAssembly "
+            "build. Install it with: pip install 'discopt-doe' (jax is a base "
+            "dependency). In a browser/Pyodide environment use the classical "
+            "designs (latin-hypercube, central-composite, box-behnken, "
+            "factorial-2level, latin-square) and discopt.doe.linear_design "
+            "instead, which are pure numpy/scipy."
+        ) from e
+    return jax, jnp
+
+
 # A parameter axis whose squared projection onto the null-space basis
 # exceeds this value is treated as lying *in* the null space — VIF is
 # reported as infinite and the FIM-based standard error / correlations
@@ -198,7 +224,7 @@ def _assemble_x_flat_direct(em, param_values, design_values):
         if arr is None:
             return None
         parts.append(arr)
-    import jax.numpy as jnp
+    _, jnp = _require_jax()
 
     return jnp.array(np.concatenate(parts), dtype=jnp.float64)
 
@@ -220,7 +246,7 @@ def _assemble_x_flat_batch_direct(em, param_values, design_points):
                 return None
             parts.append(arr)
         rows.append(np.concatenate(parts))
-    import jax.numpy as jnp
+    _, jnp = _require_jax()
 
     return jnp.asarray(np.stack(rows, axis=0), dtype=jnp.float64)
 
@@ -390,8 +416,7 @@ def compute_fim_batch(
             for dp in design_points
         ]
 
-    import jax
-    import jax.numpy as jnp
+    jax, jnp = _require_jax()
 
     response_fns = [compile_expression(em.responses[n], em.model) for n in em.response_names]
     param_indices = _get_param_indices(em)
@@ -447,8 +472,7 @@ def _make_direct_fim_evaluator(
     :func:`compute_fim` on that point — only the per-call model rebuild and JAX
     re-trace are eliminated.
     """
-    import jax
-    import jax.numpy as jnp
+    jax, jnp = _require_jax()
 
     from discopt.parametric import compile_expression, flatten_params
 
@@ -919,8 +943,7 @@ def _get_param_indices(em: ExperimentModel) -> list[int]:
 
 def _compute_jacobian_autodiff(response_fns, x_flat, p_flat, param_indices):
     """Compute Jacobian via JAX autodiff."""
-    import jax
-    import jax.numpy as jnp
+    jax, jnp = _require_jax()
 
     def response_vector(x_flat_arg):
         return jnp.stack([fn(x_flat_arg, p_flat) for fn in response_fns])
@@ -931,7 +954,7 @@ def _compute_jacobian_autodiff(response_fns, x_flat, p_flat, param_indices):
 
 def _compute_jacobian_fd(response_fns, x_flat, p_flat, param_indices, step):
     """Compute Jacobian via central finite differences."""
-    import jax.numpy as jnp
+    _, jnp = _require_jax()
 
     def response_vector(x_flat_arg):
         return jnp.stack([fn(x_flat_arg, p_flat) for fn in response_fns])

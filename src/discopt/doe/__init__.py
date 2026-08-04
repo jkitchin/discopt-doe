@@ -95,119 +95,125 @@ try:
 except _PkgNotFound:  # odd dev setups (no dist metadata): don't block
     pass
 
-from discopt.doe.acquisition import (
-    ACQUISITIONS,
-    confidence_bound,
-    expected_improvement,
-    resolve_acquisition,
-    steepest_ascent,
-)
-from discopt.doe.anova import AnovaEffect, AnovaTable, anova_report
-from discopt.doe.design import (
-    BatchDesignResult,
-    BatchStrategy,
-    DesignConstraint,
-    DesignCriterion,
-    DesignResult,
-    batch_optimal_experiment,
-    optimal_experiment,
-    project_to_simplex,
-    sample_simplex,
-    sum_constraint,
-)
-from discopt.doe.discrimination import (
-    DiscriminationCriterion,
-    DiscriminationDesignResult,
-    discriminate_compound,
-    discriminate_design,
-    evaluate_discrimination_criterion,
-)
-from discopt.doe.discrimination_sequential import (
-    DiscriminationRound,
-    sequential_discrimination,
-)
-from discopt.doe.estimability import (
-    EstimabilityResult,
-    collinearity_index,
-    d_optimal_subset,
-    estimability_rank,
-)
-from discopt.doe.exploration import (
-    ExplorationResult,
-    explore_design_space,
-)
-from discopt.doe.fim import (
-    FIMResult,
-    IdentifiabilityDiagnostics,
-    IdentifiabilityResult,
-    check_identifiability,
-    compute_fim,
-    diagnose_identifiability,
-)
-from discopt.doe.fractional import (
-    fractional_factorial_design,
-)
-from discopt.doe.latin import (
-    LatinDesign,
-    graeco_latin_square,
-    hyper_graeco_latin_square,
-    latin_square,
-    latin_square_design,
-)
-from discopt.doe.model_based import (
-    ModelBasedRoundResult,
-    ParametricSurrogate,
-    model_based_optimize_round,
-)
-from discopt.doe.optimize import (
-    OptimizationCriterion,
-    OptimizationRoundResult,
-    optimize_round,
-)
-from discopt.doe.profile import (
-    ProfileLikelihoodResult,
-    profile_all,
-    profile_likelihood,
-)
-from discopt.doe.screening import (
-    FactorialDesign,
-    effects_estimates,
-    factorial_2level_design,
-)
-from discopt.doe.selection import (
-    ModelSelectionResult,
-    likelihood_ratio_test,
-    model_selection,
-    vuong_test,
-)
-from discopt.doe.sequential import (
-    DoERound,
-    sequential_doe,
-)
-from discopt.doe.surrogate import (
-    PRESETS as SURROGATE_PRESETS,
-)
-from discopt.doe.surrogate import (
-    Surrogate,
-    coerce_surrogate,
-)
-from discopt.doe.templates import (
-    TEMPLATE_NAMES,
-    build_template,
-    linear_template,
-    polynomial_1d_template,
-    response_surface_template,
-    scheffe_linear_template,
-    scheffe_quadratic_template,
-    scheffe_special_cubic_template,
-    simplex_centroid_points,
-    simplex_lattice_points,
-)
+# Re-exports are resolved lazily (PEP 562). Importing this package used to pull
+# all 18 submodules eagerly, which dragged in `discopt.estimate` — and through it
+# scipy and, on the FIM paths, jax. That makes the jax-free half of the package
+# (Latin squares, factorial screening, ANOVA, OLS fitting, the workbook layer)
+# unusable anywhere jax cannot be installed, notably Pyodide/WASM, where no jax
+# wheel exists. Deferring the imports keeps `from discopt.doe import X` working
+# exactly as before while charging each caller only for what it actually touches.
+# tests/test_import_hygiene.py pins the modules that must stay dependency-light.
+
+_SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
+    "acquisition": (
+        "ACQUISITIONS",
+        "confidence_bound",
+        "expected_improvement",
+        "resolve_acquisition",
+        "steepest_ascent",
+    ),
+    "anova": ("AnovaEffect", "AnovaTable", "anova_report"),
+    "classical": (
+        "ClassicalDesign",
+        "box_behnken_design",
+        "central_composite_design",
+        "latin_hypercube_design",
+    ),
+    "design": (
+        "BatchDesignResult",
+        "BatchStrategy",
+        "DesignConstraint",
+        "DesignCriterion",
+        "DesignResult",
+        "batch_optimal_experiment",
+        "optimal_experiment",
+        "project_to_simplex",
+        "sample_simplex",
+        "sum_constraint",
+    ),
+    "discrimination": (
+        "DiscriminationCriterion",
+        "DiscriminationDesignResult",
+        "discriminate_compound",
+        "discriminate_design",
+        "evaluate_discrimination_criterion",
+    ),
+    "discrimination_sequential": ("DiscriminationRound", "sequential_discrimination"),
+    "estimability": (
+        "EstimabilityResult",
+        "collinearity_index",
+        "d_optimal_subset",
+        "estimability_rank",
+    ),
+    "exploration": ("ExplorationResult", "explore_design_space"),
+    "fim": (
+        "FIMResult",
+        "IdentifiabilityDiagnostics",
+        "IdentifiabilityResult",
+        "check_identifiability",
+        "compute_fim",
+        "diagnose_identifiability",
+    ),
+    "fractional": ("fractional_factorial_design",),
+    "latin": (
+        "LatinDesign",
+        "graeco_latin_square",
+        "hyper_graeco_latin_square",
+        "latin_square",
+        "latin_square_design",
+    ),
+    "linear_design": (
+        "LinearBatchDesignResult",
+        "LinearDesignResult",
+        "design_matrix",
+        "design_row",
+        "linear_batch_design",
+        "linear_fim",
+        "linear_optimal_design",
+    ),
+    "model_based": (
+        "ModelBasedRoundResult",
+        "ParametricSurrogate",
+        "model_based_optimize_round",
+    ),
+    "optimize": ("OptimizationCriterion", "OptimizationRoundResult", "optimize_round"),
+    "profile": ("ProfileLikelihoodResult", "profile_all", "profile_likelihood"),
+    "screening": ("FactorialDesign", "effects_estimates", "factorial_2level_design"),
+    "selection": (
+        "ModelSelectionResult",
+        "likelihood_ratio_test",
+        "model_selection",
+        "vuong_test",
+    ),
+    "sequential": ("DoERound", "sequential_doe"),
+    "surrogate": ("Surrogate", "coerce_surrogate"),
+    "templates": (
+        "TEMPLATE_NAMES",
+        "build_template",
+        "linear_template",
+        "polynomial_1d_template",
+        "response_surface_template",
+        "scheffe_linear_template",
+        "scheffe_quadratic_template",
+        "scheffe_special_cubic_template",
+        "simplex_centroid_points",
+        "simplex_lattice_points",
+    ),
+}
+
+# Public name -> submodule it lives in.
+_EXPORTS: dict[str, str] = {
+    name: module for module, names in _SUBMODULE_EXPORTS.items() for name in names
+}
+
+# Public names that differ from the attribute inside the submodule.
+_ALIASES: dict[str, tuple[str, str]] = {"SURROGATE_PRESETS": ("surrogate", "PRESETS")}
 
 __all__ = [
     "AnovaEffect",
     "AnovaTable",
     "BatchDesignResult",
+    "ClassicalDesign",
     "BatchStrategy",
     "DesignConstraint",
     "DesignCriterion",
@@ -223,6 +229,8 @@ __all__ = [
     "FIMResult",
     "IdentifiabilityDiagnostics",
     "IdentifiabilityResult",
+    "LinearBatchDesignResult",
+    "LinearDesignResult",
     "ModelBasedRoundResult",
     "ModelSelectionResult",
     "OptimizationCriterion",
@@ -235,7 +243,9 @@ __all__ = [
     "TEMPLATE_NAMES",
     "anova_report",
     "batch_optimal_experiment",
+    "box_behnken_design",
     "build_template",
+    "central_composite_design",
     "coerce_surrogate",
     "confidence_bound",
     "expected_improvement",
@@ -250,6 +260,8 @@ __all__ = [
     "collinearity_index",
     "compute_fim",
     "d_optimal_subset",
+    "design_matrix",
+    "design_row",
     "diagnose_identifiability",
     "discriminate_compound",
     "effects_estimates",
@@ -259,7 +271,11 @@ __all__ = [
     "estimability_rank",
     "evaluate_discrimination_criterion",
     "explore_design_space",
+    "latin_hypercube_design",
     "likelihood_ratio_test",
+    "linear_batch_design",
+    "linear_fim",
+    "linear_optimal_design",
     "linear_template",
     "model_based_optimize_round",
     "model_selection",
@@ -280,3 +296,24 @@ __all__ = [
     "sum_constraint",
     "vuong_test",
 ]
+
+
+def __getattr__(name: str):
+    """Import the submodule owning ``name`` on first access (PEP 562)."""
+    if name in _ALIASES:
+        module_name, attr = _ALIASES[name]
+    elif name in _EXPORTS:
+        module_name, attr = _EXPORTS[name], name
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    from importlib import import_module
+
+    value = getattr(import_module(f"{__name__}.{module_name}"), attr)
+    # Cache on the module so repeat lookups bypass __getattr__ entirely.
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)
