@@ -28,29 +28,9 @@ share the same `Experiment` interface.
 
 ## Install
 
-Its `discopt>=0.6` dependency is on PyPI, so both a from-source install and a
-direct git install resolve without any extra steps.
-
-> **Not yet on PyPI:** `discopt-doe` itself has not been published yet, so the
-> plain `pip install discopt-doe` form below works only once the first release
-> is cut. Until then, install from source or git.
-
-Recommended (uv):
-
-```bash
-git clone https://github.com/jkitchin/discopt-doe
-cd discopt-doe
-uv sync --all-extras        # core + gui + ml + dev
-```
-
-With pip, straight from git:
-
-```bash
-pip install "git+https://github.com/jkitchin/discopt-doe"          # core
-pip install "git+https://github.com/jkitchin/discopt-doe#egg=discopt-doe[gui]"  # + GUI
-```
-
-Once `discopt-doe` is published, the usual form applies:
+Both `discopt-doe` and its `discopt` dependency are published on
+[PyPI](https://pypi.org/project/discopt-doe/), so a plain pip install resolves
+everything:
 
 ```bash
 pip install discopt-doe            # core
@@ -58,8 +38,23 @@ pip install "discopt-doe[gui]"     # + Streamlit workbook GUI
 pip install "discopt-doe[ml]"      # + scikit-learn surrogates
 ```
 
+Or with uv:
+
+```bash
+uv pip install "discopt-doe[gui]"
+```
+
 Requires `discopt>=0.6` (the first release with the public
-`discopt.parametric` API and the CLI plugin hook).
+`discopt.parametric` API and the CLI plugin hook); it is pulled in
+automatically.
+
+From source, to work on the package itself:
+
+```bash
+git clone https://github.com/jkitchin/discopt-doe
+cd discopt-doe
+uv sync --all-extras        # core + gui + ml + dev
+```
 
 ## Quick start
 

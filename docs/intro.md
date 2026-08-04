@@ -34,33 +34,27 @@ package; both share the same `Experiment` interface.
 
 ## Install
 
-```{warning}
-Pre-release: neither `discopt-doe` nor its `discopt>=0.6` dependency is on
-PyPI yet, so `pip install discopt-doe` cannot resolve `discopt>=0.6` today.
-Until the 0.6 release, use the uv or git install below.
-```
-
-Recommended (uv resolves the pinned `discopt` automatically):
-
-```bash
-git clone https://github.com/jkitchin/discopt-doe
-cd discopt-doe
-uv sync --all-extras        # core + gui + ml + dev
-```
-
-With pip, install the pre-release `discopt` first, then this package:
-
-```bash
-pip install "git+https://github.com/jkitchin/discopt@refactor/389-extract-doe"
-pip install "git+https://github.com/jkitchin/discopt-doe"
-```
-
-Once both are published, the usual form applies:
+Both `discopt-doe` and its `discopt>=0.6` dependency are published on
+[PyPI](https://pypi.org/project/discopt-doe/), so pip resolves everything:
 
 ```bash
 pip install discopt-doe            # core: FIM design, screening, workbooks
 pip install "discopt-doe[gui]"     # + Streamlit workbook GUI
 pip install "discopt-doe[ml]"      # + scikit-learn surrogates for active learning
+```
+
+Or with uv:
+
+```bash
+uv pip install "discopt-doe[gui]"
+```
+
+To work on the package itself, install from source:
+
+```bash
+git clone https://github.com/jkitchin/discopt-doe
+cd discopt-doe
+uv sync --all-extras        # core + gui + ml + dev
 ```
 
 The `discopt doe ...` command-line workflow (workbook campaigns:
