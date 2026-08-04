@@ -32,6 +32,33 @@
       <p id="template-desc" class="hint"></p>
     </div>
 
+    <div class="field" id="model-field" hidden>
+      <label for="expression">Response model</label>
+      <textarea id="expression" rows="2" spellcheck="false"
+        placeholder="k0 * exp(-Ea / (8.314 * T))"></textarea>
+      <p class="hint">
+        Write the response in terms of your parameters and factors below.
+        Allowed: <code>+ - * / **</code>, numbers, <code>pi</code>, <code>E</code>, and
+        <code>exp log ln log10 sqrt sin cos tan asin acos atan sinh cosh tanh abs erf</code>.
+      </p>
+      <div id="model-feedback" class="feedback" role="status" aria-live="polite"></div>
+
+      <div class="row-between" style="margin-top:1rem">
+        <label id="params-label" for="params">Parameters and starting values</label>
+        <button type="button" id="add-param" class="ghost">+ Add parameter</button>
+      </div>
+      <table class="grid" id="params">
+        <thead><tr><th>Name</th><th>Nominal value</th><th class="drop-col"></th></tr></thead>
+        <tbody id="params-body"></tbody>
+      </table>
+      <p class="hint">
+        A nonlinear model's information depends on its parameter values, so the
+        design is only optimal <em>around</em> these. Start with your best guess,
+        run the batch, fit, then use the CLI's <code>extend</code> to re-centre on
+        the fitted values.
+      </p>
+    </div>
+
     <div class="field">
       <div class="row-between">
         <label id="factors-label" for="factors">Factors</label>

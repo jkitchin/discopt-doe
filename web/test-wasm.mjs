@@ -56,8 +56,8 @@ say("booting pyodide…");
 const pyodide = await loadPyodide();
 say(`  ${(await pyodide.runPythonAsync("import sys; sys.version.split()[0]"))}`);
 
-say("loading numpy, scipy, micropip…");
-await pyodide.loadPackage(["micropip", "numpy", "scipy"]);
+say("loading numpy, scipy, sympy, micropip…");
+await pyodide.loadPackage(["micropip", "numpy", "scipy", "sympy"]);
 
 say(`installing openpyxl + ${wheelName} (deps=False)…`);
 pyodide.globals.set("_wheel_url", `${BASE}/wheels/${wheelName}`);
@@ -121,6 +121,7 @@ const { groups } = call("describe_templates");
 const names = groups.flatMap((g) => g.templates.map((t) => t.name));
 check(`${names.length} templates offered`, () => {
   for (const need of [
+    "symbolic",
     "latin-hypercube",
     "central-composite",
     "box-behnken",
@@ -190,6 +191,83 @@ for (const [template, spec, expected] of CASES) {
     if (bytes[0] !== 0x50 || bytes[1] !== 0x4b) throw new Error("output is not a .xlsx (zip)");
   });
 }
+
+say("\n── user-defined models (sympy) ──");
+
+const ARRHENIUS = {
+  template: "symbolic",
+  expression: "k0 * exp(-Ea / (8.314 * T))",
+  parameters: [
+    { name: "k0", value: 2.0 },
+    { name: "Ea", value: 5000.0 },
+  ],
+  factors: bounds(["T", 300, 500]),
+  n: 6,
+  response: "rate",
+  error: 0.05,
+  seed: 0,
+};
+
+check("check_model reports the symbolic derivatives", () => {
+  const out = call("check_model", JSON.stringify(ARRHENIUS));
+  if (out.parameters.join(",") !== "k0,Ea") throw new Error(`params ${out.parameters}`);
+  if (out.derivatives.length !== 2) throw new Error("expected two derivatives");
+  // d/dk0 of k0*exp(...) drops k0 entirely; d/dEa keeps it.
+  const byName = Object.fromEntries(out.derivatives.map((d) => [d.parameter, d.expression]));
+  if (byName.k0.includes("k0")) throw new Error(`dy/dk0 still mentions k0: ${byName.k0}`);
+  if (!byName.Ea.includes("k0")) throw new Error(`dy/dEa lost k0: ${byName.Ea}`);
+});
+
+check("a bad expression is a message, not a crash", () => {
+  const py = pyodide.globals.get("check_model");
+  const out = JSON.parse(py(JSON.stringify({ ...ARRHENIUS, expression: "k0 * bogus" })));
+  py.destroy();
+  if (out.ok) throw new Error("expected a parse failure");
+  if (!/unknown name 'bogus'/.test(out.error)) throw new Error(out.error);
+});
+
+check("a hostile expression is refused without executing", () => {
+  const py = pyodide.globals.get("check_model");
+  const out = JSON.parse(
+    py(JSON.stringify({ ...ARRHENIUS, expression: "__import__('js').fetch('/pwned')" })),
+  );
+  py.destroy();
+  if (out.ok) throw new Error("payload was accepted");
+});
+
+check("designs a nonlinear model at its support points", () => {
+  const out = call("create_design", JSON.stringify(ARRHENIUS));
+  if (out.new_run_ids.length !== 6) throw new Error(`got ${out.new_run_ids.length} runs`);
+  if (out.parameter_names.join(",") !== "k0,Ea") throw new Error(`params ${out.parameter_names}`);
+  // A 2-parameter D-optimal design collapses onto 2 support points.
+  const temps = [...new Set(out.designs.map((d) => Math.round(d.T * 1e6) / 1e6))];
+  if (temps.length !== 2) throw new Error(`expected 2 support points, got ${temps}`);
+});
+
+check("fits a nonlinear model from a distant starting guess", () => {
+  // Truth is well away from the nominal guess the design was centred on.
+  pyodide.runPython(`
+import math, shutil, openpyxl
+shutil.copy("/work/design.xlsx", "/work/upload.xlsx")
+TRUE_K0, TRUE_EA = 3.7, 6200.0
+book = openpyxl.load_workbook("/work/upload.xlsx")
+sheet = book["runs"]
+head = [c.value for c in sheet[1]]
+col = head.index("rate") + 1
+for row in sheet.iter_rows(min_row=2):
+    vals = dict(zip(head, [c.value for c in row]))
+    if vals.get("run_id") is None:
+        continue
+    T = float(vals["T"])
+    row[col - 1].value = TRUE_K0 * math.exp(-TRUE_EA / (8.314 * T))
+book.save("/work/upload.xlsx")
+`);
+  const { fit } = call("run_fit", "/work/upload.xlsx");
+  const got = Object.fromEntries(fit.parameters.map((p) => [p.name, p.estimate]));
+  if (Math.abs(got.k0 - 3.7) > 1e-4) throw new Error(`k0 = ${got.k0}, want 3.7`);
+  if (Math.abs(got.Ea - 6200.0) > 1e-1) throw new Error(`Ea = ${got.Ea}, want 6200`);
+  if (!fit.converged) throw new Error("solver did not converge");
+});
 
 say("\n── round trip: design → fill → fit → anova ──");
 call(

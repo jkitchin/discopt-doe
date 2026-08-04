@@ -730,6 +730,28 @@ class Workbook:
                 "`discopt doe optimize` instead of fit/extend"
             )
 
+    def symbolic_model(self):
+        """Rebuild the user-defined model this campaign was designed for.
+
+        The workbook stores the response *expression*, never executable source,
+        so this parses rather than evaluates — opening a campaign someone sent
+        you runs none of their code. See :mod:`discopt.doe.symbolic`.
+        """
+        from discopt.doe.symbolic import SymbolicModel
+        from discopt.doe.templates import SYMBOLIC_TEMPLATE
+
+        template = self.metadata().get("template") or ""
+        if template != SYMBOLIC_TEMPLATE:
+            raise ValueError(
+                f"workbook uses template {template!r}, not a user-defined model; "
+                "there is no expression to rebuild"
+            )
+        return SymbolicModel.from_metadata(
+            self.template_args(),
+            response_name=self.response_name(),
+            measurement_error=self.measurement_error(),
+        )
+
     def parameter_names(self) -> list[str]:
         """Return the parameter-name order without constructing an Experiment.
 
@@ -740,10 +762,12 @@ class Workbook:
         from it — should prefer this: it stays clear of ``discopt.modeling``, and
         so works where the base package cannot be installed.
         """
-        from discopt.doe.templates import template_parameter_names
+        from discopt.doe.templates import SYMBOLIC_TEMPLATE, template_parameter_names
 
         template = self.metadata().get("template") or ""
         self._reject_non_parametric(template)
+        if template == SYMBOLIC_TEMPLATE:
+            return list(self.symbolic_model().parameter_names)
         if not template:
             raise ValueError(
                 "workbook has no template (a --module experiment); parameter names "

@@ -22,6 +22,7 @@ const state = {
   groups: [],
   current: null,
   factorRows: [],
+  paramRows: [],
   analyzePath: "/work/upload.xlsx",
 };
 
@@ -51,8 +52,10 @@ async function boot() {
   const { loadPyodide } = await import(`${PYODIDE_URL}pyodide.mjs`);
   const pyodide = await loadPyodide({ indexURL: PYODIDE_URL });
 
-  setBoot("Loading numpy and scipy…");
-  await pyodide.loadPackage(["micropip", "numpy", "scipy"]);
+  setBoot("Loading numpy, scipy and sympy…");
+  // sympy differentiates user-defined models; Pyodide ships a wasm build of it,
+  // so take that rather than pulling the pure-Python sdist through micropip.
+  await pyodide.loadPackage(["micropip", "numpy", "scipy", "sympy"]);
 
   setBoot("Installing discopt-doe…");
   const wheel = await findWheel();
@@ -129,11 +132,104 @@ function selectTemplate() {
   const t = state.templates.get($("template").value);
   state.current = t;
   $("template-desc").textContent = t.description;
-  state.factorRows = [];
-  const wanted = Math.max(t.min ?? 1, Math.min(t.max ?? 3, t.min === t.max ? t.min : 2));
-  for (let i = 0; i < wanted; i++) state.factorRows.push(blankFactor(i));
+
+  $("model-field").hidden = !t.model_editor;
+  if (t.model_editor) {
+    // Seed with a worked example: an empty expression box is a blank page, and
+    // the point is to show what the syntax looks like.
+    const ex = t.example ?? {};
+    $("expression").value = ex.expression ?? "";
+    state.paramRows = (ex.parameters ?? [{ name: "a", value: 1 }]).map((p) => ({ ...p }));
+    state.factorRows = (ex.factors ?? [blankFactor(0)]).map((f) => ({ ...f }));
+    renderParams();
+  } else {
+    state.paramRows = [];
+    state.factorRows = [];
+    const wanted = Math.max(t.min ?? 1, Math.min(t.max ?? 3, t.min === t.max ? t.min : 2));
+    for (let i = 0; i < wanted; i++) state.factorRows.push(blankFactor(i));
+  }
+
   renderFactors();
   renderOptions();
+  if (t.model_editor) checkModel();
+}
+
+// ─────────────────────── model editor ───────────────────────
+
+function renderParams() {
+  const body = $("params-body");
+  body.innerHTML = "";
+  state.paramRows.forEach((row, i) => {
+    const tr = document.createElement("tr");
+    for (const [key, type, label] of [
+      ["name", "text", "Name"],
+      ["value", "number", "Nominal value"],
+    ]) {
+      const td = document.createElement("td");
+      const input = document.createElement("input");
+      input.type = type;
+      if (type === "number") input.step = "any";
+      input.value = row[key];
+      input.setAttribute("aria-label", `${label} for parameter ${i + 1}`);
+      input.addEventListener("input", () => {
+        row[key] = type === "number" ? Number(input.value) : input.value;
+        scheduleModelCheck();
+      });
+      td.appendChild(input);
+      tr.appendChild(td);
+    }
+    const td = document.createElement("td");
+    if (state.paramRows.length > 1) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "ghost";
+      btn.textContent = "×";
+      btn.title = "Remove this parameter";
+      btn.setAttribute("aria-label", `Remove parameter ${i + 1}`);
+      btn.addEventListener("click", () => {
+        state.paramRows.splice(i, 1);
+        renderParams();
+        checkModel();
+      });
+      td.appendChild(btn);
+    }
+    tr.appendChild(td);
+    body.appendChild(tr);
+  });
+}
+
+let modelCheckTimer = null;
+
+function scheduleModelCheck() {
+  clearTimeout(modelCheckTimer);
+  modelCheckTimer = setTimeout(checkModel, 300);
+}
+
+function checkModel() {
+  if (!state.current?.model_editor || !state.pyodide) return;
+  const box = $("model-feedback");
+  const spec = {
+    expression: $("expression").value,
+    parameters: state.paramRows,
+    factors: state.factorRows,
+    response: collectOptions().response ?? "y",
+  };
+  try {
+    const out = call("check_model", JSON.stringify(spec));
+    box.className = "feedback ok";
+    box.innerHTML = "";
+    const head = document.createElement("div");
+    head.textContent = `Parsed: ${out.expression}`;
+    const derivs = document.createElement("div");
+    derivs.className = "derivs";
+    derivs.textContent = out.derivatives
+      .map((d) => `∂y/∂${d.parameter} = ${d.expression}`)
+      .join("\n");
+    box.append(head, derivs);
+  } catch (err) {
+    box.className = "feedback bad";
+    box.textContent = err.message;
+  }
 }
 
 function blankFactor(i) {
@@ -180,6 +276,9 @@ function renderFactors() {
       if (type === "number") input.step = "any";
       input.addEventListener("input", () => {
         row[key] = type === "number" ? Number(input.value) : input.value;
+        // Factor names are symbols in the model expression, so renaming one
+        // changes what parses.
+        if (state.current?.model_editor) scheduleModelCheck();
       });
       td.appendChild(input);
       tr.appendChild(td);
@@ -361,6 +460,10 @@ async function generate() {
       factors: state.factorRows,
       ...collectOptions(),
     };
+    if (state.current.model_editor) {
+      spec.expression = $("expression").value;
+      spec.parameters = state.paramRows;
+    }
     const out = call("create_design", JSON.stringify(spec));
     lastDesign = out;
 
@@ -373,6 +476,13 @@ async function generate() {
         ? ` · <strong>${out.n_parameters}</strong> parameters (${out.parameter_names.join(", ")})`
         : "");
     table($("design-table"), ["run_id", ...factorNames], out.designs, num);
+    if (out.expression) {
+      $("design-summary").innerHTML +=
+        `<br><span class="hint">model <code>${escapeHtml(out.expression)}</code>` +
+        ` centred on ${Object.entries(out.nominal_parameters ?? {})
+          .map(([k, v]) => `${escapeHtml(k)}=${num(v)}`)
+          .join(", ")}</span>`;
+    }
     $("design-result").hidden = false;
     $("download-design").hidden = false;
     download(out.file_path, out.download_name);
@@ -499,6 +609,12 @@ $("template").addEventListener("change", selectTemplate);
 $("add-factor").addEventListener("click", () => {
   state.factorRows.push(blankFactor(state.factorRows.length));
   renderFactors();
+});
+$("expression").addEventListener("input", scheduleModelCheck);
+$("add-param").addEventListener("click", () => {
+  state.paramRows.push({ name: `p${state.paramRows.length + 1}`, value: 1 });
+  renderParams();
+  checkModel();
 });
 $("generate").addEventListener("click", generate);
 $("download-design").addEventListener("click", () => {

@@ -213,3 +213,34 @@ footer a { color: var(--accent); }
   .card { padding: 1.1rem; }
   .actions button { flex: 1 1 auto; }
 }
+
+/* ── model editor ─────────────────────────────────────────── */
+
+textarea {
+  font-family: var(--mono);
+  font-size: .9rem;
+  width: 100%;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: .5rem .6rem;
+  resize: vertical;
+}
+textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.feedback { margin-top: .6rem; font-size: .85rem; }
+.feedback:empty { display: none; }
+.feedback.ok { color: var(--ok); }
+.feedback.bad { color: var(--err-fg); }
+.feedback .derivs {
+  margin: .4rem 0 0;
+  padding: .5rem .65rem;
+  background: var(--code-bg);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: .78rem;
+  color: var(--text);
+  overflow-x: auto;
+  white-space: pre;
+}

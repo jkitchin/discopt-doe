@@ -74,6 +74,7 @@ def test_templates_lists_all():
         "latin-hypercube",
         "central-composite",
         "box-behnken",
+        "symbolic",
         "optimize",
     ]
 

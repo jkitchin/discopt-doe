@@ -26,6 +26,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   jax cannot be installed.
 - `Workbook.parameter_names()`, which derives the parameter ordering from
   template metadata without constructing an `Experiment`.
+- **User-defined models** (`discopt.doe.symbolic`) and a matching `symbolic` CLI
+  template: write the response expression, name its parameters, and it is
+  differentiated with sympy to design for it. Works for models nonlinear in
+  their parameters, where the closed-form linear FIM does not apply — the tests
+  pin the symbolic Jacobian against jax autodiff on Arrhenius,
+  Michaelis-Menten, exponential-decay, and two-factor models. `fit` uses
+  nonlinear least squares with that analytic Jacobian, and `extend` re-centres
+  the next batch on the fitted values. The browser app gains a model editor
+  that shows the parsed model and its derivatives as you type.
+- `linear_design.batch_design_from_basis`, the greedy batch search factored out
+  so it can be driven by any Jacobian-row provider — a basis function or a
+  sympy derivative.
+- `sympy` is now a runtime dependency (it has a WebAssembly build; jax does not).
 
 ### Changed
 - `discopt.doe` now resolves its re-exports lazily (PEP 562). `from discopt.doe
@@ -39,6 +52,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rebuilding the `Experiment`, so it no longer requires `discopt.modeling`.
 - Missing jax now raises an actionable error naming the alternatives, rather
   than a bare `ModuleNotFoundError` from inside a Jacobian call.
+
+### Security
+- A campaign workbook stores a user-defined model as an *expression*, never as
+  executable source, and reading one back never calls `eval`:
+  `discopt.doe.symbolic.parse_expression` walks Python's AST and rebuilds the
+  sympy tree node by node, rejecting attribute access, subscripts, lambdas,
+  comprehensions, and any call outside a fixed function list. Opening a
+  workbook someone sent you therefore executes none of their code.
 
 ## [0.2.0] - 2026-07-12
 

@@ -137,6 +137,23 @@ squares, so a Box-Behnken or central-composite campaign goes straight from
 inside the bounds you give by default; pass `--outside-bounds` for the textbook
 scaling where the axial points sit beyond them.
 
+For a model of your own — including one nonlinear in its parameters — write the
+response and its parameters directly:
+
+```bash
+discopt doe new symbolic -o arrhenius.xlsx \
+    --expr "k0 * exp(-Ea / (8.314 * T))" \
+    --param k0=2.0 --param Ea=5000 \
+    --input T:300:500 --n 6
+discopt doe fit arrhenius.xlsx        # nonlinear least squares, analytic Jacobian
+discopt doe extend arrhenius.xlsx --n 4   # next batch, re-centred on the fit
+```
+
+The expression is differentiated with sympy, so ∂y/∂θ is exact rather than a
+finite difference. A nonlinear model's information depends on its parameter
+values, so `--param` gives the nominal point the design is built around; `fit`
+then `extend` re-centres it on what the data say.
+
 ## GUI
 
 `discopt doe gui [workbook.xlsx]` launches a Streamlit app over a campaign

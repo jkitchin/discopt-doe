@@ -36,6 +36,11 @@ WORK_DIR = Path("/work")
 # Pyodide does have, but the round itself is out of scope for phase 1.
 TEMPLATE_GROUPS = [
     {
+        "label": "Your own model",
+        "hint": "Write the response formula; it is differentiated symbolically.",
+        "templates": ["symbolic"],
+    },
+    {
         "label": "Space-filling & response surface",
         "hint": "Closed-form classical designs. No model assumed up front.",
         "templates": ["latin-hypercube", "central-composite", "box-behnken"],
@@ -64,6 +69,24 @@ TEMPLATE_GROUPS = [
 # options to render. Kept here rather than in JS so the CLI stays the single
 # source of truth for what each template actually accepts.
 TEMPLATE_UI: dict[str, dict[str, Any]] = {
+    "symbolic": {
+        "factors": "bounds",
+        "options": ["n", "criterion"],
+        "min": 1,
+        "max": 6,
+        # Drives the model editor: an expression box plus a parameter table.
+        "model_editor": True,
+        "example": {
+            "expression": "k0 * exp(-Ea / (8.314 * T))",
+            "parameters": [
+                {"name": "k0", "value": 2.0},
+                {"name": "Ea", "value": 5000.0},
+            ],
+            "factors": [{"name": "T", "low": 300.0, "high": 500.0}],
+            "response": "rate",
+            "n": 6,
+        },
+    },
     "latin-hypercube": {"factors": "bounds", "options": ["n", "basis"], "min": 1, "max": 12},
     "central-composite": {
         "factors": "bounds",
@@ -202,6 +225,14 @@ def create_design(spec_json: str) -> str:
             for row in spec["factors"]
         }
 
+    # A user-defined model: the parameter table carries both the names (whose
+    # order fixes the FIM layout) and the nominal values the design is centred on.
+    nominal: dict[str, float] = {}
+    for row in spec.get("parameters") or []:
+        name = str(row.get("name") or "").strip()
+        if name:
+            nominal[name] = float(row.get("value") or 0.0)
+
     params = NewParams(
         output=DESIGN_PATH,
         n=int(spec.get("n") or 1),
@@ -226,6 +257,8 @@ def create_design(spec_json: str) -> str:
         # The autodiff path cannot run here; the closed form is exact for every
         # one of these templates, so route the parametric family through it.
         use_linear_design=template in LINEAR_TEMPLATES,
+        expression=(spec.get("expression") or None),
+        param_initial_guess=nominal,
         force=True,
     )
 
@@ -233,6 +266,47 @@ def create_design(spec_json: str) -> str:
     out["download_name"] = f"{template}-campaign.xlsx"
     out["file_path"] = str(DESIGN_PATH)
     return _ok(out)
+
+
+@_guard
+def check_model(spec_json: str) -> str:
+    """Validate a model expression and report its symbolic derivatives.
+
+    Drives the live feedback under the editor: a typo becomes a message while
+    you are still typing, rather than an error when you press Generate. Also
+    returns ∂y/∂θ so you can see what the design is actually being built from.
+    """
+    from discopt.doe.symbolic import SymbolicModel
+
+    spec = json.loads(spec_json)
+    names = [str(p.get("name") or "").strip() for p in (spec.get("parameters") or [])]
+    names = [n for n in names if n]
+    inputs = [str(f.get("name") or "").strip() for f in (spec.get("factors") or [])]
+    inputs = [n for n in inputs if n]
+
+    if not names:
+        return _err("declare at least one parameter")
+    if not inputs:
+        return _err("declare at least one factor")
+
+    model = SymbolicModel(
+        source=str(spec.get("expression") or ""),
+        parameter_names=tuple(names),
+        input_names=tuple(inputs),
+        response_name=spec.get("response") or "y",
+        measurement_error=float(spec.get("error") or 1.0),
+    )
+    return _ok(
+        {
+            "expression": str(model.expression),
+            "parameters": list(model.parameter_names),
+            "inputs": list(model.input_names),
+            "derivatives": [
+                {"parameter": n, "expression": str(d)}
+                for n, d in zip(model.parameter_names, model.jacobian_expressions)
+            ],
+        }
+    )
 
 
 @_guard

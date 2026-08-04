@@ -24,10 +24,24 @@ generates the run list as a `.xlsx` campaign workbook — the same format
 - **Model-based optimal** — linear, 1-D polynomial, 2- and 3-factor response
   surface, and the three Scheffé mixture models, each designed by maximizing
   the chosen information criterion (D, A, E, or modified-E).
+- **Your own model** — write the response formula, name its parameters, and it
+  is differentiated symbolically to design for it. See below.
 
-**Analyze.** Upload the filled-in workbook to fit the model by least squares —
-coefficients with standard errors and 95% confidence intervals — or run ANOVA
-over the completed runs.
+**Write your own model.** Choosing *symbolic* opens an editor: type an
+expression like `k0 * exp(-Ea / (8.314 * T))`, list its parameters with
+starting values, and the page shows you the parsed model and its derivatives
+∂y/∂θ as you type. The design is then built to estimate *those* parameters as
+precisely as possible.
+
+Because a nonlinear model's information depends on the parameter values, the
+design is only optimal *around* the starting values you give — which is why the
+natural workflow is design, fit, then `discopt doe extend` to re-centre the next
+batch on the fitted values.
+
+**Analyze.** Upload the filled-in workbook to fit the model — least squares for
+the built-in templates, nonlinear least squares with an analytic Jacobian for
+your own — reporting coefficients with standard errors and 95% confidence
+intervals, or run ANOVA over the completed runs.
 
 Workbooks move freely in both directions: a design generated in the browser
 opens with `discopt doe status`, and a campaign started at the command line can
@@ -35,10 +49,22 @@ be analysed in the browser.
 
 ## What it does not do
 
-`extend` (design the next batch given what you have measured so far) and
-`optimize` (active-learning rounds against a surrogate) are command-line only
-for now, as is the `--module` escape hatch for user-defined models. See
-{doc}`the CLI workflow <notebooks/doe_cli>` for those.
+The page itself covers design and analysis. Two verbs are command-line only:
+`extend`, which designs the next batch from what you have measured so far, and
+`optimize`, which runs active-learning rounds against a surrogate. So is the
+`--module` escape hatch, where a model is a Python callable rather than an
+expression.
+
+`extend` is the one worth knowing about, since it completes the loop for a
+user-defined model — download a campaign from the page, fill it in, then:
+
+```bash
+discopt doe fit campaign.xlsx
+discopt doe extend campaign.xlsx --n 4
+```
+
+which re-fits the parameters and centres the next batch on the new estimates.
+See {doc}`the CLI workflow <notebooks/doe_cli>`.
 
 ## How it works, and why the limits are where they are
 
@@ -70,9 +96,27 @@ directly in numpy, and the test suite pins it against the autodiff result to
 machine precision. Designing still means optimizing the criterion over the
 design box — that part is `scipy.optimize`, which Pyodide does have.
 
-Nonlinear models are where this stops: for those the Jacobian genuinely depends
-on the parameter values and you need autodiff, so they remain a desktop
-feature.
+For a model you write yourself that closed form no longer applies — the
+Jacobian genuinely depends on the parameter values. There, `discopt.doe.symbolic`
+differentiates the expression with `sympy.diff` and evaluates it through
+`sympy.lambdify`, which sympy being a Pyodide package makes possible. The tests
+pin that against the jax result too, on Arrhenius, Michaelis-Menten, and
+exponential-decay models.
+
+## Why the model is stored as an expression
+
+A campaign workbook has to carry its model so that `fit` and `extend` can
+rebuild it, which means model definitions arrive in *files* — not only from the
+person who typed them. Storing executable source and running it on open would
+make an emailed workbook a code-execution vector.
+
+So what a workbook stores is the expression itself, and reading it back never
+calls `eval`. `discopt.doe.symbolic.parse_expression` walks Python's own AST and
+rebuilds the sympy tree node by node, accepting arithmetic, numbers, the
+declared symbol names, and a fixed list of functions — and rejecting attribute
+access, subscripts, lambdas, comprehensions, and calls to anything else.
+(`sympy.sympify` and `sympy.parsing.parse_expr` are deliberately unused; both
+ultimately call `eval`.)
 
 ## Running it locally
 

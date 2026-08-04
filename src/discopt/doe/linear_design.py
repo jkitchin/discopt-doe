@@ -657,6 +657,83 @@ def linear_batch_design(
         )
 
     basis = _basis_evaluator(template, template_args or {}, parameter_names, names)
+    return batch_design_from_basis(
+        basis,
+        n_experiments,
+        parameter_names=parameter_names,
+        input_names=names,
+        design_bounds=design_bounds,
+        measurement_error=measurement_error,
+        criterion=criterion,
+        prior_fim=accumulated,
+        equality_constraints=equality_constraints,
+        inequality_constraints=inequality_constraints,
+        feasible_projection=feasible_projection,
+        n_starts=n_starts,
+        seed=seed,
+    )
+
+
+def batch_design_from_basis(
+    basis: Callable[[np.ndarray], np.ndarray],
+    n_experiments: int,
+    *,
+    parameter_names: Sequence[str],
+    input_names: Sequence[str],
+    design_bounds: Mapping[str, tuple[float, float]],
+    measurement_error: float = 1.0,
+    criterion: str = D_OPTIMAL,
+    prior_fim: np.ndarray | None = None,
+    equality_constraints: Sequence[Callable[[dict[str, float]], float]] | None = None,
+    inequality_constraints: Sequence[Callable[[dict[str, float]], float]] | None = None,
+    feasible_projection: Callable[[dict[str, float]], dict[str, float]] | None = None,
+    n_starts: int = 10,
+    seed: int = 42,
+) -> LinearBatchDesignResult:
+    """Greedy batch design driven by an arbitrary Jacobian-row provider.
+
+    The search never needs to know *where* the row ``∂y/∂θ`` came from — only
+    its value at a candidate point. Splitting that out is what lets a
+    user-defined nonlinear model reuse this machinery unchanged: the linear
+    templates supply a basis-function row, and
+    :func:`discopt.doe.symbolic.basis_evaluator` supplies one differentiated by
+    sympy at fixed nominal parameters.
+
+    Parameters
+    ----------
+    basis : callable
+        ``f(x_vector) -> ndarray`` of length ``len(parameter_names)``, where
+        ``x_vector`` is ordered by ``input_names``.
+
+    Other parameters are as :func:`linear_batch_design`.
+    """
+    if n_experiments < 1:
+        raise ValueError(f"n_experiments must be >= 1, got {n_experiments}")
+    if criterion not in CRITERIA:
+        raise ValueError(f"unknown criterion {criterion!r}; expected one of {list(CRITERIA)}")
+
+    names = list(input_names)
+    missing = [n for n in names if n not in design_bounds]
+    if missing:
+        raise ValueError(f"design_bounds missing entries for {missing}")
+    lbs = np.array([float(design_bounds[n][0]) for n in names], dtype=np.float64)
+    ubs = np.array([float(design_bounds[n][1]) for n in names], dtype=np.float64)
+    if np.any(ubs <= lbs):
+        bad = [n for n, lo, hi in zip(names, lbs, ubs) if hi <= lo]
+        raise ValueError(f"design_bounds must satisfy ub > lb; offending factors: {bad}")
+
+    n_p = len(parameter_names)
+    accumulated = (
+        np.zeros((n_p, n_p), dtype=np.float64)
+        if prior_fim is None
+        else np.asarray(prior_fim, dtype=np.float64).copy()
+    )
+    if accumulated.shape != (n_p, n_p):
+        raise ValueError(
+            f"prior_fim shape {accumulated.shape} does not match "
+            f"{n_p} parameters {list(parameter_names)}"
+        )
+
     rng = np.random.default_rng(seed)
     inv_var = 1.0 / (float(measurement_error) ** 2)
 
@@ -722,6 +799,7 @@ __all__ = [
     "LinearBatchDesignResult",
     "LinearDesignResult",
     "ME_OPTIMAL",
+    "batch_design_from_basis",
     "design_matrix",
     "design_row",
     "evaluate_criterion",

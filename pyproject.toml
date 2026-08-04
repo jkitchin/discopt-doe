@@ -17,6 +17,10 @@ dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
     "openpyxl>=3.1",     # workbook.py and the `discopt doe` CLI verbs
+    # symbolic.py differentiates user-defined models. Unlike jax this has a
+    # WebAssembly build, which is what lets the browser app design for a model
+    # you write yourself.
+    "sympy>=1.12",
 ]
 
 [project.urls]

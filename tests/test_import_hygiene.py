@@ -37,6 +37,7 @@ BROWSER_SAFE_MODULES = [
     "discopt.doe.latin",
     "discopt.doe.linear_design",
     "discopt.doe.screening",
+    "discopt.doe.symbolic",
     "discopt.doe.templates",
     "discopt.doe.workbook",
 ]

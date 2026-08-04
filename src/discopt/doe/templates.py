@@ -253,6 +253,11 @@ def template_parameter_names(
     ``basis`` applies only to the classical design templates, which record
     the model they are meant to be analysed with rather than defining one.
     """
+    if template == SYMBOLIC_TEMPLATE:
+        raise ValueError(
+            "a user-defined model's parameter names come from its metadata, not from "
+            "the template; use Workbook.parameter_names() or SymbolicModel.parameter_names"
+        )
     if template in CLASSICAL_TEMPLATES:
         from discopt.doe.linear_design import basis_parameter_names
 
@@ -646,6 +651,7 @@ TEMPLATE_NAMES = (
     "latin-hypercube",
     "central-composite",
     "box-behnken",
+    "symbolic",
     "optimize",
 )
 
@@ -661,6 +667,12 @@ COMBINATORIAL_TEMPLATES = frozenset(
 # carry a regression basis in ``template_args["basis"]``, so `fit` works on
 # them where `anova` is the right verb for the combinatorial ones.
 CLASSICAL_TEMPLATES = frozenset({"latin-hypercube", "central-composite", "box-behnken"})
+
+# A user-defined model: the response expression lives in the workbook metadata
+# and is differentiated symbolically (see discopt.doe.symbolic). Unlike every
+# other template the model is not fixed in advance, so parameter names come
+# from the metadata rather than from the template name.
+SYMBOLIC_TEMPLATE = "symbolic"
 
 
 __all__ = [
