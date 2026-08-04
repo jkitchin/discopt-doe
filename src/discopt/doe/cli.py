@@ -40,6 +40,7 @@ from discopt.doe.templates import (
     build_template,
     template_parameter_names,
 )
+from discopt.doe.linear_design import design_row
 from discopt.doe.workbook import InputSpec, Workbook, _load_module_callable
 
 # Tiny ridge added to the prior FIM whenever no fitted prior exists.
@@ -59,6 +60,12 @@ _CRITERION_ALIASES = {
 
 class DoEError(Exception):
     """Raised by ``do_*`` functions on user-facing failures."""
+
+
+# Mirrors discopt.doe.templates.CLASSICAL_TEMPLATES. Duplicated as a literal so
+# the hot paths that only need the membership test don't import the templates
+# module (which reaches discopt.modeling) just to branch on a name.
+_CLASSICAL_TEMPLATE_NAMES = frozenset({"latin-hypercube", "central-composite", "box-behnken"})
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -165,6 +172,19 @@ class NewParams:
     replicates: int = 1
     factor_pairs: dict[str, tuple[object, object]] | None = None
     center_points: int = 0
+    # Classical design template options (latin-hypercube / central-composite /
+    # box-behnken). `basis` is the regression model the design is meant to be
+    # analysed with, and travels in the workbook metadata for `fit`.
+    basis: str = "quadratic"
+    alpha: str = "rotatable"
+    within_bounds: bool = True
+    # Build parametric designs from the closed-form linear FIM instead of jax
+    # autodiff. Identical results for every built-in template; exists for
+    # environments with no jax (Pyodide/WASM), where the default path cannot run.
+    use_linear_design: bool = False
+    # The response expression for the `symbolic` template. Parameter names and
+    # their nominal values come from `param_initial_guess`.
+    expression: str | None = None
     # Active-learning ("optimize") template options
     optimize_criterion: str = "maximize"
     optimize_surrogate: str = "gp"
@@ -389,6 +409,40 @@ _TEMPLATE_DESCRIPTIONS = {
         "factors only), --replicates R. Use this to answer 'does each "
         "factor matter?' before fitting a response surface."
     ),
+    "latin-hypercube": (
+        "Latin hypercube: space-filling stratified sample over a continuous "
+        "box, with the run count set by you rather than by the factor count. "
+        "Inputs: --input NAME:LB:UB (repeatable), --n RUNS. Optional: "
+        "--basis {linear,quadratic} (default linear here; the model `fit` "
+        "will estimate). Use this for surrogate fitting or when you want "
+        "coverage without assuming a model form."
+    ),
+    "central-composite": (
+        "Central composite design for a full quadratic response surface: "
+        "2**k factorial core + 2k axial points + centre replicates. Inputs: "
+        "--input NAME:LB:UB (2-6 factors). Optional: --center-points N "
+        "(default 4), --alpha {rotatable,face} or a number, --outside-bounds "
+        "to use the textbook scaling where the axial points fall beyond "
+        "LB/UB. By default every run stays within the bounds you give."
+    ),
+    "box-behnken": (
+        "Box-Behnken design for a full quadratic response surface without "
+        "visiting any corner of the design box — every run sits at an edge "
+        "midpoint, so no run combines the extreme level of every factor. "
+        "Inputs: --input NAME:LB:UB (3-5 factors). Optional: "
+        "--center-points N (default 3)."
+    ),
+    "symbolic": (
+        "Your own model, differentiated symbolically. Inputs: --expr "
+        "'EXPRESSION' (e.g. 'k0 * exp(-Ea / (8.314 * T))'), --param NAME=VALUE "
+        "(repeatable; the nominal guess a locally-optimal design is built "
+        "around), --input NAME:LB:UB (repeatable), --n RUNS. Optional: "
+        "--criterion, --n-starts. `fit` estimates the parameters by nonlinear "
+        "least squares and `extend` designs the next batch around them. "
+        "Allowed in the expression: + - * / **, numbers, your declared names, "
+        "pi/E, and exp log ln log10 sqrt sin cos tan asin acos atan sinh cosh "
+        "tanh abs erf."
+    ),
     "optimize": (
         "Active-learning workbook for sequential optimization. Inputs: "
         "--input NAME:LB:UB (repeatable). The seed batch is sampled by "
@@ -454,8 +508,11 @@ def _validate_new_column_names(params: NewParams) -> None:
 
 
 def do_new(params: NewParams) -> dict[str, Any]:
-    from discopt.doe import batch_optimal_experiment
-    from discopt.doe.templates import COMBINATORIAL_TEMPLATES
+    # batch_optimal_experiment is imported at its use site below, not here: it
+    # reaches jax through discopt.doe.fim, and the combinatorial, classical, and
+    # use_linear_design branches all return before needing it. Hoisting it would
+    # make every template require jax.
+    from discopt.doe.templates import CLASSICAL_TEMPLATES, COMBINATORIAL_TEMPLATES
 
     # Guard here too (not only in _cmd_new) so direct callers such as the GUI
     # don't silently clobber an existing campaign.
@@ -476,6 +533,13 @@ def do_new(params: NewParams) -> dict[str, Any]:
         return _do_new_optimize(params)
     if params.template in COMBINATORIAL_TEMPLATES:
         return _do_new_latin(params)
+    if params.template in CLASSICAL_TEMPLATES:
+        return _do_new_classical(params)
+    if params.template == "symbolic":
+        return _do_new_symbolic(params)
+
+    if params.use_linear_design:
+        return _do_new_linear(params)
 
     experiment, parameter_names = _build_experiment_from_new(params)
     bounds = _design_bounds(params.inputs)
@@ -512,6 +576,8 @@ def do_new(params: NewParams) -> dict[str, Any]:
         designs = [single.design]
         criterion_value = float(single.criterion_value)
     else:
+        from discopt.doe import batch_optimal_experiment
+
         batch = batch_optimal_experiment(
             experiment,
             param_values,
@@ -663,6 +729,486 @@ def _do_new_factorial(params: NewParams) -> dict[str, Any]:
         "parameter_names": [],
         "n_parameters": 0,
         "next_command": f"discopt doe anova {wb.path}",
+    }
+
+
+def _symbolic_start_values(wb: Workbook, model) -> dict[str, float]:
+    """Starting parameter values for a nonlinear fit or a design refresh.
+
+    Prefers estimates already in the workbook's ``parameters`` sheet — after a
+    first fit those are far better than the original guess — and falls back to
+    the nominal values the campaign was created with.
+    """
+    nominal = dict(wb.param_initial_guess() or {})
+    try:
+        fitted = {
+            row["name"]: row.get("estimate") for row in wb.read_parameters() if row.get("name")
+        }
+    except Exception:  # noqa: BLE001 - an unfitted workbook is the normal case
+        fitted = {}
+    out: dict[str, float] = {}
+    for name in model.parameter_names:
+        value = fitted.get(name)
+        if value is None or not math.isfinite(float(value)):
+            value = nominal.get(name, 1.0)
+        out[name] = float(value)
+    return out
+
+
+def _do_fit_symbolic(wb: Workbook, completed: list[dict[str, Any]]) -> dict[str, Any]:
+    """Fit a user-defined model by nonlinear least squares."""
+    from discopt.doe.symbolic import fit_least_squares
+
+    model = wb.symbolic_model()
+    start = _symbolic_start_values(wb, model)
+
+    missing = [n for n in model.input_names if any(r.get(n) is None for r in completed)]
+    if missing:
+        raise DoEError(f"completed runs have blank values for input(s) {missing}")
+
+    try:
+        out = fit_least_squares(model, completed, start)
+    except (ValueError, RuntimeError) as e:
+        raise DoEError(str(e)) from e
+
+    names = out["parameter_names"]
+    wb.write_parameters(
+        names,
+        out["estimates"],
+        out["std_errors"],
+        {n: (out["ci_lower"][n], out["ci_upper"][n]) for n in names},
+    )
+    wb.write_fim(out["fim"], names)
+    wb.log(
+        "fit",
+        {
+            "template": "symbolic",
+            "n_observations": out["n_observations"],
+            "rss": out["residual_sum_of_squares"],
+            "converged": out["success"],
+        },
+    )
+    wb.save()
+
+    log_det = float(np.linalg.slogdet(out["fim"])[1])
+    return {
+        "workbook_path": str(wb.path),
+        "parameters": [
+            {
+                "name": n,
+                "estimate": out["estimates"][n],
+                "std_error": out["std_errors"][n],
+                "ci_lower_95": out["ci_lower"][n],
+                "ci_upper_95": out["ci_upper"][n],
+            }
+            for n in names
+        ],
+        "parameter_names": names,
+        "n_observations": out["n_observations"],
+        "objective": out["residual_sum_of_squares"],
+        "log_det_fim": log_det,
+        "expression": model.source,
+        "converged": out["success"],
+        "solver_message": out["message"],
+        "next_command": f"discopt doe extend {wb.path} --n N",
+    }
+
+
+def _do_extend_symbolic(wb: Workbook, params: ExtendParams) -> dict[str, Any]:
+    """Design the next batch for a user-defined model.
+
+    The information already collected enters as a prior FIM, and the Jacobian is
+    re-evaluated at the *current* parameter estimates — so each round re-centres
+    the local optimality of the design on what the data now say.
+    """
+    from discopt.doe.linear_design import batch_design_from_basis
+    from discopt.doe.symbolic import basis_evaluator
+
+    model = wb.symbolic_model()
+    theta = _symbolic_start_values(wb, model)
+    specs = wb.input_specs()
+    bounds = {s.name: (s.lb, s.ub) for s in specs}
+    completed = wb.completed_runs()
+    n_p = len(model.parameter_names)
+
+    warnings_out: list[str] = []
+    pending = wb.pending_runs()
+    if pending:
+        warnings_out.append(
+            f"{len(pending)} run(s) are still pending; they contribute no "
+            "information to the prior FIM, so the recommended batch may overlap them."
+        )
+    if not completed:
+        warnings_out.append(
+            "no completed runs yet, so the design is still centred on the nominal "
+            "parameter guess rather than on measured data."
+        )
+
+    prior = _RIDGE * np.eye(n_p)
+    if completed:
+        designs_done = [{n: float(r[n]) for n in model.input_names} for r in completed]
+        prior = prior + model.fim(theta, designs_done)
+
+    batch_idx = wb.next_batch_index()
+    try:
+        batch = batch_design_from_basis(
+            basis_evaluator(model, theta),
+            int(params.n),
+            parameter_names=list(model.parameter_names),
+            input_names=list(model.input_names),
+            design_bounds=bounds,
+            measurement_error=wb.measurement_error(),
+            criterion=wb.criterion() or _DEFAULT_CRITERION,
+            prior_fim=prior,
+            n_starts=params.n_starts,
+            seed=wb.seed() + batch_idx,
+        )
+    except (ValueError, RuntimeError) as e:
+        raise DoEError(str(e)) from e
+
+    designs = list(batch.designs)
+    new_ids = wb.append_runs(batch_idx, designs)
+    wb.log(
+        "extend",
+        {"template": "symbolic", "n": params.n, "batch": batch_idx, "theta": theta},
+    )
+    wb.save()
+
+    return {
+        "workbook_path": str(wb.path),
+        "batch": batch_idx,
+        "new_run_ids": new_ids,
+        "designs": [
+            {"run_id": rid, **{nm: float(d[nm]) for nm in model.input_names}}
+            for rid, d in zip(new_ids, designs)
+        ],
+        "criterion": batch.criterion,
+        "criterion_value": float(batch.criterion_value),
+        "parameter_names": list(model.parameter_names),
+        "design_parameters": theta,
+        "warnings": warnings_out,
+        "next_command": f"discopt doe status {wb.path}",
+    }
+
+
+def _build_symbolic_model(params: NewParams):
+    """Construct the SymbolicModel a `new symbolic` invocation describes."""
+    from discopt.doe.symbolic import ModelSyntaxError, SymbolicModel
+
+    if not params.expression:
+        raise DoEError("symbolic requires --expr 'EXPRESSION' (the response formula)")
+    if not params.param_initial_guess:
+        raise DoEError(
+            "symbolic requires --param NAME=VALUE (repeatable). A nonlinear model's "
+            "information depends on the parameter values, so the design is built "
+            "around a nominal guess."
+        )
+    if not params.inputs:
+        raise DoEError("symbolic requires --input NAME:LB:UB (repeatable)")
+
+    try:
+        return SymbolicModel(
+            source=params.expression,
+            parameter_names=tuple(params.param_initial_guess),
+            input_names=tuple(n for n, _, _ in params.inputs),
+            response_name=params.response_name,
+            measurement_error=params.measurement_error,
+        )
+    except (ModelSyntaxError, ValueError) as e:
+        raise DoEError(str(e)) from e
+
+
+def _do_new_symbolic(params: NewParams) -> dict[str, Any]:
+    """Design a locally-optimal batch for a user-defined model.
+
+    The Jacobian comes from sympy rather than jax, so this runs anywhere numpy
+    and scipy do. Because the model is nonlinear in its parameters the design is
+    only optimal *around the nominal values* — which is why `--param` is
+    required and why the natural workflow is design, fit, then `extend` around
+    the improved estimates.
+    """
+    from discopt.doe.linear_design import batch_design_from_basis
+    from discopt.doe.symbolic import basis_evaluator
+
+    model = _build_symbolic_model(params)
+    nominal = dict(params.param_initial_guess)
+    input_names = list(model.input_names)
+    n_p = len(model.parameter_names)
+
+    if int(params.n) < n_p:
+        raise DoEError(
+            f"a model with {n_p} parameters needs at least {n_p} runs to be "
+            f"identifiable; got --n {params.n}"
+        )
+
+    try:
+        batch = batch_design_from_basis(
+            basis_evaluator(model, nominal),
+            int(params.n),
+            parameter_names=list(model.parameter_names),
+            input_names=input_names,
+            design_bounds=_design_bounds(params.inputs),
+            measurement_error=params.measurement_error,
+            criterion=params.criterion,
+            prior_fim=_RIDGE * np.eye(n_p),
+            n_starts=params.n_starts,
+            seed=params.seed,
+        )
+    except (ValueError, RuntimeError) as e:
+        raise DoEError(str(e)) from e
+
+    designs = list(batch.designs)
+    wb = Workbook.create(
+        params.output,
+        template="symbolic",
+        template_args=model.to_metadata(),
+        input_specs=[InputSpec(n_, lb, ub) for n_, lb, ub in params.inputs],
+        criterion=params.criterion,
+        measurement_error=params.measurement_error,
+        seed=params.seed,
+        response_name=params.response_name,
+        module_callable=None,
+        param_initial_guess=nominal,
+    )
+    new_ids = wb.append_runs(1, designs)
+    wb.log(
+        "new",
+        {
+            "template": "symbolic",
+            "expression": model.source,
+            "n": params.n,
+            "criterion": params.criterion,
+            "nominal": nominal,
+        },
+    )
+    wb.save()
+
+    return {
+        "workbook_path": str(wb.path),
+        "template": "symbolic",
+        "module_callable": None,
+        "batch": 1,
+        "new_run_ids": new_ids,
+        "designs": [
+            {"run_id": rid, **{nm: float(d[nm]) for nm in input_names}}
+            for rid, d in zip(new_ids, designs)
+        ],
+        "criterion": params.criterion,
+        "criterion_value": float(batch.criterion_value),
+        "parameter_names": list(model.parameter_names),
+        "n_parameters": n_p,
+        "expression": model.source,
+        "nominal_parameters": nominal,
+        "next_command": f"discopt doe status {wb.path}",
+    }
+
+
+def _do_new_linear(params: NewParams) -> dict[str, Any]:
+    """Build a parametric design without jax, using the closed-form FIM.
+
+    Same result as the autodiff path for every built-in template — they are all
+    linear in their parameters, so ``XᵀX/σ²`` *is* the Fisher information (see
+    :mod:`discopt.doe.linear_design`). Opt-in via ``NewParams.use_linear_design``
+    because it exists for environments where jax cannot be installed at all;
+    the desktop CLI keeps the autodiff path as its default.
+    """
+    from discopt.doe.linear_design import LINEAR_TEMPLATES, linear_batch_design
+    from discopt.doe.templates import template_parameter_names
+
+    template = params.template or ""
+    if template not in LINEAR_TEMPLATES:
+        raise DoEError(
+            f"use_linear_design requires a template that is linear in its parameters; "
+            f"{template!r} is not one of {sorted(LINEAR_TEMPLATES)}"
+        )
+    if not params.inputs:
+        raise DoEError(f"{template} requires --input NAME:LB:UB (repeatable)")
+
+    input_names = [s[0] for s in params.inputs]
+    parameter_names = template_parameter_names(
+        template,
+        degree=int(params.degree) if params.degree is not None else None,
+        n_inputs=len(input_names),
+    )
+    eq_cons, proj = _mixture_constraints(template, params.inputs, params.mixture_total)
+
+    template_args: dict[str, Any] = {}
+    if params.degree is not None:
+        template_args["degree"] = int(params.degree)
+    if params.mixture_total is not None:
+        template_args["mixture_total"] = float(params.mixture_total)
+
+    try:
+        batch = linear_batch_design(
+            template,
+            max(int(params.n), 1),
+            parameter_names=parameter_names,
+            input_names=input_names,
+            design_bounds=_design_bounds(params.inputs),
+            template_args=template_args,
+            measurement_error=params.measurement_error,
+            criterion=params.criterion,
+            # The same ridge the autodiff path seeds (see the parametric branch
+            # of do_new). It keeps the FIM non-singular from the first round, so
+            # the requested criterion is well-posed for every pick rather than
+            # only once the design has accumulated full rank.
+            prior_fim=_RIDGE * np.eye(len(parameter_names)),
+            equality_constraints=eq_cons or None,
+            feasible_projection=proj,
+            n_starts=params.n_starts,
+            seed=params.seed,
+        )
+    except (ValueError, RuntimeError) as e:
+        raise DoEError(str(e)) from e
+
+    designs = list(batch.designs)
+    wb = Workbook.create(
+        params.output,
+        template=template,
+        template_args=template_args,
+        input_specs=[InputSpec(n_, lb, ub) for n_, lb, ub in params.inputs],
+        criterion=params.criterion,
+        measurement_error=params.measurement_error,
+        seed=params.seed,
+        response_name=params.response_name,
+        module_callable=None,
+        param_initial_guess=None,
+    )
+    new_ids = wb.append_runs(1, designs)
+    wb.log(
+        "new",
+        {
+            "template": template,
+            "n": params.n,
+            "criterion": params.criterion,
+            "fim": "linear",
+        },
+    )
+    wb.save()
+
+    return {
+        "workbook_path": str(wb.path),
+        "template": template,
+        "module_callable": None,
+        "batch": 1,
+        "new_run_ids": new_ids,
+        "designs": [
+            {"run_id": rid, **{nm: float(d[nm]) for nm in input_names}}
+            for rid, d in zip(new_ids, designs)
+        ],
+        "criterion": params.criterion,
+        "criterion_value": float(batch.criterion_value),
+        "parameter_names": parameter_names,
+        "n_parameters": len(parameter_names),
+        "next_command": f"discopt doe status {wb.path}",
+    }
+
+
+def _do_new_classical(params: NewParams) -> dict[str, Any]:
+    """Build a classical space-filling / response-surface design as a workbook.
+
+    These skip the FIM search entirely — the run list is closed-form — but
+    unlike the combinatorial family they record a regression ``basis`` so
+    ``discopt doe fit`` can estimate a model from the completed runs.
+    """
+    from discopt.doe.classical import (
+        box_behnken_design,
+        central_composite_design,
+        latin_hypercube_design,
+    )
+    from discopt.doe.linear_design import BASES, basis_parameter_names
+
+    template = params.template or ""
+    if not params.inputs:
+        raise DoEError(f"{template} requires --input NAME:LB:UB (repeatable)")
+    if params.basis not in BASES:
+        raise DoEError(f"--basis must be one of {list(BASES)}, got {params.basis!r}")
+
+    factors = {name: (lb, ub) for name, lb, ub in params.inputs}
+    input_names = list(factors)
+    template_args: dict[str, Any] = {"basis": params.basis, "family": template}
+
+    try:
+        if template == "latin-hypercube":
+            if int(params.n) < 2:
+                raise DoEError("latin-hypercube requires --n >= 2")
+            design = latin_hypercube_design(factors, int(params.n), seed=params.seed)
+        elif template == "central-composite":
+            alpha: float | str = params.alpha
+            if params.alpha not in ("rotatable", "face"):
+                try:
+                    alpha = float(params.alpha)
+                except ValueError as e:
+                    raise DoEError(
+                        f"--alpha must be 'rotatable', 'face', or a number, got {params.alpha!r}"
+                    ) from e
+            design = central_composite_design(
+                factors,
+                alpha=alpha,
+                center_points=params.center_points if params.center_points else 4,
+                within_bounds=params.within_bounds,
+                seed=params.seed,
+            )
+            template_args["alpha"] = params.alpha
+            template_args["within_bounds"] = bool(params.within_bounds)
+            template_args["center_points"] = int(params.center_points or 4)
+        elif template == "box-behnken":
+            design = box_behnken_design(
+                factors,
+                center_points=params.center_points if params.center_points else 3,
+                seed=params.seed,
+            )
+            template_args["center_points"] = int(params.center_points or 3)
+        else:  # pragma: no cover - do_new only routes the three names here
+            raise DoEError(f"unknown classical template {template!r}")
+    except ValueError as e:
+        # The generators validate factor counts and bounds; surface those as
+        # ordinary CLI failures rather than tracebacks.
+        raise DoEError(str(e)) from e
+
+    parameter_names = basis_parameter_names(params.basis, len(input_names))
+
+    wb = Workbook.create(
+        params.output,
+        template=template,
+        template_args=template_args,
+        input_specs=[InputSpec(n_, lb, ub) for n_, lb, ub in params.inputs],
+        criterion="classical",
+        measurement_error=params.measurement_error,
+        seed=params.seed,
+        response_name=params.response_name,
+        module_callable=None,
+        param_initial_guess=None,
+    )
+
+    designs = design.design_rows()
+    new_ids = wb.append_runs(1, designs)
+    wb.log(
+        "new",
+        {
+            "template": template,
+            "n": len(designs),
+            "basis": params.basis,
+            **{k: v for k, v in template_args.items() if k not in ("basis", "family")},
+        },
+    )
+    wb.save()
+
+    return {
+        "workbook_path": str(wb.path),
+        "template": template,
+        "module_callable": None,
+        "batch": 1,
+        "new_run_ids": new_ids,
+        "designs": [
+            {"run_id": rid, **{n: float(d[n]) for n in input_names}}
+            for rid, d in zip(new_ids, designs)
+        ],
+        "criterion": "classical",
+        "criterion_value": float("nan"),
+        "parameter_names": parameter_names,
+        "n_parameters": len(parameter_names),
+        "next_command": f"discopt doe status {wb.path}",
     }
 
 
@@ -1010,11 +1556,19 @@ def _cmd_new(args) -> int:
         degree=getattr(args, "degree", None),
         mixture_total=getattr(args, "mixture_total", None),
         module_callable=getattr(args, "module", None) if is_module else None,
-        param_initial_guess=dict(args.params or []) if is_module else {},
+        # --param carries the nominal values for both the --module escape hatch
+        # and the symbolic template; for symbolic it also fixes parameter order.
+        param_initial_guess=dict(getattr(args, "params", None) or []),
+        expression=getattr(args, "expr", None),
         levels=levels_dict,
         replicates=int(getattr(args, "replicates", 1) or 1),
         factor_pairs=factor_pairs,
         center_points=int(getattr(args, "center_points", 0) or 0),
+        basis=getattr(args, "basis", "quadratic") or "quadratic",
+        alpha=str(getattr(args, "alpha", "rotatable") or "rotatable"),
+        # --outside-bounds is the opt-in for the textbook CCD scaling; the
+        # default keeps every run inside the stated factor range.
+        within_bounds=not bool(getattr(args, "outside_bounds", False)),
         optimize_criterion=getattr(args, "optimize_criterion", "maximize") or "maximize",
         optimize_surrogate=getattr(args, "optimize_surrogate", "gp") or "gp",
         optimize_acquisition=(
@@ -1201,8 +1755,14 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
             "use `discopt.estimate.estimate_parameters` directly in Python."
         )
 
+    if template == "symbolic":
+        return _do_fit_symbolic(wb, completed)
+
     input_names = [s.name for s in wb.input_specs()]
-    parameter_names = wb.rebuild_experiment()[1]
+    # Derived from metadata rather than rebuild_experiment(): the fit below is
+    # plain OLS over _design_row, so it needs the name ordering but not a built
+    # model — and building one would drag in discopt.modeling for no benefit.
+    parameter_names = wb.parameter_names()
     sigma = wb.measurement_error()
     n_p = len(parameter_names)
     n_obs = len(completed)
@@ -1304,7 +1864,13 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
         "n_observations": n_obs,
         "objective": residual_ss,
         "log_det_fim": log_det_fim,
-        "next_command": f"discopt doe extend {wb.path} --n N",
+        # A classical design has no model to search against, so `extend` is
+        # rejected for it; point at the verb that does apply.
+        "next_command": (
+            f"discopt doe anova {wb.path}"
+            if template in _CLASSICAL_TEMPLATE_NAMES
+            else f"discopt doe extend {wb.path} --n N"
+        ),
     }
 
 
@@ -1436,47 +2002,10 @@ def _compute_anova(
     return coefficients, anova_rows, fit_summary
 
 
-def _design_row(
-    template: str,
-    template_args: dict[str, Any],
-    parameter_names: list[str],
-    input_names: list[str],
-    row: dict[str, Any],
-) -> np.ndarray:
-    """Return the design-matrix row for one completed run.
-
-    The entries are the basis functions of each parameter coefficient,
-    evaluated at this run's inputs. The order matches ``parameter_names``.
-    """
-    xs = {nm: float(row[nm]) for nm in input_names}
-    if template == "linear":
-        return np.array([1.0] + [xs[nm] for nm in input_names], dtype=np.float64)
-    if template == "polynomial-1d":
-        x = xs[input_names[0]]
-        degree = int(template_args.get("degree", len(parameter_names) - 1))
-        return np.array([x**j for j in range(degree + 1)], dtype=np.float64)
-    if template in ("response-surface-2d", "response-surface-3d"):
-        n = len(input_names)
-        vals = [xs[nm] for nm in input_names]
-        cross = [vals[i] * vals[j] for i in range(n) for j in range(i + 1, n)]
-        return np.array([1.0, *vals, *[v * v for v in vals], *cross], dtype=np.float64)
-    if template in ("scheffe-linear", "scheffe-quadratic", "scheffe-special-cubic"):
-        vals = [xs[nm] for nm in input_names]
-        q = len(input_names)
-        terms: list[float] = list(vals)
-        if template == "scheffe-linear":
-            return np.array(terms, dtype=np.float64)
-        terms.extend(vals[i] * vals[j] for i in range(q) for j in range(i + 1, q))
-        if template == "scheffe-quadratic":
-            return np.array(terms, dtype=np.float64)
-        terms.extend(
-            vals[i] * vals[j] * vals[k]
-            for i in range(q)
-            for j in range(i + 1, q)
-            for k in range(j + 1, q)
-        )
-        return np.array(terms, dtype=np.float64)
-    raise DoEError(f"unknown template {template!r}")
+# The basis-row expansion moved to discopt.doe.linear_design, where it does
+# double duty as the sensitivity Jacobian for jax-free optimal design. Kept
+# under the original private name: the Streamlit GUI imports it from here.
+_design_row = design_row
 
 
 def _cmd_fit(args) -> int:
@@ -1605,9 +2134,12 @@ def _cmd_anova(args) -> int:
 
 
 def do_extend(params: ExtendParams) -> dict[str, Any]:
+    wb = Workbook.open(params.workbook)
+    if wb.template_name() == "symbolic":
+        return _do_extend_symbolic(wb, params)
+
     from discopt.doe import batch_optimal_experiment
 
-    wb = Workbook.open(params.workbook)
     experiment, parameter_names = wb.rebuild_experiment()
     input_specs = wb.input_specs()
     input_names = [s.name for s in input_specs]
@@ -1880,7 +2412,7 @@ def add_subparser(subparsers) -> None:
     p_new = doe_sub.add_parser("new", help="Create a workbook with N optimal initial runs.")
     new_sub = p_new.add_subparsers(dest="template", metavar="<template>", required=True)
 
-    from discopt.doe.templates import COMBINATORIAL_TEMPLATES
+    from discopt.doe.templates import CLASSICAL_TEMPLATES, COMBINATORIAL_TEMPLATES
 
     for tmpl in TEMPLATE_NAMES:
         sp = new_sub.add_parser(tmpl, help=_TEMPLATE_DESCRIPTIONS[tmpl])
@@ -1926,6 +2458,65 @@ def add_subparser(subparsers) -> None:
                 required=True,
                 help="Design factor as NAME:LB:UB (repeatable).",
             )
+        if tmpl == "symbolic":
+            sp.add_argument(
+                "--expr",
+                required=True,
+                metavar="EXPRESSION",
+                help=(
+                    "Response formula over your --param and --input names, e.g. "
+                    "'k0 * exp(-Ea / (8.314 * T))'."
+                ),
+            )
+            sp.add_argument(
+                "--param",
+                dest="params",
+                action="append",
+                type=_parse_kv_float,
+                required=True,
+                metavar="NAME=VALUE",
+                help=(
+                    "Unknown parameter and its nominal value (repeatable). The order "
+                    "given fixes the parameter order; the values centre the design, "
+                    "which for a nonlinear model is only locally optimal."
+                ),
+            )
+        if tmpl in CLASSICAL_TEMPLATES:
+            sp.add_argument(
+                "--basis",
+                default="linear" if tmpl == "latin-hypercube" else "quadratic",
+                choices=("linear", "quadratic"),
+                help=(
+                    "Regression model `discopt doe fit` will estimate from the "
+                    "completed runs. Defaults to 'quadratic' for the response-surface "
+                    "designs and 'linear' for a Latin hypercube."
+                ),
+            )
+        if tmpl in ("central-composite", "box-behnken"):
+            sp.add_argument(
+                "--center-points",
+                type=int,
+                default=0,
+                help=(
+                    "Replicated centre runs, for the pure-error estimate "
+                    "(default 4 for central-composite, 3 for box-behnken)."
+                ),
+            )
+        if tmpl == "central-composite":
+            sp.add_argument(
+                "--alpha",
+                default="rotatable",
+                help=("Axial distance in coded units: 'rotatable' (default), 'face', or a number."),
+            )
+            sp.add_argument(
+                "--outside-bounds",
+                action="store_true",
+                help=(
+                    "Use the textbook scaling where LB/UB are the factorial corners "
+                    "and the axial points fall outside them. By default the axial "
+                    "points land on LB/UB so every run stays within range."
+                ),
+            )
         if tmpl == "polynomial-1d":
             sp.add_argument("--degree", type=int, required=True, help="Polynomial degree (>= 1).")
         if tmpl == "optimize":
@@ -1953,13 +2544,24 @@ def add_subparser(subparsers) -> None:
                 help="Required sum of the component values (default 1.0).",
             )
         _add_common_new_options(sp)
-        # --n applies to parametric + optimize (initial batch), not to
-        # combinatorial designs (run count = levels/factors x replicates). The
-        # optimize template needs >= 2 seed points to fit a surrogate.
-        if tmpl not in COMBINATORIAL_TEMPLATES:
-            _add_run_count_option(sp, default=4 if tmpl == "optimize" else 1)
+        # --n applies to parametric + optimize (initial batch) + latin-hypercube,
+        # not to combinatorial designs (run count = levels/factors x replicates)
+        # nor to central-composite / box-behnken, whose run count follows from
+        # the factor count and centre points. The optimize template needs >= 2
+        # seed points to fit a surrogate.
+        if tmpl not in COMBINATORIAL_TEMPLATES and tmpl not in (
+            "central-composite",
+            "box-behnken",
+        ):
+            _add_run_count_option(
+                sp, default=4 if tmpl == "optimize" else (8 if tmpl == "latin-hypercube" else 1)
+            )
         # --criterion / --n-starts govern the parametric D-optimal search only.
-        if tmpl not in COMBINATORIAL_TEMPLATES and tmpl != "optimize":
+        if (
+            tmpl not in COMBINATORIAL_TEMPLATES
+            and tmpl not in CLASSICAL_TEMPLATES
+            and tmpl != "optimize"
+        ):
             _add_design_search_options(sp)
         sp.set_defaults(doe_func=_cmd_new, _is_module=False, bounds=None, params=None, module=None)
 

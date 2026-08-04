@@ -3,6 +3,7 @@ root: intro
 parts:
   - caption: Getting Started
     chapters:
+      - file: browser-app
       - file: notebooks/tutorial_doe
       - file: notebooks/doe_cli
       - file: notebooks/tutorial_batch_doe

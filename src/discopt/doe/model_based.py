@@ -202,8 +202,9 @@ class ParametricSurrogate:
     # ------------------------------------------------------------------
 
     def _compile(self) -> None:
-        import jax
-        import jax.numpy as jnp
+        from discopt.doe.fim import _require_jax
+
+        jax, jnp = _require_jax()
 
         from discopt.parametric import compile_expression, flatten_params, variable_slices
 
@@ -272,7 +273,9 @@ class ParametricSurrogate:
 
         Computes the FIM and parameter covariance at the fitted point.
         """
-        import jax.numpy as jnp
+        from discopt.doe.fim import _require_jax
+
+        _, jnp = _require_jax()
         from scipy.optimize import least_squares
 
         X = np.asarray(X, dtype=float)
@@ -333,7 +336,9 @@ class ParametricSurrogate:
 
     def predict(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Posterior response mean and std at the candidate designs."""
-        import jax.numpy as jnp
+        from discopt.doe.fim import _require_jax
+
+        _, jnp = _require_jax()
 
         if self.parameters_ is None or self.covariance_ is None:
             raise RuntimeError("call fit() before predict()")

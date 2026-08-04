@@ -26,31 +26,20 @@ Three complementary entry points:
 Parameter estimation (`discopt.estimate`) lives in the base package; both
 share the same `Experiment` interface.
 
+## Try it without installing anything
+
+**[jkitchin.github.io/discopt-doe/app/](https://jkitchin.github.io/discopt-doe/app/)**
+runs the design workflow in your browser — pick a design, download the
+spreadsheet, fill in your measurements, upload it back for fitting and ANOVA.
+It is Pyodide running the real package, not a reimplementation, and the
+workbooks it produces are the same ones the CLI reads. Nothing leaves your
+machine. See [docs/browser-app.md](docs/browser-app.md).
+
 ## Install
 
-Its `discopt>=0.6` dependency is on PyPI, so both a from-source install and a
-direct git install resolve without any extra steps.
-
-> **Not yet on PyPI:** `discopt-doe` itself has not been published yet, so the
-> plain `pip install discopt-doe` form below works only once the first release
-> is cut. Until then, install from source or git.
-
-Recommended (uv):
-
-```bash
-git clone https://github.com/jkitchin/discopt-doe
-cd discopt-doe
-uv sync --all-extras        # core + gui + ml + dev
-```
-
-With pip, straight from git:
-
-```bash
-pip install "git+https://github.com/jkitchin/discopt-doe"          # core
-pip install "git+https://github.com/jkitchin/discopt-doe#egg=discopt-doe[gui]"  # + GUI
-```
-
-Once `discopt-doe` is published, the usual form applies:
+Both `discopt-doe` and its `discopt` dependency are published on
+[PyPI](https://pypi.org/project/discopt-doe/), so a plain pip install resolves
+everything:
 
 ```bash
 pip install discopt-doe            # core
@@ -58,8 +47,23 @@ pip install "discopt-doe[gui]"     # + Streamlit workbook GUI
 pip install "discopt-doe[ml]"      # + scikit-learn surrogates
 ```
 
+Or with uv:
+
+```bash
+uv pip install "discopt-doe[gui]"
+```
+
 Requires `discopt>=0.6` (the first release with the public
-`discopt.parametric` API and the CLI plugin hook).
+`discopt.parametric` API and the CLI plugin hook); it is pulled in
+automatically.
+
+From source, to work on the package itself:
+
+```bash
+git clone https://github.com/jkitchin/discopt-doe
+cd discopt-doe
+uv sync --all-extras        # core + gui + ml + dev
+```
 
 ## Quick start
 
@@ -117,6 +121,38 @@ discopt doe extend run.xlsx --n 4     # design the next batch
 discopt doe optimize run.xlsx        # one active-learning round (optimize template)
 discopt doe gui run.xlsx              # Streamlit GUI (needs [gui] extra)
 ```
+
+Classical designs over a continuous factor box — space-filling, or built for a
+quadratic response surface — need no model up front:
+
+```bash
+discopt doe new latin-hypercube   -o lhs.xlsx --input T:300:400 --input P:1:5 --n 12
+discopt doe new central-composite -o ccd.xlsx --input T:300:400 --input P:1:5
+discopt doe new box-behnken       -o bbd.xlsx --input T:300:400 --input P:1:5 --input F:0.1:2
+```
+
+`fit` estimates the recorded basis (`--basis linear|quadratic`) by least
+squares, so a Box-Behnken or central-composite campaign goes straight from
+`new` to `fit` with no model definition. Central-composite keeps every run
+inside the bounds you give by default; pass `--outside-bounds` for the textbook
+scaling where the axial points sit beyond them.
+
+For a model of your own — including one nonlinear in its parameters — write the
+response and its parameters directly:
+
+```bash
+discopt doe new symbolic -o arrhenius.xlsx \
+    --expr "k0 * exp(-Ea / (8.314 * T))" \
+    --param k0=2.0 --param Ea=5000 \
+    --input T:300:500 --n 6
+discopt doe fit arrhenius.xlsx        # nonlinear least squares, analytic Jacobian
+discopt doe extend arrhenius.xlsx --n 4   # next batch, re-centred on the fit
+```
+
+The expression is differentiated with sympy, so ∂y/∂θ is exact rather than a
+finite difference. A nonlinear model's information depends on its parameter
+values, so `--param` gives the nominal point the design is built around; `fit`
+then `extend` re-centres it on what the data say.
 
 ## GUI
 

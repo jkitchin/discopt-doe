@@ -48,3 +48,30 @@ jobs:
       # -W turns Sphinx warnings (broken cross-refs, missing citations) into
       # build failures so doc rot is caught in CI.
       - run: uv run jupyter-book build docs/ -W
+
+  # The browser app, exercised in real WebAssembly. This is the only job where
+  # neither the base `discopt` package nor jax is installed — which is the whole
+  # point: it is the one place a stray module-level import of either can be
+  # caught. tests/test_import_hygiene.py simulates the same conditions in-process
+  # and runs everywhere; this proves the real thing works end to end.
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: uv sync --python 3.12
+      - name: Build the browser bundle
+        run: uv run python scripts/build_web_app.py -o docs/_build/web
+      - name: Install the test harness
+        run: npm ci
+        working-directory: web
+      # Fetches the numpy/scipy wheels from the Pyodide CDN and openpyxl from
+      # PyPI on first run.
+      - name: Run the WebAssembly end-to-end test
+        run: node test-wasm.mjs ../docs/_build/web
+        working-directory: web

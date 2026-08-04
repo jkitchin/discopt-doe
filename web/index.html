@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>discopt-doe — design experiments in your browser</title>
+<meta name="description" content="Generate a design of experiments spreadsheet, fill it in, and upload it back for fitting and ANOVA. Runs entirely in your browser.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="wrap">
+    <h1>discopt&#8209;doe</h1>
+    <p class="tagline">Design an experiment, download the spreadsheet, fill it in, upload it back.
+      Everything runs in your browser — nothing is uploaded anywhere.</p>
+    <p id="boot-status" class="boot" role="status" aria-live="polite">
+      <span class="spinner" aria-hidden="true"></span><span id="boot-text">Starting Python…</span>
+    </p>
+  </div>
+</header>
+
+<main class="wrap" id="main" hidden>
+
+  <!-- ── Step 1 ─────────────────────────────────────────────── -->
+  <section class="card" aria-labelledby="h-design">
+    <h2 id="h-design"><span class="step">1</span> Design</h2>
+
+    <div class="field">
+      <label for="template">Design type</label>
+      <select id="template"></select>
+      <p id="template-desc" class="hint"></p>
+    </div>
+
+    <div class="field" id="model-field" hidden>
+      <label for="expression">Response model</label>
+      <textarea id="expression" rows="2" spellcheck="false"
+        placeholder="k0 * exp(-Ea / (8.314 * T))"></textarea>
+      <p class="hint">
+        Write the response in terms of your parameters and factors below.
+        Allowed: <code>+ - * / **</code>, numbers, <code>pi</code>, <code>E</code>, and
+        <code>exp log ln log10 sqrt sin cos tan asin acos atan sinh cosh tanh abs erf</code>.
+      </p>
+      <div id="model-feedback" class="feedback" role="status" aria-live="polite"></div>
+
+      <div class="row-between" style="margin-top:1rem">
+        <label id="params-label" for="params">Parameters and starting values</label>
+        <button type="button" id="add-param" class="ghost">+ Add parameter</button>
+      </div>
+      <table class="grid" id="params">
+        <thead><tr><th>Name</th><th>Nominal value</th><th class="drop-col"></th></tr></thead>
+        <tbody id="params-body"></tbody>
+      </table>
+      <p class="hint">
+        A nonlinear model's information depends on its parameter values, so the
+        design is only optimal <em>around</em> these. Start with your best guess,
+        run the batch, fit, then use the CLI's <code>extend</code> to re-centre on
+        the fitted values.
+      </p>
+    </div>
+
+    <div class="field">
+      <div class="row-between">
+        <label id="factors-label" for="factors">Factors</label>
+        <button type="button" id="add-factor" class="ghost">+ Add factor</button>
+      </div>
+      <table class="grid" id="factors">
+        <thead><tr id="factors-head"></tr></thead>
+        <tbody id="factors-body"></tbody>
+      </table>
+      <p id="factors-hint" class="hint"></p>
+    </div>
+
+    <div class="field">
+      <label for="opts">Options</label>
+      <div class="opts" id="opts"></div>
+    </div>
+
+    <div class="actions">
+      <button type="button" id="generate" class="primary">Generate design</button>
+      <button type="button" id="download-design" class="secondary" hidden>Download workbook</button>
+    </div>
+
+    <div id="design-error" class="alert" role="alert" hidden></div>
+    <div id="design-result" hidden>
+      <p class="summary" id="design-summary"></p>
+      <div class="scroll"><table class="grid data" id="design-table"></table></div>
+      <p class="hint next-step">
+        Open the workbook, type your measured responses into the response column,
+        save it, then upload it in step&nbsp;2.
+      </p>
+    </div>
+  </section>
+
+  <!-- ── Step 2 ─────────────────────────────────────────────── -->
+  <section class="card" aria-labelledby="h-analyze">
+    <h2 id="h-analyze"><span class="step">2</span> Analyze</h2>
+
+    <div class="field">
+      <label for="upload">Filled-in workbook</label>
+      <div class="drop" id="drop">
+        <input type="file" id="upload" accept=".xlsx">
+        <p class="hint">Drop a <code>.xlsx</code> here, or choose a file. It never leaves your
+          computer.</p>
+      </div>
+      <p id="upload-name" class="hint" hidden></p>
+    </div>
+
+    <div class="actions">
+      <button type="button" id="fit" class="primary" disabled>Fit model</button>
+      <button type="button" id="anova" class="secondary" disabled>ANOVA</button>
+      <button type="button" id="download-analyzed" class="secondary" hidden>Download updated
+        workbook</button>
+    </div>
+
+    <div id="analyze-error" class="alert" role="alert" hidden></div>
+    <div id="analyze-result" hidden></div>
+  </section>
+
+</main>
+
+<footer class="wrap">
+  <p id="env" class="hint"></p>
+  <p class="hint">
+    <a href="https://github.com/jkitchin/discopt-doe">Source</a> ·
+    <a href="https://jkitchin.github.io/discopt-doe/">Docs</a> ·
+    <a href="https://pypi.org/project/discopt-doe/">PyPI</a>
+    — the same designs are available offline via <code>pip install discopt-doe</code>
+    and the <code>discopt doe</code> command line.
+  </p>
+</footer>
+
+<script src="app.js" type="module"></script>
+</body>
+</html>

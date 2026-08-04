@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Browser app** (`web/`, published at `/app/` alongside the docs): the design →
+  download → fill in → upload → fit workflow, running entirely client-side on
+  Pyodide with no server and no install. Workbooks round-trip with the CLI.
+  Build it locally with `python scripts/build_web_app.py --serve`.
+- **Classical designs** (`discopt.doe.classical`): `latin_hypercube_design`,
+  `central_composite_design`, and `box_behnken_design`, plus matching
+  `latin-hypercube`, `central-composite`, and `box-behnken` CLI templates. These
+  record a regression basis (`--basis linear|quadratic`) rather than a model, so
+  `discopt doe fit` works on them directly — including at factor counts the
+  `response-surface-2d`/`-3d` templates do not cover.
+- **`discopt.doe.linear_design`**: closed-form optimal design for models linear
+  in their parameters. Every built-in template is of that form, so the Fisher
+  information is exactly `XᵀX/σ²` and needs no autodiff; the test suite pins the
+  result against the jax path to machine precision. `NewParams.use_linear_design`
+  opts `do_new` into it. This is what lets model-based optimal design run where
+  jax cannot be installed.
+- `Workbook.parameter_names()`, which derives the parameter ordering from
+  template metadata without constructing an `Experiment`.
+- **User-defined models** (`discopt.doe.symbolic`) and a matching `symbolic` CLI
+  template: write the response expression, name its parameters, and it is
+  differentiated with sympy to design for it. Works for models nonlinear in
+  their parameters, where the closed-form linear FIM does not apply — the tests
+  pin the symbolic Jacobian against jax autodiff on Arrhenius,
+  Michaelis-Menten, exponential-decay, and two-factor models. `fit` uses
+  nonlinear least squares with that analytic Jacobian, and `extend` re-centres
+  the next batch on the fitted values. The browser app gains a model editor
+  that shows the parsed model and its derivatives as you type.
+- `linear_design.batch_design_from_basis`, the greedy batch search factored out
+  so it can be driven by any Jacobian-row provider — a basis function or a
+  sympy derivative.
+- `sympy` is now a runtime dependency (it has a WebAssembly build; jax does not).
+
+### Changed
+- `discopt.doe` now resolves its re-exports lazily (PEP 562). `from discopt.doe
+  import X` is unchanged, but importing the package no longer pulls all 18
+  submodules — and with them `discopt.estimate`, scipy, and the jax entry
+  points. Submodules that do not need the base package or jax (`anova`,
+  `classical`, `cli`, `latin`, `linear_design`, `screening`, `templates`,
+  `workbook`) now import without either present, which `tests/test_import_hygiene.py`
+  enforces and a new `wasm` CI job proves end to end.
+- `discopt doe fit` derives its parameter ordering from metadata instead of
+  rebuilding the `Experiment`, so it no longer requires `discopt.modeling`.
+- Missing jax now raises an actionable error naming the alternatives, rather
+  than a bare `ModuleNotFoundError` from inside a Jacobian call.
+
+### Security
+- A campaign workbook stores a user-defined model as an *expression*, never as
+  executable source, and reading one back never calls `eval`:
+  `discopt.doe.symbolic.parse_expression` walks Python's AST and rebuilds the
+  sympy tree node by node, rejecting attribute access, subscripts, lambdas,
+  comprehensions, and any call outside a fixed function list. Opening a
+  workbook someone sent you therefore executes none of their code.
+
 ## [0.2.0] - 2026-07-12
 
 First public release on PyPI.

@@ -28,6 +28,13 @@ jobs:
       - run: uv sync --python 3.12 --all-extras
       # -W turns Sphinx warnings (broken refs, missing citations) into failures.
       - run: uv run jupyter-book build docs/ -W
+
+      # The browser app ships alongside the docs at /app/. It loads Pyodide from
+      # the CDN but installs *this commit's* wheel, so the published app always
+      # matches the published docs rather than whatever is on PyPI.
+      - name: Build the browser app
+        run: uv run python scripts/build_web_app.py -o docs/_build/html/app
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: docs/_build/html

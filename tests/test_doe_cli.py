@@ -71,6 +71,10 @@ def test_templates_lists_all():
         "graeco-latin",
         "hyper-graeco-latin",
         "factorial-2level",
+        "latin-hypercube",
+        "central-composite",
+        "box-behnken",
+        "symbolic",
         "optimize",
     ]
 
