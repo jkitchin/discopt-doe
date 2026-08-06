@@ -52,6 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rebuilding the `Experiment`, so it no longer requires `discopt.modeling`.
 - Missing jax now raises an actionable error naming the alternatives, rather
   than a bare `ModuleNotFoundError` from inside a Jacobian call.
+- Verified against `discopt` 0.7.0 and refreshed `uv.lock` to it (pulls `pounce-solver`
+  0.9.0). The 0.7 release changes solver internals only — the `discopt.estimate`,
+  `discopt.parametric`, `discopt.modeling` and `discopt.cli` surfaces this package
+  consumes are unchanged — so the `discopt>=0.6` floor still holds and no code changes
+  were needed.
 
 ### Security
 - A campaign workbook stores a user-defined model as an *expression*, never as
