@@ -31,7 +31,7 @@ import math
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Sequence, cast
 
 import numpy as np
 
@@ -43,10 +43,127 @@ from discopt.doe.templates import (
 from discopt.doe.linear_design import design_row
 from discopt.doe.workbook import InputSpec, Workbook, _load_module_callable
 
-# Tiny ridge added to the prior FIM whenever no fitted prior exists.
-# Keeps log-det-FIM finite for the very first batch of a linear-in-
-# parameters template (rank-1 single-design FIM is otherwise singular).
+# Ridge added to the prior FIM whenever no fitted prior exists. Keeps
+# log-det-FIM finite for the very first batch of a linear-in-parameters
+# template (a rank-1 single-design FIM is otherwise singular). It is a
+# *fraction of the information already present*, never an absolute floor —
+# see _scaled_ridge for why that distinction decides which design you get.
 _RIDGE = 1e-6
+
+# Points spanning the factor box, used only to measure how large the
+# information in each parameter direction typically is.
+_RIDGE_SAMPLES = 5
+
+
+def _scaled_ridge(reference: Any, n_p: int) -> np.ndarray:
+    """Return the ridge to add to a FIM, scaled to the information in it.
+
+    As an *absolute* constant, ``_RIDGE`` does more than keep the log-det
+    finite: it silently outvotes the data whenever a parameter's information
+    is smaller than 1e-6 in its own units. That is not exotic — an Arrhenius
+    activation energy in J/mol has ``∂y/∂Ea ~ 1e-4``, so its information is
+    ~1e-8 and the ridge is a hundred times larger than the thing it is
+    supposed to nudge. The search then maximizes the ridge's criterion rather
+    than the design's: for ``k0·exp(-Ea/RT)`` over T ∈ [300, 500] K at σ = 1,
+    a 6-run design collapsed onto a single temperature scored *higher*
+    (log-det −14.43) than the correct two-point design (−14.93), and the
+    returned design could not identify either parameter.
+
+    Scaling each direction's ridge to the information available in that
+    direction keeps the guard and removes the vote: 1e-6 of a quantity is
+    negligible next to it whatever its units. Directions with no usable
+    reference (zero, NaN, or no reference at all) keep the old absolute value,
+    which is the best available answer when there is nothing to scale to.
+    """
+    ridge = np.full(n_p, _RIDGE, dtype=np.float64)
+    if reference is not None:
+        diag = np.abs(np.diag(np.asarray(reference, dtype=np.float64)))
+        usable = np.isfinite(diag) & (diag > 0.0)
+        ridge[usable] = _RIDGE * diag[usable]
+    return np.diag(ridge)
+
+
+def _ridge_sample_designs(
+    inputs: Sequence[tuple[str, float, float]], n: int = _RIDGE_SAMPLES
+) -> list[dict[str, float]]:
+    """Design points spanning the factor box, for scale reference only.
+
+    Walks the box diagonal, so every factor is seen across its whole range.
+    These are never returned to the user and need not be feasible under a
+    mixture constraint — they exist to answer "how big is the information
+    around here?", and :func:`_scaled_ridge` falls back to the absolute ridge
+    for any direction where the answer comes out zero.
+    """
+    return [{name: lo + t * (hi - lo) for name, lo, hi in inputs} for t in np.linspace(0.0, 1.0, n)]
+
+
+def _basis_reference_fim(
+    basis: Any, inputs: Sequence[tuple[str, float, float]], sigma: float
+) -> np.ndarray | None:
+    """Information a basis carries across the factor box, for ridge scaling.
+
+    Same ``f(x) -> ∂y/∂θ`` contract the design search itself uses, so this
+    measures the very quantity the ridge has to stay below. Returns None if the
+    basis cannot be evaluated, leaving the absolute ridge in place.
+    """
+    from discopt.doe.linear_design import linear_fim
+
+    names = [name for name, _, _ in inputs]
+    try:
+        rows = [
+            np.asarray(basis([point[name] for name in names]), dtype=np.float64)
+            for point in _ridge_sample_designs(inputs)
+        ]
+        return linear_fim(np.vstack(rows), sigma)
+    except Exception:  # noqa: BLE001 - a scale hint is optional, never fatal
+        return None
+
+
+def _template_reference_fim(
+    template: str,
+    template_args: dict[str, Any],
+    parameter_names: Sequence[str],
+    input_names: Sequence[str],
+    inputs: Sequence[tuple[str, float, float]],
+    sigma: float,
+) -> np.ndarray | None:
+    """The same measurement as :func:`_basis_reference_fim`, for a template."""
+    from discopt.doe.linear_design import design_matrix, linear_fim
+
+    try:
+        X = design_matrix(
+            template,
+            template_args,
+            list(parameter_names),
+            list(input_names),
+            _ridge_sample_designs(inputs),
+        )
+        return linear_fim(X, sigma)
+    except Exception:  # noqa: BLE001 - a scale hint is optional, never fatal
+        return None
+
+
+def _experiment_reference_fim(
+    experiment: Any,
+    param_values: dict[str, float],
+    inputs: Sequence[tuple[str, float, float]],
+) -> np.ndarray | None:
+    """The same measurement again, through the autodiff FIM.
+
+    A module callable can fail anywhere in the box (or be expensive), so
+    anything that goes wrong here simply forfeits the scale hint.
+    """
+    from discopt.doe.fim import compute_fim
+
+    try:
+        total = None
+        for design in _ridge_sample_designs(inputs):
+            fim = np.asarray(compute_fim(experiment, param_values, design).fim, dtype=np.float64)
+            total = fim if total is None else total + fim
+        return total
+    except Exception:  # noqa: BLE001 - a scale hint is optional, never fatal
+        return None
+
 
 _DEFAULT_CRITERION = "determinant"
 _CRITERION_CHOICES = ("determinant", "trace", "min_eigenvalue", "condition_number")
@@ -271,7 +388,10 @@ def _mixture_constraints(
     """
     if not template or not template.startswith("scheffe-"):
         return None, None
-    from discopt.doe import project_to_simplex, sum_constraint
+    # From discopt.doe.simplex, not discopt.doe: the package-level name resolves
+    # through discopt.doe.design, which needs the FIM machinery and the base
+    # package. Every mixture design in the browser died on that import.
+    from discopt.doe.simplex import project_to_simplex, sum_constraint
 
     components = [name for name, _, _ in inputs]
     bounds = {name: (lb, ub) for name, lb, ub in inputs}
@@ -333,7 +453,7 @@ def _cumulative_fim_from_completed(
     from discopt.doe.fim import compute_fim
 
     n_p = len(parameter_names)
-    fim = _RIDGE * np.eye(n_p)
+    fim = np.zeros((n_p, n_p), dtype=np.float64)
     if param_values is None:
         param_values = {name: 0.0 for name in parameter_names}
     for row in completed_runs:
@@ -347,7 +467,9 @@ def _cumulative_fim_from_completed(
             )
             continue
         fim = fim + np.asarray(r.fim)
-    return fim
+    # Ridge last, scaled to what the completed runs actually carry — the sum
+    # is its own best scale reference.
+    return fim + _scaled_ridge(fim, n_p)
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -546,7 +668,6 @@ def do_new(params: NewParams) -> dict[str, Any]:
     input_names = [s[0] for s in params.inputs]
 
     n_p = len(parameter_names)
-    prior_fim = _RIDGE * np.eye(n_p)
 
     # For module-callable (likely nonlinear) experiments, use any
     # supplied parameter guesses; for templates, zeros are fine (FIM
@@ -555,6 +676,10 @@ def do_new(params: NewParams) -> dict[str, Any]:
         {name: float(params.param_initial_guess.get(name, 0.0)) for name in parameter_names}
         if params.module_callable
         else {name: 0.0 for name in parameter_names}
+    )
+
+    prior_fim = _scaled_ridge(
+        _experiment_reference_fim(experiment, param_values, params.inputs), n_p
     )
 
     eq_cons, proj = _mixture_constraints(params.template, params.inputs, params.mixture_total)
@@ -779,6 +904,24 @@ def _do_fit_symbolic(wb: Workbook, completed: list[dict[str, Any]]) -> dict[str,
         {n: (out["ci_lower"][n], out["ci_upper"][n]) for n in names},
     )
     wb.write_fim(out["fim"], names)
+
+    # The same regression statistics the linear path reports, so a user-defined
+    # model is not the one kind of fit that cannot tell you whether its
+    # coefficients are distinguishable from zero. For a nonlinear model these
+    # are the asymptotic (Wald) forms — the footing the confidence intervals
+    # above already stand on.
+    response = wb.response_name()
+    coefficients, anova_rows, fit_summary = _compute_anova(
+        y=np.array([float(r[response]) for r in completed], dtype=np.float64),
+        beta=np.array([out["estimates"][n] for n in names], dtype=np.float64),
+        residual_ss=float(out["residual_sum_of_squares"]),
+        std_errs=np.array([out["std_errors"][n] for n in names], dtype=np.float64),
+        parameter_names=list(names),
+        n_obs=int(out["n_observations"]),
+        n_p=len(names),
+        sigma=float(model.measurement_error),
+    )
+    wb.write_anova(coefficients=coefficients, anova_rows=anova_rows, fit_summary=fit_summary)
     wb.log(
         "fit",
         {
@@ -807,6 +950,9 @@ def _do_fit_symbolic(wb: Workbook, completed: list[dict[str, Any]]) -> dict[str,
         "n_observations": out["n_observations"],
         "objective": out["residual_sum_of_squares"],
         "log_det_fim": log_det,
+        "coefficients": coefficients,
+        "regression_anova": anova_rows,
+        "summary": dict(fit_summary),
         "expression": model.source,
         "converged": out["success"],
         "solver_message": out["message"],
@@ -844,10 +990,21 @@ def _do_extend_symbolic(wb: Workbook, params: ExtendParams) -> dict[str, Any]:
             "parameter guess rather than on measured data."
         )
 
-    prior = _RIDGE * np.eye(n_p)
+    # With completed runs the information they carry is both the prior and its
+    # own scale reference; without them, fall back to sampling the box.
     if completed:
         designs_done = [{n: float(r[n]) for n in model.input_names} for r in completed]
-        prior = prior + model.fim(theta, designs_done)
+        collected = model.fim(theta, designs_done)
+        prior = collected + _scaled_ridge(collected, n_p)
+    else:
+        prior = _scaled_ridge(
+            _basis_reference_fim(
+                basis_evaluator(model, theta),
+                [(s.name, s.lb, s.ub) for s in specs],
+                wb.measurement_error(),
+            ),
+            n_p,
+        )
 
     batch_idx = wb.next_batch_index()
     try:
@@ -941,16 +1098,19 @@ def _do_new_symbolic(params: NewParams) -> dict[str, Any]:
             f"identifiable; got --n {params.n}"
         )
 
+    basis = basis_evaluator(model, nominal)
     try:
         batch = batch_design_from_basis(
-            basis_evaluator(model, nominal),
+            basis,
             int(params.n),
             parameter_names=list(model.parameter_names),
             input_names=input_names,
             design_bounds=_design_bounds(params.inputs),
             measurement_error=params.measurement_error,
             criterion=params.criterion,
-            prior_fim=_RIDGE * np.eye(n_p),
+            prior_fim=_scaled_ridge(
+                _basis_reference_fim(basis, params.inputs, params.measurement_error), n_p
+            ),
             n_starts=params.n_starts,
             seed=params.seed,
         )
@@ -1051,8 +1211,20 @@ def _do_new_linear(params: NewParams) -> dict[str, Any]:
             # The same ridge the autodiff path seeds (see the parametric branch
             # of do_new). It keeps the FIM non-singular from the first round, so
             # the requested criterion is well-posed for every pick rather than
-            # only once the design has accumulated full rank.
-            prior_fim=_RIDGE * np.eye(len(parameter_names)),
+            # only once the design has accumulated full rank — and it is scaled
+            # to the information in each direction so it cannot decide the
+            # design (see _scaled_ridge).
+            prior_fim=_scaled_ridge(
+                _template_reference_fim(
+                    template,
+                    template_args,
+                    parameter_names,
+                    input_names,
+                    params.inputs,
+                    params.measurement_error,
+                ),
+                len(parameter_names),
+            ),
             equality_constraints=eq_cons or None,
             feasible_projection=proj,
             n_starts=params.n_starts,
@@ -1821,14 +1993,15 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
     # FIM = XᵀX / σ² is the design's information about the parameters
     # under the user-declared measurement_error. Use the declared σ
     # (not σ̂) so the prior FIM reflects design quality rather than fit
-    # residuals.
-    cum_fim = (X.T @ X) / (sigma**2) + _RIDGE * np.eye(n_p)
+    # residuals. This is what a later `extend` reads back as its prior, so the
+    # ridge has to stay negligible against it (see _scaled_ridge).
+    information = (X.T @ X) / (sigma**2)
+    cum_fim = information + _scaled_ridge(information, n_p)
 
     wb.write_parameters(parameter_names, estimates, std_errors, cis)
     wb.write_fim(cum_fim, parameter_names)
     coefficients, anova_rows, fit_summary = _compute_anova(
         y=y,
-        X=X,
         beta=beta,
         residual_ss=residual_ss,
         std_errs=std_errs,
@@ -1864,6 +2037,16 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
         "n_observations": n_obs,
         "objective": residual_ss,
         "log_det_fim": log_det_fim,
+        # The regression statistics that already go into the workbook's ANOVA
+        # sheet, returned as well: whether a coefficient is distinguishable
+        # from zero is the question a fit is usually asked, and a caller that
+        # only sees `parameters` has to recompute the t-tests to answer it.
+        # `regression_anova` decomposes the response the *model* explains,
+        # which is a different question from `do_anova`'s comparison of
+        # factor-level means and is the right one for a continuous design.
+        "coefficients": coefficients,
+        "regression_anova": anova_rows,
+        "summary": dict(fit_summary),
         # A classical design has no model to search against, so `extend` is
         # rejected for it; point at the verb that does apply.
         "next_command": (
@@ -1877,7 +2060,6 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
 def _compute_anova(
     *,
     y: np.ndarray,
-    X: np.ndarray,
     beta: np.ndarray,
     residual_ss: float,
     std_errs: np.ndarray,
@@ -1892,6 +2074,12 @@ def _compute_anova(
     template), so ``df_regression = n_p - 1``. Returns NaN-filled entries
     for fields that aren't statistically meaningful (e.g. when
     ``n_obs <= n_p``).
+
+    Everything here is a function of the fitted values and their standard
+    errors, never of the design matrix, which is what lets the nonlinear fit
+    reuse it: for a model nonlinear in its parameters the same quantities are
+    the usual asymptotic (Wald) ones, on the same footing as the confidence
+    intervals that fit already reports.
     """
     from scipy.stats import f as f_dist
     from scipy.stats import t as t_dist

@@ -20,6 +20,8 @@ from discopt.doe.linear_design import (
     D_OPTIMAL,
     E_OPTIMAL,
     ME_OPTIMAL,
+    basis_parameter_names,
+    basis_terms,
     design_matrix,
     design_row,
     evaluate_criterion,
@@ -195,6 +197,60 @@ def test_linear_fim_rejects_nonpositive_sigma() -> None:
 def test_design_row_rejects_a_nonlinear_template() -> None:
     with pytest.raises(ValueError, match="unknown template"):
         design_row("module", {}, ["a"], ["x"], {"x": 1.0})
+
+
+# ────────────────────────── writing the model down ──────────────────────────
+
+
+@pytest.mark.parametrize("template, inputs, degree, points", TEMPLATE_CASES, ids=CASE_IDS)
+def test_basis_terms_reproduce_the_design_row(template, inputs, degree, points) -> None:
+    """The written-out terms evaluate to the columns they claim to describe.
+
+    ``basis_terms`` exists so a caller can print ``y = b0 + b1·T + b11·T²``
+    from metadata alone. That is a lie the moment its ordering drifts from
+    ``design_row``, so evaluate every term and compare.
+    """
+    _, names, _ = _setup(template, inputs, degree)
+    template_args = {"degree": degree} if degree is not None else {}
+    input_names = [i[0] for i in inputs]
+
+    terms = basis_terms(template, template_args, names, input_names)
+    assert len(terms) == len(names)
+
+    for point in points:
+        expected = design_row(template, template_args, names, input_names, point)
+        actual = [
+            float(np.prod([point[factor] ** power for factor, power in term.items()]))
+            for term in terms
+        ]
+        np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-14)
+
+
+@pytest.mark.parametrize("basis", ["linear", "quadratic"])
+def test_basis_terms_follow_a_classical_design_basis(basis) -> None:
+    """The classical generators carry their analysis basis in the metadata."""
+    names = basis_parameter_names(basis, 2)
+    args = {"basis": basis}
+    terms = basis_terms("box-behnken", args, names, ["T", "P"])
+    assert len(terms) == len(names)
+
+    point = {"T": 3.0, "P": 5.0}
+    expected = design_row("box-behnken", args, names, ["T", "P"], point)
+    actual = [float(np.prod([point[f] ** p for f, p in t.items()])) for t in terms]
+    np.testing.assert_allclose(actual, expected, rtol=1e-12)
+    assert terms[0] == {}, "the first column is the intercept"
+
+
+def test_basis_terms_name_the_intercept_and_the_interactions() -> None:
+    """Spot-check the shape a caller renders, not just the numbers."""
+    names = ["b0", "b1", "b2", "b11", "b22", "b12"]
+    terms = basis_terms("response-surface-2d", {}, names, ["T", "P"])
+    assert terms == [{}, {"T": 1}, {"P": 1}, {"T": 2}, {"P": 2}, {"T": 1, "P": 1}]
+
+
+def test_basis_terms_reject_a_nonlinear_template() -> None:
+    with pytest.raises(ValueError, match="unknown template"):
+        basis_terms("module", {}, ["a"], ["x"])
 
 
 # ──────────────────────────── design searches ────────────────────────────
