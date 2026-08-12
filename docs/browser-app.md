@@ -38,10 +38,45 @@ design is only optimal *around* the starting values you give — which is why th
 natural workflow is design, fit, then `discopt doe extend` to re-centre the next
 batch on the fitted values.
 
-**Analyze.** Upload the filled-in workbook to fit the model — least squares for
+**Analyze.** Drop the filled-in workbook on step 2 and the analysis runs by
+itself — no buttons. It reads the campaign, fits the model (least squares for
 the built-in templates, nonlinear least squares with an analytic Jacobian for
-your own — reporting coefficients with standard errors and 95% confidence
-intervals, or run ANOVA over the completed runs.
+your own) reporting coefficients with standard errors and 95% confidence
+intervals, and runs ANOVA over the completed runs. The two are independent, so
+whichever applies to your design is reported and the other explains why it does
+not apply — a Latin square has no model to fit, and the ANOVA is its analysis.
+
+Both steps write the model out as an equation — `yield = b0 + b1·T + b11·T² +
+b12·T·P` when the design is generated, and again with the fitted numbers in
+place of the coefficient names once it is fitted. The terms come from the same
+basis the design matrix is built from (`discopt.doe.linear_design.basis_terms`,
+pinned against `design_row` by the test suite), so the equation on screen is the
+model being fitted rather than a description of it.
+
+Significance is reported where it belongs. For a model-based design that is the
+coefficient table: each term is marked ✓ or ✗ on whether its 95% interval
+excludes zero — equivalent to the t-test at α = 0.05, and the one rule that
+also works for a nonlinear fit, which reports intervals but no p-values —
+alongside the model's own Regression/Residual/Total ANOVA and R². "Do the mean
+responses differ across the levels of this factor?" is a different question,
+meaningful only for a design built out of levels, so the factor-level ANOVA is
+shown for the Latin-square family and 2-level factorials. Rows with no F-ratio
+have nothing to test and are left blank rather than marked insignificant.
+
+Uploading also fills step 1 in with the design that workbook was built from —
+its template, factors and options, and a user-defined model's expression and
+nominal parameters. So a campaign you generated last week, or one a colleague
+sent you, opens with its own design on screen rather than the page defaults,
+and the form is set up to build the next design like it. Generating from there
+makes a *new* workbook; to add a batch to the campaign you already have, use
+`discopt doe extend`.
+
+A workbook that is not ready says what to change: which `run_id`s are still
+blank in the response column, whether the file is the wrong type, and — when
+there are fewer completed runs than parameters — how many more you need before
+standard errors mean anything. Partly filled workbooks are analyzed on the rows
+that do have a response. Edit the file, drop it again, and the whole analysis
+re-runs.
 
 Workbooks move freely in both directions: a design generated in the browser
 opens with `discopt doe status`, and a campaign started at the command line can

@@ -107,6 +107,92 @@ def basis_parameter_names(basis: str, n_inputs: int) -> list[str]:
     raise ValueError(f"unknown basis {basis!r}; expected one of {list(BASES)}")
 
 
+def basis_terms(
+    template: str,
+    template_args: Mapping[str, Any],
+    parameter_names: Sequence[str],
+    input_names: Sequence[str],
+) -> list[dict[str, int]]:
+    """Return the basis function multiplying each parameter, as factor powers.
+
+    Every basis here is a monomial in the factors, so a term is fully described
+    by the power of each factor in it: ``{}`` is the intercept, ``{"T": 1}`` is
+    a main effect, ``{"T": 2}`` a pure square, ``{"T": 1, "P": 1}`` a two-factor
+    interaction. The i-th entry is the term :func:`design_row` evaluates into
+    column i, so the two must be read together — a change to one is wrong
+    without the same change to the other, and
+    ``tests/test_linear_design.py::test_basis_terms_reproduce_the_design_row``
+    fails if they disagree.
+
+    This is what lets a caller *write the model down* — ``y = b0 + b1·T +
+    b11·T²`` — from workbook metadata alone, without a symbolic layer. The
+    arguments are exactly :func:`design_row`'s, minus the run.
+
+    Returns
+    -------
+    list of dict
+        One mapping of factor name to positive integer power per parameter, in
+        ``parameter_names`` order.
+    """
+    names = list(input_names)
+
+    if template in CLASSICAL_TEMPLATES:
+        # A design recipe, not a model: the basis travels in the metadata.
+        basis = str(template_args.get("basis", "quadratic"))
+        if basis == "linear":
+            template = "linear"
+        elif basis == "quadratic":
+            return [{}, *_main_terms(names), *_square_terms(names), *_cross_terms(names)]
+        else:
+            raise ValueError(f"unknown basis {basis!r}; expected one of {list(BASES)}")
+
+    if template == "linear":
+        return [{}, *_main_terms(names)]
+
+    if template == "polynomial-1d":
+        x = names[0]
+        degree = int(template_args.get("degree", len(parameter_names) - 1))
+        return [{} if j == 0 else {x: j} for j in range(degree + 1)]
+
+    if template in ("response-surface-2d", "response-surface-3d"):
+        return [{}, *_main_terms(names), *_square_terms(names), *_cross_terms(names)]
+
+    if template in ("scheffe-linear", "scheffe-quadratic", "scheffe-special-cubic"):
+        # Mixture models have no intercept: the factors sum to a constant, so
+        # one would be perfectly collinear with the main effects.
+        terms = _main_terms(names)
+        if template == "scheffe-linear":
+            return terms
+        terms += _cross_terms(names)
+        if template == "scheffe-quadratic":
+            return terms
+        q = len(names)
+        terms += [
+            {names[i]: 1, names[j]: 1, names[k]: 1}
+            for i in range(q)
+            for j in range(i + 1, q)
+            for k in range(j + 1, q)
+        ]
+        return terms
+
+    raise ValueError(
+        f"unknown template {template!r}; linear-design supports {sorted(LINEAR_TEMPLATES)}"
+    )
+
+
+def _main_terms(names: Sequence[str]) -> list[dict[str, int]]:
+    return [{n: 1} for n in names]
+
+
+def _square_terms(names: Sequence[str]) -> list[dict[str, int]]:
+    return [{n: 2} for n in names]
+
+
+def _cross_terms(names: Sequence[str]) -> list[dict[str, int]]:
+    k = len(names)
+    return [{names[i]: 1, names[j]: 1} for i in range(k) for j in range(i + 1, k)]
+
+
 def design_row(
     template: str,
     template_args: Mapping[str, Any],
@@ -799,6 +885,8 @@ __all__ = [
     "LinearBatchDesignResult",
     "LinearDesignResult",
     "ME_OPTIMAL",
+    "basis_parameter_names",
+    "basis_terms",
     "batch_design_from_basis",
     "design_matrix",
     "design_row",

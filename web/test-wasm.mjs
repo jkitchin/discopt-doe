@@ -312,6 +312,53 @@ check("inspect_workbook reports 15 completed runs", () => {
   if (out.rows.length !== 15) throw new Error(`rows=${out.rows.length}`);
 });
 
+check("the fit describes the model it fitted, term by term", () => {
+  const { model } = call("run_fit", "/work/upload.xlsx");
+  if (!model) throw new Error("no model summary");
+  if (model.response !== "yield") throw new Error(`response ${model.response}`);
+  const terms = Object.fromEntries(model.terms.map((t) => [t.parameter, t.powers]));
+  // Every coefficient in TRUTH must be described, and described correctly:
+  // b0 is the intercept, b1 a main effect, b11 a square, b12 an interaction.
+  for (const name of Object.keys(TRUTH)) {
+    if (!(name in terms)) throw new Error(`no term for ${name}`);
+  }
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  if (!same(terms.b0, {})) throw new Error(`b0 is ${JSON.stringify(terms.b0)}`);
+  if (!same(terms.b1, { T: 1 })) throw new Error(`b1 is ${JSON.stringify(terms.b1)}`);
+  if (!same(terms.b22, { P: 2 })) throw new Error(`b22 is ${JSON.stringify(terms.b22)}`);
+  if (!same(terms.b13, { T: 1, F: 1 })) throw new Error(`b13 is ${JSON.stringify(terms.b13)}`);
+});
+
+check("a user-defined model comes back with its fitted values substituted", () => {
+  // /work/design.xlsx is the box-behnken campaign by now, so rebuild the
+  // Arrhenius one and fit it again — the point is the substituted expression.
+  call("create_design", JSON.stringify(ARRHENIUS));
+  pyodide.runPython(`
+import math, shutil, openpyxl
+shutil.copy("/work/design.xlsx", "/work/arrhenius.xlsx")
+book = openpyxl.load_workbook("/work/arrhenius.xlsx")
+sheet = book["runs"]
+head = [c.value for c in sheet[1]]
+col = head.index("rate") + 1
+for row in sheet.iter_rows(min_row=2):
+    vals = dict(zip(head, [c.value for c in row]))
+    if vals.get("run_id") is None:
+        continue
+    row[col - 1].value = 3.7 * math.exp(-6200.0 / (8.314 * float(vals["T"])))
+book.save("/work/arrhenius.xlsx")
+`);
+  const { model } = call("run_fit", "/work/arrhenius.xlsx");
+  if (model.terms !== null) throw new Error("a symbolic model has no basis terms");
+  if (!/k0/.test(model.expression)) throw new Error(`expression ${model.expression}`);
+  // The fitted form must carry numbers where the parameter names were.
+  if (/k0|Ea/.test(model.fitted_expression)) {
+    throw new Error(`parameters not substituted: ${model.fitted_expression}`);
+  }
+  if (!/3\.7/.test(model.fitted_expression)) {
+    throw new Error(`expected k0 = 3.7 in ${model.fitted_expression}`);
+  }
+});
+
 check("fit recovers the known quadratic exactly", () => {
   const { fit } = call("run_fit", "/work/upload.xlsx");
   for (const p of fit.parameters) {
@@ -324,10 +371,136 @@ check("fit recovers the known quadratic exactly", () => {
   if (!(fit.objective < 1e-15)) throw new Error(`residual ${fit.objective} too large`);
 });
 
+check("the fit reports a significance test per coefficient", () => {
+  const { fit } = call("run_fit", "/work/upload.xlsx");
+  if (!fit.coefficients?.length) throw new Error("no coefficient statistics");
+  const byName = Object.fromEntries(fit.coefficients.map((c) => [c.name, c]));
+  for (const name of Object.keys(TRUTH)) {
+    const c = byName[name];
+    if (!c) throw new Error(`no statistics for ${name}`);
+    for (const key of ["estimate", "std_error", "t_statistic", "p_value"]) {
+      if (!(key in c)) throw new Error(`${name} has no ${key}`);
+    }
+  }
+  // Regression / Residual / Total, and a summary with R².
+  const sources = fit.regression_anova.map((r) => r.source);
+  for (const need of ["Regression", "Residual"]) {
+    if (!sources.includes(need)) throw new Error(`no ${need} row in ${sources}`);
+  }
+  if (!Number.isFinite(fit.summary.R_squared)) throw new Error("no R² in the summary");
+});
+
 check("anova runs", () => {
   const { anova } = call("run_anova", "/work/upload.xlsx", "[]");
   if (anova.n_observations !== 15) throw new Error(`n=${anova.n_observations}`);
   if (!anova.rows.length) throw new Error("no anova rows");
+});
+
+say("\n── a workbook describes the design that made it ──");
+
+for (const [template, spec, expect] of [
+  [
+    "central-composite",
+    { factors: bounds(["T", 300, 400], ["P", 1, 5]), center_points: 4, alpha: "face" },
+    { factors: [{ name: "T", low: 300, high: 400 }], options: { center_points: 4, alpha: "face" } },
+  ],
+  [
+    "latin-square",
+    {
+      factors: [
+        { name: "row", levels: "r1,r2,r3" },
+        { name: "col", levels: "c1,c2,c3" },
+        { name: "treat", levels: "t1,t2,t3" },
+      ],
+    },
+    { factors: [{ name: "row", levels: "r1, r2, r3" }], options: {} },
+  ],
+  [
+    "factorial-2level",
+    {
+      factors: [
+        { name: "A", low: "lo", high: "hi" },
+        { name: "B", low: "lo", high: "hi" },
+      ],
+      replicates: 2,
+    },
+    { factors: [{ name: "A", low: "lo", high: "hi" }], options: { replicates: 2 } },
+  ],
+]) {
+  check(`${template} round-trips into the design form`, () => {
+    call("create_design", JSON.stringify({ template, response: "resp", seed: 7, ...spec }));
+    const out = call("design_spec_from_workbook", "/work/design.xlsx");
+    if (!out.supported) throw new Error(`not supported: ${out.reason}`);
+    if (out.template !== template) throw new Error(`template ${out.template}`);
+    // The first factor comes back in the style this template's editor uses.
+    for (const [key, want] of Object.entries(expect.factors[0])) {
+      const got = out.factors[0][key];
+      if (String(got) !== String(want)) throw new Error(`factor ${key}: ${got} != ${want}`);
+    }
+    for (const [key, want] of Object.entries(expect.options)) {
+      if (String(out.options[key]) !== String(want)) {
+        throw new Error(`option ${key}: ${out.options[key]} != ${want}`);
+      }
+    }
+    if (out.options.response !== "resp") throw new Error(`response ${out.options.response}`);
+    if (out.options.seed !== 7) throw new Error(`seed ${out.options.seed}`);
+  });
+}
+
+check("a user-defined model round-trips with its expression and parameters", () => {
+  call("create_design", JSON.stringify(ARRHENIUS));
+  const out = call("design_spec_from_workbook", "/work/design.xlsx");
+  if (out.expression !== ARRHENIUS.expression) throw new Error(`expression ${out.expression}`);
+  // Parameter order fixes the FIM layout, so it has to survive the round trip.
+  const names = out.parameters.map((p) => p.name).join(",");
+  if (names !== "k0,Ea") throw new Error(`parameters ${names}`);
+  if (out.parameters[1].value !== 5000) throw new Error(`Ea = ${out.parameters[1].value}`);
+});
+
+say("\n── diagnosing a workbook the analysis cannot use ──");
+
+// Response cells the way a spreadsheet leaves them when things go wrong: a
+// formula whose result was never cached (what Numbers/Sheets exports produce,
+// and what shows a perfectly good number on screen), a value with a unit
+// typed after it, and one left blank.
+pyodide.runPython(`
+import shutil, openpyxl
+shutil.copy("/work/upload.xlsx", "/work/broken.xlsx")
+book = openpyxl.load_workbook("/work/broken.xlsx")
+sheet = book["runs"]
+head = [c.value for c in sheet[1]]
+ycol = head.index("yield") + 1
+rows = [r for r in sheet.iter_rows(min_row=2) if r[0].value is not None]
+rows[0][ycol - 1].value = "=1+2"     # formula, no cached result
+rows[1][ycol - 1].value = "3.5 g"    # text, not a number
+rows[2][ycol - 1].value = None       # not measured yet
+book.save("/work/broken.xlsx")
+`);
+
+check("diagnose_workbook tells the three failure modes apart", () => {
+  const diag = call("diagnose_workbook", "/work/broken.xlsx");
+  if (diag.response !== "yield") throw new Error(`response=${diag.response}`);
+  const state = (id) => diag.runs.find((r) => r.run_id === id)?.state;
+  if (state(1) !== "formula") throw new Error(`run 1 is ${state(1)}, want formula`);
+  if (state(2) !== "text") throw new Error(`run 2 is ${state(2)}, want text`);
+  if (state(3) !== "empty") throw new Error(`run 3 is ${state(3)}, want empty`);
+  if (state(4) !== "ok") throw new Error(`run 4 is ${state(4)}, want ok`);
+  const shown = diag.runs.find((r) => r.run_id === 1).shown;
+  if (shown !== "=1+2") throw new Error(`run 1 shows ${shown}`);
+  if (diag.runs.some((r) => r.bad_inputs.length)) throw new Error("factors reported as bad");
+});
+
+check("diagnose_workbook survives a file inspect_workbook refuses", () => {
+  // The uncached formula makes all_runs() raise; the diagnosis is what the
+  // page falls back to, so it has to work on exactly that file.
+  const py = pyodide.globals.get("inspect_workbook");
+  const refused = JSON.parse(py("/work/broken.xlsx"));
+  py.destroy();
+  if (refused.ok) throw new Error("expected inspect_workbook to refuse the formula");
+  if (!/formula/.test(refused.error)) throw new Error(`unexpected message: ${refused.error}`);
+  if (!call("diagnose_workbook", "/work/broken.xlsx").runs.length) {
+    throw new Error("diagnosis came back empty");
+  }
 });
 
 check("failures come back as JSON, not as thrown exceptions", () => {

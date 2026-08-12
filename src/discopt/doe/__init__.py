@@ -193,6 +193,16 @@ _SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
         "vuong_test",
     ),
     "sequential": ("DoERound", "sequential_doe"),
+    # The same three names as "design" above, from the module that actually
+    # defines them. Resolving them through `design` needs the FIM machinery and
+    # the base package; this route needs neither, which is what lets a mixture
+    # design run in the browser.
+    "simplex": (
+        "DesignConstraint",
+        "project_to_simplex",
+        "sample_simplex",
+        "sum_constraint",
+    ),
     "surrogate": ("Surrogate", "coerce_surrogate"),
     "templates": (
         "TEMPLATE_NAMES",

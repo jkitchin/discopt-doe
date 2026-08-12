@@ -70,8 +70,20 @@ jobs:
       - name: Install the test harness
         run: npm ci
         working-directory: web
+      # No browser and no network: app.js against a stub DOM and a stub
+      # Pyodide, checking that dropping a workbook analyses it and that an
+      # unusable one says what to fix.
+      - name: Run the front-end test
+        run: node test-dom.mjs
+        working-directory: web
       # Fetches the numpy/scipy wheels from the Pyodide CDN and openpyxl from
       # PyPI on first run.
       - name: Run the WebAssembly end-to-end test
         run: node test-wasm.mjs ../docs/_build/web
+        working-directory: web
+      # The real page against real WebAssembly, once per design type. This is
+      # the only job where the two halves have to agree: a mixture design that
+      # cannot import its own constraint helpers passes every other test.
+      - name: Fuzz every design type through the app
+        run: node test-fuzz.mjs ../docs/_build/web 2
         working-directory: web

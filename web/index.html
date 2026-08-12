@@ -26,6 +26,8 @@
   <section class="card" aria-labelledby="h-design">
     <h2 id="h-design"><span class="step">1</span> Design</h2>
 
+    <div id="design-source" role="status" aria-live="polite" hidden></div>
+
     <div class="field">
       <label for="template">Design type</label>
       <select id="template"></select>
@@ -84,6 +86,7 @@
     <div id="design-error" class="alert" role="alert" hidden></div>
     <div id="design-result" hidden>
       <p class="summary" id="design-summary"></p>
+      <div id="design-equation" hidden></div>
       <div class="scroll"><table class="grid data" id="design-table"></table></div>
       <p class="hint next-step">
         Open the workbook, type your measured responses into the response column,
@@ -100,21 +103,23 @@
       <label for="upload">Filled-in workbook</label>
       <div class="drop" id="drop">
         <input type="file" id="upload" accept=".xlsx">
-        <p class="hint">Drop a <code>.xlsx</code> here, or choose a file. It never leaves your
-          computer.</p>
+        <p class="hint">Drop a <code>.xlsx</code> here, or choose a file — the fit and the ANOVA
+          run straight away, no buttons to press. It never leaves your computer.</p>
       </div>
       <p id="upload-name" class="hint" hidden></p>
     </div>
 
-    <div class="actions">
-      <button type="button" id="fit" class="primary" disabled>Fit model</button>
-      <button type="button" id="anova" class="secondary" disabled>ANOVA</button>
-      <button type="button" id="download-analyzed" class="secondary" hidden>Download updated
-        workbook</button>
-    </div>
+    <p id="analyze-status" class="boot" role="status" aria-live="polite" hidden>
+      <span class="spinner" aria-hidden="true"></span><span id="analyze-status-text"></span>
+    </p>
 
     <div id="analyze-error" class="alert" role="alert" hidden></div>
     <div id="analyze-result" hidden></div>
+
+    <div class="actions analyzed-actions">
+      <button type="button" id="download-analyzed" class="secondary" hidden>Download updated
+        workbook</button>
+    </div>
   </section>
 
 </main>

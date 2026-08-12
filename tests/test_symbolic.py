@@ -446,6 +446,36 @@ class TestSymbolicCampaigns:
         assert temps[0] == pytest.approx(300.0, abs=1e-3)
         assert temps[1] == pytest.approx(500.0, abs=1e-3)
 
+    @pytest.mark.parametrize("sigma", [1.0, 0.5, 0.1, 0.05])
+    def test_the_design_does_not_depend_on_the_measurement_error(self, tmp_path, sigma) -> None:
+        """D-optimality is scale-free in σ, and the design must be too.
+
+        ``FIM = JᵀJ/σ²`` is a positive rescaling, so σ shifts log-det by a
+        constant and cannot move the argmax. It did once: the regularizing
+        ridge was an absolute ``1e-6``, while this model's information in the
+        Ea direction is ~1e-7 at σ = 1 — a hundredfold smaller than its own
+        guard. The ridge then outvoted the data and the search returned all six
+        runs at a single temperature, a rank-deficient design that identifies
+        neither parameter, while σ = 0.05 (what the rest of this class uses)
+        happened to be small enough to hide it.
+        """
+        out = self._new(tmp_path, measurement_error=sigma)
+
+        temps = sorted({round(d["T"], 6) for d in out["designs"]})
+        assert temps == [pytest.approx(300.0, abs=1e-3), pytest.approx(500.0, abs=1e-3)]
+
+        # And the design is actually identifiable: full-rank information with
+        # no ridge propping it up.
+        model = SymbolicModel(
+            source=self.EXPR,
+            parameter_names=("k0", "Ea"),
+            input_names=("T",),
+            response_name="rate",
+            measurement_error=sigma,
+        )
+        fim = model.fim({"k0": 2.0, "Ea": 5000.0}, [{"T": d["T"]} for d in out["designs"]])
+        assert np.linalg.matrix_rank(fim) == 2
+
     def test_parameter_order_follows_the_param_flags(self, tmp_path) -> None:
         """Not alphabetical: the order given is the FIM layout."""
         out = self._new(

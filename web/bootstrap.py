@@ -265,6 +265,12 @@ def create_design(spec_json: str) -> str:
     out = do_new(params)
     out["download_name"] = f"{template}-campaign.xlsx"
     out["file_path"] = str(DESIGN_PATH)
+
+    # The model the design was built for, read back from the workbook it was
+    # written into — so what the page shows is what the campaign carries.
+    from discopt.doe.workbook import Workbook
+
+    out["model"] = _model_summary(Workbook.open(DESIGN_PATH))
     return _ok(out)
 
 
@@ -315,6 +321,8 @@ def inspect_workbook(path: str = str(UPLOAD_PATH)) -> str:
     from discopt.doe.cli import do_status
     from discopt.doe.workbook import Workbook
 
+    from discopt.doe.templates import COMBINATORIAL_TEMPLATES
+
     status = do_status({"workbook": path})
     wb = Workbook.open(Path(path))
     runs = wb.all_runs()
@@ -328,16 +336,255 @@ def inspect_workbook(path: str = str(UPLOAD_PATH)) -> str:
             "columns": columns,
             "rows": [{c: r.get(c) for c in columns} for r in runs],
             "response": response,
+            # Which analysis actually means something for this design. The
+            # factor-level ANOVA compares level means, so it needs factors with
+            # levels; run it on a continuous design and every distinct value
+            # becomes its own "level", which decomposes nothing. Those designs
+            # are fitted instead, and the coefficient t-tests are their
+            # significance test.
+            "combinatorial": (status.get("template") or "") in COMBINATORIAL_TEMPLATES,
         }
     )
+
+
+@_guard
+def design_spec_from_workbook(path: str = str(UPLOAD_PATH)) -> str:
+    """Describe an uploaded campaign in the shape step 1's form takes.
+
+    A workbook carries the whole design: template, factors, and the options it
+    was built with. Reading it back means uploading a campaign shows you what
+    produced it — and leaves the form ready to build the next one like it,
+    rather than reset to the page defaults.
+
+    Factors come back in whichever style the template's editor uses: bounds for
+    a continuous box, a low/high pair for a 2-level factorial, a level list for
+    the Latin-square family. ``supported`` is false, with a reason, for a
+    campaign this page cannot rebuild — a `--module` experiment, or a template
+    only the CLI offers.
+    """
+    from discopt.doe.linear_design import CRITERIA
+    from discopt.doe.workbook import Workbook
+
+    wb = Workbook.open(Path(path))
+    template = wb.template_name()
+    if not template:
+        return _ok(
+            {
+                "supported": False,
+                "reason": (
+                    "this campaign was built from a Python module rather than a template, "
+                    "so there is no form to fill in"
+                ),
+            }
+        )
+    ui = TEMPLATE_UI.get(template)
+    if ui is None:
+        return _ok(
+            {
+                "supported": False,
+                "reason": f"'{template}' is a command-line template this page does not offer",
+            }
+        )
+
+    args = wb.template_args()
+    specs = wb.input_specs()
+    levels: dict[str, list[Any]] = args.get("levels") or {}
+    style = ui.get("factors", "bounds")
+
+    if style == "levels":
+        factors = [
+            {"name": s.name, "levels": ", ".join(str(v) for v in levels.get(s.name, []))}
+            for s in specs
+        ]
+    elif style == "levels2":
+        # Stored as a two-entry level list per factor; the editor wants the
+        # pair split across a low and a high column.
+        factors = []
+        for s in specs:
+            pair = list(levels.get(s.name) or ["", ""])
+            pair += [""] * (2 - len(pair))
+            factors.append({"name": s.name, "low": str(pair[0]), "high": str(pair[1])})
+    else:
+        factors = [{"name": s.name, "low": s.lb, "high": s.ub} for s in specs]
+
+    options: dict[str, Any] = {"response": wb.response_name(), "seed": wb.seed()}
+    for key in ui.get("options", []):
+        if key == "n":
+            # Run count rather than a stored option: the optimal-design
+            # templates take it as "how many runs do you want".
+            options["n"] = len(wb.all_runs())
+        elif key == "criterion":
+            # Classical and combinatorial campaigns store a family label here
+            # ("classical", "anova") rather than one of the search criteria.
+            criterion = wb.criterion()
+            if criterion in CRITERIA:
+                options["criterion"] = criterion
+        elif key == "outside_bounds":
+            options["outside_bounds"] = not args.get("within_bounds", True)
+        elif key in args and args[key] is not None:
+            options[key] = args[key]
+
+    out: dict[str, Any] = {
+        "supported": True,
+        "template": template,
+        "factors": factors,
+        "options": options,
+    }
+    if template == "symbolic":
+        guess = wb.param_initial_guess()
+        out["expression"] = args.get("expression") or ""
+        # `parameters` fixes the FIM layout, so keep that order rather than
+        # whatever order the guess mapping happens to iterate in.
+        out["parameters"] = [
+            {"name": name, "value": guess.get(name, 0.0)} for name in args.get("parameters") or []
+        ]
+    return _ok(out)
+
+
+def _model_summary(wb: Any, estimates: dict[str, float] | None = None) -> dict[str, Any] | None:
+    """Describe the campaign's model so the page can write the equation out.
+
+    Two shapes, because there are two kinds of model. A template linear in its
+    parameters becomes one monomial per coefficient — the same terms
+    ``design_row`` evaluates, so the equation shown is the model actually
+    fitted. A ``symbolic`` campaign already has an expression; with
+    ``estimates`` in hand the fitted values are substituted into it by sympy,
+    rather than by pasting numbers into a string. Returns ``None`` for the
+    combinatorial designs, which have no model — ANOVA is their analysis.
+    """
+    from discopt.doe.linear_design import LINEAR_TEMPLATES, basis_terms
+
+    template = wb.template_name()
+    if not template:
+        return None
+    response = wb.response_name()
+
+    if template == "symbolic":
+        model = wb.symbolic_model()
+        out: dict[str, Any] = {
+            "response": response,
+            "expression": str(model.expression),
+            "terms": None,
+        }
+        if estimates:
+            import sympy
+
+            # `real=True` matters: SymbolicModel builds its symbols that way,
+            # and a plain Symbol(name) is a *different* object that substitutes
+            # into nothing.
+            fitted = model.expression.subs(
+                {sympy.Symbol(name, real=True): value for name, value in estimates.items()}
+            )
+            out["fitted_expression"] = str(sympy.N(fitted, 4))
+        return out
+
+    if template not in LINEAR_TEMPLATES:
+        return None
+
+    names = wb.parameter_names()
+    terms = basis_terms(template, wb.template_args(), names, [s.name for s in wb.input_specs()])
+    return {
+        "response": response,
+        "expression": None,
+        "terms": [{"parameter": n, "powers": t} for n, t in zip(names, terms)],
+    }
+
+
+def _cell_state(raw: Any, cached: Any) -> tuple[str, str]:
+    """Classify one cell as (state, what the user sees in Excel).
+
+    ``raw`` is what openpyxl reads with formulas preserved, ``cached`` what it
+    reads with ``data_only=True`` — the result Excel stored the last time it
+    saved the file. The distinction is the whole point: a formula whose result
+    was never cached is indistinguishable from an empty cell in the ordinary
+    read, even though the sheet plainly shows a number.
+    """
+    formula = isinstance(raw, str) and raw.startswith("=")
+    value = cached if formula else raw
+    shown = str(raw) if formula else ("" if value is None else str(value))
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return ("formula" if formula else "empty"), shown
+    try:
+        float(value)
+    except (TypeError, ValueError):
+        return "text", str(value)
+    return "ok", shown
+
+
+@_guard
+def diagnose_workbook(path: str = str(UPLOAD_PATH)) -> str:
+    """Report why each run is or is not usable, cell by cell.
+
+    Deliberately does not go through :meth:`Workbook.all_runs`, which raises on
+    the first unresolvable formula: this has to survive whatever is in the file
+    in order to describe it. Run states are ``ok`` (a number the fit can use),
+    ``empty`` (nothing typed yet), ``formula`` (a formula whose computed value
+    is not stored in the file, so the number on screen exists only in Excel),
+    and ``text`` (something that is not a number — a stray unit, a comma
+    decimal separator, "n/a").
+    """
+    from openpyxl import load_workbook
+
+    from discopt.doe.workbook import SHEET_RUNS
+
+    live = load_workbook(path)[SHEET_RUNS]
+    cached = load_workbook(path, data_only=True)[SHEET_RUNS]
+    headers = [c.value for c in live[1]]
+    if not headers:
+        return _err("the 'runs' sheet has no header row")
+
+    # The response and factor names come from the metadata when the workbook
+    # opens; a file too damaged for that still gets its response column
+    # diagnosed, on the convention that it is the last one.
+    response: Any = headers[-1]
+    input_names: list[str] = []
+    try:
+        from discopt.doe.workbook import Workbook
+
+        wb = Workbook.open(Path(path))
+        response = wb.response_name()
+        input_names = [s.name for s in wb.input_specs()]
+    except Exception:  # noqa: BLE001 - diagnosing is the fallback, not the failure
+        pass
+
+    resp_i = headers.index(response) if response in headers else len(headers) - 1
+    input_cols = [(i, h) for i, h in enumerate(headers) if h in input_names]
+
+    runs: list[dict[str, Any]] = []
+    cached_rows = list(cached.iter_rows(min_row=2, values_only=True))
+    for r_i, row in enumerate(live.iter_rows(min_row=2, values_only=True)):
+        if not row or row[0] is None:
+            continue
+        # Short rows are common (trailing blanks are simply absent); pad both
+        # views to the header width so every column can be indexed directly.
+        row = list(row) + [None] * (len(headers) - len(row))
+        cache_row = list(cached_rows[r_i]) if r_i < len(cached_rows) else []
+        cache_row += [None] * (len(headers) - len(cache_row))
+
+        state, shown = _cell_state(row[resp_i], cache_row[resp_i])
+        # Only missing factor values are reported: a *text* factor value is
+        # normal for the combinatorial designs ("lo"/"hi", "t1"), so "not a
+        # number" says nothing about whether the cell is right.
+        bad_inputs = []
+        for i, header in input_cols:
+            in_state, in_shown = _cell_state(row[i], cache_row[i])
+            if in_state in {"empty", "formula"}:
+                bad_inputs.append({"column": header, "state": in_state, "shown": in_shown})
+        runs.append({"run_id": row[0], "state": state, "shown": shown, "bad_inputs": bad_inputs})
+
+    return _ok({"response": response, "runs": runs})
 
 
 @_guard
 def run_fit(path: str = str(UPLOAD_PATH)) -> str:
     """Fit the campaign's model to the completed runs (OLS over the basis)."""
     from discopt.doe.cli import do_fit
+    from discopt.doe.workbook import Workbook
 
-    return _ok({"fit": do_fit({"workbook": path})})
+    fit = do_fit({"workbook": path})
+    estimates = {p["name"]: p["estimate"] for p in fit["parameters"]}
+    # Re-open after the fit so the model is described from the saved workbook.
+    return _ok({"fit": fit, "model": _model_summary(Workbook.open(Path(path)), estimates)})
 
 
 @_guard

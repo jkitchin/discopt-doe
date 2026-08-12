@@ -7,7 +7,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Every mixture design was broken in the browser.** `scheffe-linear`,
+  `scheffe-quadratic` and `scheffe-special-cubic` failed at design time with
+  `No module named 'discopt.estimate'`: the mixture branch reached for
+  `project_to_simplex` and `sum_constraint` through `discopt.doe`, whose
+  package-level names resolved via `discopt.doe.design` — which imports the FIM
+  machinery and the base package, neither of which exists in a WebAssembly
+  build. The three helpers are pure simplex geometry and now live in a new
+  `discopt.doe.simplex`, re-exported from `discopt.doe.design` so existing
+  imports keep working. Found by `web/test-fuzz.mjs`; guarded by a hygiene test
+  that *builds* a mixture design without the base package rather than only
+  importing the module.
+- **Browser app — a hidden element was not hidden.** The `hidden` attribute is
+  honoured by a UA-stylesheet rule, which any author rule setting `display`
+  outranks; `.boot { display: flex }` was enough to leave the analysis status
+  line on screen permanently, so its spinner kept spinning after the work had
+  finished — and was there before any workbook was dropped. A
+  `[hidden] { display: none !important }` guard settles it for every element,
+  and `test-dom.mjs` fails if the guard is removed while any element carries
+  both `hidden` and a class.
+- **Browser app — the analysis could stall in a backgrounded tab.** Each step
+  yielded through `requestAnimationFrame` so the progress line would paint
+  before Pyodide blocked the thread. Browsers stop firing frame callbacks for a
+  tab that is hidden, backgrounded or fully occluded, so switching back to
+  Excel after dropping a workbook left the analysis waiting for a frame that
+  would not arrive until you returned — and a drop landing while it was stalled
+  was silently ignored, which made it look permanent. The yield is now raced
+  against a timer, and a drop during an analysis says so.
+- **The regularizing ridge could decide the design.** `_RIDGE` is meant to keep
+  `log det FIM` finite before a design reaches full rank, but as an absolute
+  `1e-6` it outvoted the data whenever a parameter's information was smaller
+  than that in its own units — which is ordinary, not exotic: an Arrhenius
+  activation energy in J/mol has `∂y/∂Ea ~ 1e-4`, so its information is ~1e-8.
+  For `k0·exp(-Ea/RT)` over T ∈ [300, 500] K at σ = 1 (the browser app's
+  default, and its own worked example) a six-run design collapsed onto a single
+  temperature and scored *higher* than the correct two-point design; the
+  returned design identified neither parameter, silently. The ridge is now a
+  fraction of the information in each direction, measured over the factor box,
+  so it keeps the guard and loses the vote. Every design search and the FIM
+  `fit` writes back are covered. A design is now independent of σ, as
+  D-optimality requires, and `test_symbolic.py` pins that.
+
+### Changed
+- **Browser app — the analyze step runs on drop.** Dropping (or choosing) a
+  filled-in workbook now reads it, fits the model, and runs the ANOVA on its
+  own; the *Fit model* and *ANOVA* buttons are gone. Progress is reported while
+  Pyodide works, and the fit and the ANOVA are independent, so whichever does
+  not apply to a design explains itself instead of hiding the other's results.
+- **Browser app — the right ANOVA for the design.** The factor-level ANOVA now
+  runs only for designs built out of levels (the Latin-square family, 2-level
+  factorials), where comparing level means *is* the analysis. On a continuous
+  design every distinct factor value was becoming its own "level", which
+  decomposes nothing and reports F-ratios against an aliased residual; those
+  designs get the fit's regression ANOVA and coefficient tests instead. It
+  still appears as a fallback when the fit could not run, labelled as one.
+
 ### Added
+- **`discopt.doe.linear_design.basis_terms`**: the basis function multiplying
+  each parameter, as factor powers (`{}` for the intercept, `{"T": 2}` for a
+  pure square). It is `design_row`'s ordering knowledge in a form a caller can
+  print, which is what lets the model be written out as an equation from
+  workbook metadata alone; the test suite evaluates every term against
+  `design_row` so the two cannot drift.
+- **Browser app — the model, written out.** Step 1 shows the equation the
+  design is built to estimate (`yield = b0 + b1·T + b11·T² + b12·T·P`), and the
+  fit shows it again with the fitted numbers substituted — by sympy for a
+  user-defined model, so the expression stays exact rather than being
+  string-pasted. Designs with no model (the Latin-square family) show none.
+- **Browser app — uploading a workbook fills step 1 in.** A campaign carries its
+  whole design, so dropping one now shows the design that produced it —
+  template, factors, and the options it was built with, including a
+  user-defined model's expression and nominal parameters — instead of leaving
+  the form on the page defaults. Factors come back in whichever editor style
+  the template uses (continuous bounds, a low/high pair, a level list). A
+  campaign the page cannot rebuild, such as a `--module` experiment, says so
+  and leaves the form alone. New `design_spec_from_workbook` in
+  `web/bootstrap.py`.
+- **`web/test-fuzz.mjs`**: every design type, end to end, through the real page
+  against real WebAssembly — fill the form, generate, write responses into the
+  workbook, drop it back on step 2, check what the page shows. Randomization is
+  seeded and the seed is printed, so a failure replays. It is the only test
+  where the JavaScript and Python halves have to agree; it found the mixture
+  bug above on its first run. Runs in CI, and `web/fake-dom.mjs` now holds the
+  DOM stand-in that it shares with `test-dom.mjs`.
+- **A user-defined model's fit reports the same statistics as a template's.**
+  `_do_fit_symbolic` now returns coefficient t-tests, the
+  Regression/Residual/Total decomposition and the summary (R², RMSE), and
+  writes the ANOVA sheet into the workbook. For a nonlinear model these are the
+  asymptotic forms — the footing its confidence intervals already stood on.
+- **`do_fit` returns its regression statistics.** The per-coefficient
+  t-statistics and p-values, the Regression/Residual/Total decomposition, and
+  the summary (R², adjusted R², RMSE, F) were already computed and written to
+  the workbook's ANOVA sheet, but were dropped from the returned dict, so every
+  caller had to recompute the t-tests to answer the question a fit is usually
+  asked. Now returned as `coefficients`, `regression_anova`, and `summary`.
+- **Browser app — significance where it belongs.** Each fitted coefficient is
+  marked ✓ or ✗ on whether its 95% interval excludes zero (equivalent to the
+  t-test at α = 0.05, and the one rule that works for the nonlinear fit too,
+  which reports intervals but no p-values), and the model's own
+  Regression/Residual/Total ANOVA is shown with R². The glyph carries the
+  verdict; colour only reinforces it. A fit with no residual left says so
+  rather than presenting degenerate p-values as a result.
+- **Browser app — actionable diagnostics for a workbook that cannot be
+  analyzed.** A new `diagnose_workbook` entry point in `web/bootstrap.py`
+  classifies every response and factor cell against both the formula-preserving
+  and the `data_only` views of the sheet, so the page can name the runs at fault
+  and say what is wrong with each: empty, text rather than a number, or — the
+  case that looks like a perfectly good number in Excel — a formula whose
+  computed result was never written to the file. Fewer completed runs than
+  parameters is likewise called out rather than silently returning blank
+  standard errors. `web/test-dom.mjs` covers the flow with no browser and no
+  network.
 - **Browser app** (`web/`, published at `/app/` alongside the docs): the design →
   download → fill in → upload → fit workflow, running entirely client-side on
   Pyodide with no server and no install. Workbooks round-trip with the CLI.
