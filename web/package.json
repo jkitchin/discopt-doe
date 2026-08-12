@@ -5,7 +5,10 @@
   "description": "Browser (Pyodide/WASM) front end for discopt-doe. The pyodide dependency is only used by the test harness; the page itself loads Pyodide from the CDN.",
   "type": "module",
   "scripts": {
-    "test": "node test-wasm.mjs ../docs/_build/web"
+    "test": "node test-dom.mjs && node test-wasm.mjs ../docs/_build/web && node test-fuzz.mjs ../docs/_build/web",
+    "test:dom": "node test-dom.mjs",
+    "test:wasm": "node test-wasm.mjs ../docs/_build/web",
+    "test:fuzz": "node test-fuzz.mjs ../docs/_build/web"
   },
   "devDependencies": {
     "pyodide": "314.0.3"
