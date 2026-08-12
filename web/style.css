@@ -34,6 +34,12 @@
 
 * { box-sizing: border-box; }
 
+/* The `hidden` attribute is honoured by a UA-stylesheet rule, which any author
+   rule setting `display` outranks — `.boot { display: flex }` alone was enough
+   to leave a hidden status line (and its spinner) on screen forever. Author
+   rules do not get to lose this argument. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--bg);
@@ -195,9 +201,53 @@ button.ghost { padding: .2rem .55rem; font-size: .85rem; }
   margin: .5rem 0 0; white-space: pre-wrap;
   font-family: var(--mono); font-size: .78rem; opacity: .8;
 }
+.alert p { margin: 0; }
+.alert-title { font-weight: 600; }
+.alert p.alert-why { margin-top: .35rem; font-family: var(--mono); font-size: .82rem; }
+.alert ul { margin: .55rem 0 0; padding-left: 1.1rem; }
+.alert li + li { margin-top: .3rem; }
+
+#design-source { margin-bottom: 1.35rem; }
+#design-source .note { margin-top: 0; }
+
+/* A caveat that qualifies a result rather than replacing it. */
+.note {
+  border-left: 3px solid var(--border);
+  padding: .1rem 0 .1rem .8rem;
+  margin: .9rem 0;
+  color: var(--muted); font-size: .85rem;
+}
+.note p { margin: 0; }
+.note p + p { margin-top: .3rem; }
+.note-title { font-weight: 600; color: var(--text); }
+
+#analyze-status { margin: 1rem 0 0; }
+/* No margin while the download button is still hidden, so the card does not
+   end in a band of empty space before a workbook has been analyzed. */
+.analyzed-actions:has(button:not([hidden])) { margin-top: 1.25rem; }
+
+/* The model written out. Long equations scroll rather than wrapping mid-term. */
+.equation {
+  background: var(--code-bg);
+  border-radius: 7px;
+  padding: .6rem .75rem;
+  margin: .75rem 0;
+  overflow-x: auto;
+}
+.equation p {
+  margin: 0;
+  font-family: var(--mono); font-size: .85rem;
+  white-space: nowrap;
+}
+.equation p + p { margin-top: .3rem; color: var(--muted); }
+
+/* ANOVA verdicts. The ✓/✗ carries the meaning; colour only reinforces it. */
+.data td.yes { color: var(--ok); font-weight: 600; }
+.data td.no { color: var(--err-fg); }
 
 .result-block { margin-top: 1.5rem; }
 .result-block h3 { margin: 0 0 .25rem; font-size: .95rem; }
+.result-block h4 { margin: 1.5rem 0 .25rem; font-size: .9rem; }
 .result-block .hint { margin-bottom: .6rem; }
 
 .stats { display: flex; flex-wrap: wrap; gap: 1.5rem; margin: .75rem 0; }
