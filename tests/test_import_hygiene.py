@@ -37,6 +37,7 @@ BROWSER_SAFE_MODULES = [
     "discopt.doe.latin",
     "discopt.doe.linear_design",
     "discopt.doe.screening",
+    "discopt.doe.simplex",
     "discopt.doe.symbolic",
     "discopt.doe.templates",
     "discopt.doe.workbook",
@@ -144,6 +145,47 @@ def test_lazy_attribute_access_still_resolves() -> None:
             raise AssertionError("unknown attribute did not raise AttributeError")
     """)
     assert proc.returncode == 0, f"lazy access broke:\n{proc.stderr}"
+    assert "OK" in proc.stdout
+
+
+def test_mixture_design_without_base_package(tmp_path: Path) -> None:
+    """A Scheffé design builds with no base discopt and no jax.
+
+    Importing ``discopt.doe.cli`` was never enough to catch this: the mixture
+    branch reached for ``project_to_simplex`` and ``sum_constraint`` *inside*
+    the function, through ``discopt.doe``, whose package-level names resolved
+    via ``discopt.doe.design`` — which imports the FIM machinery and
+    ``discopt.estimate``. Every mixture template in the browser app therefore
+    failed at design time on ``No module named 'discopt.estimate'``, while
+    every test in this suite passed. So run the design, do not just import it.
+    """
+    target = tmp_path / "mixture.xlsx"
+    proc = _run(f"""
+        from discopt.doe.cli import NewParams, do_new
+
+        out = do_new(NewParams(
+            output={str(target)!r},
+            n=8,
+            inputs=[("a", 0.0, 1.0), ("b", 0.0, 1.0), ("c", 0.0, 1.0)],
+            response_name="y",
+            measurement_error=1.0,
+            criterion="determinant",
+            n_starts=4,
+            seed=0,
+            template="scheffe-quadratic",
+            mixture_total=1.0,
+            use_linear_design=True,
+            force=True,
+        ))
+        assert len(out["new_run_ids"]) == 8, out["new_run_ids"]
+        # The components of every run must lie on the simplex it was
+        # constrained to — that is what the helpers are for.
+        for design in out["designs"]:
+            total = design["a"] + design["b"] + design["c"]
+            assert abs(total - 1.0) < 1e-6, (design, total)
+        print("OK")
+    """)
+    assert proc.returncode == 0, f"mixture design failed:\n{proc.stderr}"
     assert "OK" in proc.stdout
 
 
