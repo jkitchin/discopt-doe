@@ -49,6 +49,19 @@ jobs:
       # build failures so doc rot is caught in CI.
       - run: uv run jupyter-book build docs/ -W
 
+  # docs/_config.yml sets execute_notebooks: "off", so whatever outputs are
+  # committed are exactly what the published book shows -- and nothing else
+  # notices when the code drifts away from the numbers on the page. This job
+  # re-runs every notebook (without saving) so a change that breaks one fails
+  # here instead of shipping a stale table.
+  notebooks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --python 3.12 --all-extras
+      - run: uv run python scripts/execute_notebooks.py --check
+
   # The browser app, exercised in real WebAssembly. This is the only job where
   # neither the base `discopt` package nor jax is installed — which is the whole
   # point: it is the one place a stray module-level import of either can be

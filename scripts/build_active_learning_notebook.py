@@ -81,8 +81,18 @@ from discopt.doe import (
 )
 from discopt.doe.workbook import InputSpec, Workbook
 
-warnings.filterwarnings("ignore", message=".*ConvergenceWarning.*")
+from sklearn.exceptions import ConvergenceWarning
+
+# Filter on the category, not the text: a ConvergenceWarning's message reads
+# "lbfgs failed to converge ...", so message=".*ConvergenceWarning.*" matched
+# nothing and the warnings (with absolute site-packages paths) landed in the
+# rendered docs.
+warnings.filterwarnings("ignore", category=ConvergenceWarning)
+
+# Seeded, and shared by the simulated measurements below, so re-running this
+# notebook reproduces the numbers on the page.
 rng = np.random.default_rng(0)
+noise = np.random.default_rng(7)
 """
 )
 
@@ -102,7 +112,7 @@ We start the loop by seeding it with four random runs."""
 
 code(
     """def truth_1d(x):
-    return -(x - 2.0) ** 2 + 3.0 + 0.05 * np.random.default_rng().normal()
+    return -(x - 2.0) ** 2 + 3.0 + 0.05 * noise.normal()
 
 WORKBOOK = "/tmp/active_learning_1d.xlsx"
 Workbook.create(
@@ -322,7 +332,7 @@ to evaluate, overlaid on the GP's posterior mean."""
 
 code(
     """def truth_2d(x1, x2):
-    return -((x1 - 1.0) ** 2 + 4 * (x2 - 0.5 * x1 ** 2) ** 2) + 0.02 * np.random.default_rng().normal()
+    return -((x1 - 1.0) ** 2 + 4 * (x2 - 0.5 * x1 ** 2) ** 2) + 0.02 * noise.normal()
 
 WORKBOOK3 = "/tmp/active_learning_2d.xlsx"
 Workbook.create(
