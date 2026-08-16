@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "no dist metadata" branch is what it takes, as `web/test-wasm.mjs` confirms.
 
 ### Fixed
+- **`anova_report(include_replicate=True)` was inert for most callers.** The flag
+  was only honoured inside the `factors is None` branch, so it did nothing for
+  anyone passing an explicit `factors=` list — the common case, and the one the
+  CLI takes. `replicate` is a bookkeeping column that automatic detection skips
+  and a caller naming its factors has no reason to list, which is exactly why
+  the flag has to work in both cases: a request to block on replicate came back
+  silently unblocked, with the replicate variance left in the residual and every
+  F-ratio smaller than it should be. `discopt doe anova` carried a local
+  workaround for this, now removed.
+
 - **Model discrimination broke on any model with a large parameter.** Predicting
   a candidate design went through a dummy QP — `min Σ(θ - θ_nom)²` with the
   design pinned — purely to read back a point every term of which was already

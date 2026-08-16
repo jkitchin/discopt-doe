@@ -270,6 +270,40 @@ def test_anova_excludes_is_center_column():
     assert "A" in sources
 
 
+def test_anova_include_replicate_honoured_with_explicit_factors():
+    """``include_replicate`` must block on the replicate whether or not
+    ``factors`` was passed.
+
+    It used to be read only inside the ``factors is None`` branch, so every
+    caller that named its factors -- the common case, and what the CLI does --
+    got the flag accepted and ignored: the table came back unblocked with the
+    replicate variance left in the residual.
+    """
+    rows = [
+        {"A": a, "replicate": rep, "y": y}
+        for a, rep, y in [
+            (-1, 0, 1.0),
+            (1, 0, 3.0),
+            (-1, 1, 1.6),
+            (1, 1, 3.6),
+        ]
+    ]
+    explicit = anova_report(rows, response="y", factors=["A"], include_replicate=True)
+    auto = anova_report(rows, response="y", include_replicate=True)
+    assert "replicate" in [r.source for r in explicit.rows]
+    assert [r.source for r in explicit.rows] == [r.source for r in auto.rows]
+
+    # Off by default, and the replicate offset stays in the residual.
+    off = anova_report(rows, response="y", factors=["A"], include_replicate=False)
+    assert "replicate" not in [r.source for r in off.rows]
+    by = {r.source: r for r in off.rows}
+    assert by["Residual"].ss > 0.0
+
+    # A caller that already listed it must not get it twice.
+    both = anova_report(rows, response="y", factors=["A", "replicate"], include_replicate=True)
+    assert [r.source for r in both.rows].count("replicate") == 1
+
+
 def test_anova_non_orthogonal_warns():
     """Correlated (non-proportional cross-tab) factors warn but still compute."""
     rows = [

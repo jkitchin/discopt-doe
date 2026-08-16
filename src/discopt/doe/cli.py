@@ -2250,9 +2250,6 @@ def do_anova(params: dict[str, Any]) -> dict[str, Any]:
                 "replicate column with data. Recreate the design with "
                 "--replicates > 1."
             )
-        # anova_report only auto-adds "replicate" when factors is None; we pass
-        # an explicit factor list, so add it here as a blocking factor.
-        factors = [*factors, "replicate"]
     interactions = params.get("interactions") or None
     rows: list[dict[str, Any]] = []
     for r in completed:
