@@ -286,3 +286,58 @@ class TestPipelineConsistency:
 
         assert sel.best_model == "first"
         assert sel.weights["first"] > sel.weights["second"]
+
+
+class TestPredictionNeedsNoSolve:
+    """A pure explicit response model must not reach the solver to predict.
+
+    ``_predict_with_covariance`` used to pin the parameters with a dummy QP
+    ``min Sigma(theta - theta_nom)^2`` and read x* back from the solution. That
+    objective is badly scaled whenever a parameter is large -- ``Ea`` here is
+    ~8e4, which leaves a KKT residual above the solver's absolute 1e-6
+    stationarity tolerance -- and from discopt 0.8 on the stationarity guard
+    rejects the point and returns ``status="error"``, taking down every
+    discrimination design over such a model. x* is fully determined by the
+    nominal parameters and the fixed design, so it is assembled directly.
+    """
+
+    def test_arrhenius_prediction_does_not_call_solve(self, monkeypatch):
+        from discopt.doe.discrimination import _predict_with_covariance
+
+        def _no_solve(self, *args, **kwargs):
+            raise AssertionError("predicting an explicit model must not solve")
+
+        monkeypatch.setattr(dm.Model, "solve", _no_solve)
+
+        pe, _ = _matched_at(500.0)
+        pred = _predict_with_covariance(ArrheniusExp(), pe, {"T": 800.0})
+
+        expected = np.exp(pe["log_A"] - pe["Ea"] / (_R * 800.0))
+        assert np.allclose(pred.y_hat, [expected], rtol=1e-10)
+
+    def test_direct_assembly_matches_the_solve_it_replaces(self, monkeypatch):
+        """On a well-scaled model, where the solve still converges, both agree.
+
+        Arrhenius cannot serve here: its solve path is exactly what discopt 0.8
+        refuses, so the comparison needs a model whose pin objective is well
+        scaled.
+        """
+        import discopt.doe.discrimination as dmod
+        import discopt.doe.fim as fimmod
+        from discopt.doe.templates import response_surface_template
+
+        exp = response_surface_template(
+            [("x1", 0.0, 10.0), ("x2", -5.0, 5.0)], response_name="y", measurement_error=1.0
+        )
+        pv = {n: 0.3 for n in exp.create_model().parameter_names}
+        design = {"x1": 7.0, "x2": -3.0}
+
+        direct = dmod._predict_with_covariance(exp, pv, design)
+
+        # Force the general (solve) path. It is imported from fim inside the
+        # function, so that is where the patch has to land.
+        monkeypatch.setattr(fimmod, "_assemble_x_flat_direct", lambda *a, **k: None)
+        solved = dmod._predict_with_covariance(exp, pv, design)
+
+        np.testing.assert_allclose(direct.y_hat, solved.y_hat, rtol=1e-6)
+        np.testing.assert_allclose(direct.V, solved.V, rtol=1e-6, atol=1e-12)

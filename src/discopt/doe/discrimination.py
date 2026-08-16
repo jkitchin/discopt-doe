@@ -425,10 +425,10 @@ def _predict_with_covariance(
 ) -> _ModelPrediction:
     """Evaluate y_hat, the FIM, and the prediction covariance V at one design.
 
-    Mirrors the compile/solve pipeline used inside
-    :func:`discopt.doe.fim.compute_fim`, with the addition that we also
-    read the predicted response values from the same solve, avoiding a
-    second model build per design point.
+    Mirrors the pipeline used inside :func:`discopt.doe.fim.compute_fim`
+    -- including its solve-free assembly of ``x*`` -- with the addition
+    that we also read the predicted response values from the same point,
+    avoiding a second model build per design point.
 
     ``prior_fim`` (if given, ordered by the model's parameter names) is the FIM
     accumulated from the data collected so far; the prediction covariance is
@@ -437,29 +437,46 @@ def _predict_with_covariance(
     approximation that is independent of how well the parameters are actually
     known and treats non-identifiable directions as zero-variance.
     """
-    from discopt.doe.fim import _compute_jacobian_autodiff, _get_param_indices
+    from discopt.doe.fim import (
+        _assemble_x_flat_direct,
+        _compute_jacobian_autodiff,
+        _get_param_indices,
+    )
     from discopt.parametric import compile_expression, extract_x_flat, flatten_params
 
     em = experiment.create_model(**param_values)
 
-    # Fix design variables (same recipe as compute_fim).
-    for name, val in design_values.items():
-        if name not in em.design_inputs:
-            continue
-        var = em.design_inputs[name]
-        val_arr = np.asarray(float(val), dtype=np.float64)
-        if var.shape:
-            val_arr = np.full(var.shape, val_arr)
-        var.lb = val_arr
-        var.ub = val_arr
+    # Fast path, same as compute_fim: for a pure explicit response model x* is
+    # fully determined by the nominal parameters and the fixed design, so
+    # assemble it directly. The QP this replaces was not merely wasted work --
+    # its objective Sigma(theta - theta_nom)^2 is badly scaled whenever a
+    # parameter is large (an activation energy of ~1e5 leaves a KKT residual
+    # above the solver's absolute 1e-6 stationarity tolerance), and from
+    # discopt 0.8 on that guard rejects the point and returns status="error"
+    # instead of a solution, which took down every discrimination design over
+    # such a model.
+    x_flat = _assemble_x_flat_direct(em, param_values, design_values)
 
-    # Trivial dummy objective to pin parameters at their nominal values.
-    em.model.minimize(
-        sum((em.unknown_parameters[n] - param_values[n]) ** 2 for n in em.parameter_names)
-    )
-    result = em.model.solve()
+    if x_flat is None:
+        # General path: a constrained / implicit-state model genuinely needs a
+        # solve. Fix the design variables first (same recipe as compute_fim).
+        for name, val in design_values.items():
+            if name not in em.design_inputs:
+                continue
+            var = em.design_inputs[name]
+            val_arr = np.asarray(float(val), dtype=np.float64)
+            if var.shape:
+                val_arr = np.full(var.shape, val_arr)
+            var.lb = val_arr
+            var.ub = val_arr
 
-    x_flat = extract_x_flat(result, em.model)
+        # Trivial dummy objective to pin parameters at their nominal values.
+        em.model.minimize(
+            sum((em.unknown_parameters[n] - param_values[n]) ** 2 for n in em.parameter_names)
+        )
+        result = em.model.solve()
+
+        x_flat = extract_x_flat(result, em.model)
 
     # Compile response functions and compute predicted means.
     response_fns = [compile_expression(em.responses[n], em.model) for n in em.response_names]

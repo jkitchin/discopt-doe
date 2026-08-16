@@ -7,7 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The `discopt` floor moved from 0.6 to 0.8.** 0.6 is still the release that
+  introduced the public `discopt.parametric` API and the `"discopt.cli"` plugin
+  hook this package is built on; 0.8 is what it is now pinned to, because that
+  release fixes solver answers the constrained and model-based design paths
+  depend on — a GDP disjunction wrongly reported `infeasible`, a false
+  `Unbounded` on a bounded LP, vectorized models silently receiving no
+  relaxation, and a non-zero `Constraint.rhs` ignored through the public API.
+  The import-time guard (`_MIN_DISCOPT`) and its test moved with it. The browser
+  app is unaffected: it never installs the base package, so the guard's
+  "no dist metadata" branch is what it takes, as `web/test-wasm.mjs` confirms.
+
 ### Fixed
+- **Model discrimination broke on any model with a large parameter.** Predicting
+  a candidate design went through a dummy QP — `min Σ(θ - θ_nom)²` with the
+  design pinned — purely to read back a point every term of which was already
+  known. That objective is badly scaled when a parameter is large: an activation
+  energy of ~8e4 leaves a KKT residual of 4e-6 against the solver's absolute
+  1e-6 stationarity tolerance, and from discopt 0.8 on the stationarity guard
+  correctly refuses to certify the point and returns `status="error"`, so
+  `discriminate_design` died with *"No solution available in result"* on the
+  canonical Arrhenius-vs-Eyring case. `_predict_with_covariance` now assembles
+  `x*` directly via `fim._assemble_x_flat_direct` — the fast path `compute_fim`
+  has taken since it was added — and falls back to the solve only for a
+  constrained or implicit-state model that genuinely needs one. Guarded by a
+  test that makes `Model.solve` raise.
 - **Every mixture design was broken in the browser.** `scheffe-linear`,
   `scheffe-quadratic` and `scheffe-special-cubic` failed at design time with
   `No module named 'discopt.estimate'`: the mixture branch reached for
