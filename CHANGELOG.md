@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-16
+
 ### Added
 - **The browser app is counted in Google Analytics.** A GA4 tag on
   `web/index.html` only — the docs are not instrumented — reporting to the same
@@ -298,5 +300,6 @@ First public release on PyPI.
 ### Changed
 - Depend on `discopt>=0.6` from PyPI (removed the temporary `[tool.uv.sources]` git pin).
 
-[Unreleased]: https://github.com/jkitchin/discopt-doe/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jkitchin/discopt-doe/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jkitchin/discopt-doe/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jkitchin/discopt-doe/releases/tag/v0.2.0
