@@ -4,6 +4,7 @@ parts:
   - caption: Getting Started
     chapters:
       - file: browser-app
+      - file: choosing-a-design
       - file: notebooks/tutorial_doe
       - file: notebooks/doe_cli
       - file: notebooks/tutorial_batch_doe

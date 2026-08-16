@@ -7,7 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The `discopt` floor moved from 0.6 to 0.8.** 0.6 is still the release that
+  introduced the public `discopt.parametric` API and the `"discopt.cli"` plugin
+  hook this package is built on; 0.8 is what it is now pinned to, because that
+  release fixes solver answers the constrained and model-based design paths
+  depend on — a GDP disjunction wrongly reported `infeasible`, a false
+  `Unbounded` on a bounded LP, vectorized models silently receiving no
+  relaxation, and a non-zero `Constraint.rhs` ignored through the public API.
+  The import-time guard (`_MIN_DISCOPT`) and its test moved with it. The browser
+  app is unaffected: it never installs the base package, so the guard's
+  "no dist metadata" branch is what it takes, as `web/test-wasm.mjs` confirms.
+
 ### Fixed
+- **`anova_report(include_replicate=True)` was inert for most callers.** The flag
+  was only honoured inside the `factors is None` branch, so it did nothing for
+  anyone passing an explicit `factors=` list — the common case, and the one the
+  CLI takes. `replicate` is a bookkeeping column that automatic detection skips
+  and a caller naming its factors has no reason to list, which is exactly why
+  the flag has to work in both cases: a request to block on replicate came back
+  silently unblocked, with the replicate variance left in the residual and every
+  F-ratio smaller than it should be. `discopt doe anova` carried a local
+  workaround for this, now removed.
+
+- **Model discrimination broke on any model with a large parameter.** Predicting
+  a candidate design went through a dummy QP — `min Σ(θ - θ_nom)²` with the
+  design pinned — purely to read back a point every term of which was already
+  known. That objective is badly scaled when a parameter is large: an activation
+  energy of ~8e4 leaves a KKT residual of 4e-6 against the solver's absolute
+  1e-6 stationarity tolerance, and from discopt 0.8 on the stationarity guard
+  correctly refuses to certify the point and returns `status="error"`, so
+  `discriminate_design` died with *"No solution available in result"* on the
+  canonical Arrhenius-vs-Eyring case. `_predict_with_covariance` now assembles
+  `x*` directly via `fim._assemble_x_flat_direct` — the fast path `compute_fim`
+  has taken since it was added — and falls back to the solve only for a
+  constrained or implicit-state model that genuinely needs one. Guarded by a
+  test that makes `Model.solve` raise.
 - **Every mixture design was broken in the browser.** `scheffe-linear`,
   `scheffe-quadratic` and `scheffe-special-cubic` failed at design time with
   `No module named 'discopt.estimate'`: the mixture branch reached for
@@ -176,6 +211,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sympy tree node by node, rejecting attribute access, subscripts, lambdas,
   comprehensions, and any call outside a fixed function list. Opening a
   workbook someone sent you therefore executes none of their code.
+
+### Documentation
+- **The committed notebook outputs are now re-generated and gated.** Jupyter Book
+  runs with `execute_notebooks: "off"`, so the committed outputs *are* the
+  published book — and nothing re-ran them after the initial commit. Eight of the
+  nine had drifted, and `latin-designs.ipynb` no longer ran at all. New
+  `scripts/execute_notebooks.py` executes them and writes the outputs back
+  (`make notebooks`); a `notebooks` CI job runs it with `--check` so this cannot
+  recur silently. All notebooks re-executed, plus these content fixes:
+  - `latin-designs.ipynb` asked for a row×treatment interaction on a single
+    Latin square. Row and treatment determine column there, so the interaction
+    subspace contains the column main effect and the terms are aliased — the
+    non-orthogonality guard now (correctly) refuses it, and the notebook errored
+    out on that cell. The section is rewritten to explain the aliasing, show the
+    refusal deliberately, and demonstrate the two ways out: replicate and block
+    on `replicate`, or drop `column` and pay for the interaction with a block.
+  - `tutorial_batch_doe.ipynb` demonstrated `sequential_doe` with the exact
+    replicate-confusion antipattern its docstring warns about: a runner always
+    returning `{"y": ...}`, so observations taken at different designed times
+    were fitted as replicates at one condition and `k_hat` wandered (0.219,
+    0.543, 0.586 against `k_true = 0.7`). It now uses the prescribed stateful
+    experiment, converging to 0.693, and explains why.
+  - `active-learning.ipynb` drew its simulated measurement noise from
+    `np.random.default_rng()` with no seed — fresh entropy on every call, so the
+    notebook could not reproduce its own numbers. It now uses a seeded
+    generator. Its `ConvergenceWarning` filter matched on the message text,
+    which a `ConvergenceWarning` does not contain, so the filter never fired;
+    it now filters on the category.
+  - `identifiability-estimability.ipynb` published ~55 KB of solver log lines,
+    ANSI escape codes and absolute `site-packages` paths from the deliberately
+    singular fit it is built around. The solver's tracing is quieted via
+    `RUST_LOG`, the `nan`-standard-error `RuntimeWarning` is filtered (the
+    summary tables already report it), and the repeated `discopt.solver`
+    "duals withheld" warning is scoped away from the profile loop — leaving the
+    one occurrence where it is the point.
+- **New chapter: "Choosing a design"** (`docs/choosing-a-design.md`), a router
+  from the question you are trying to answer to the design that answers it —
+  screening, blocking, response surfaces, space filling, optimal design,
+  mixtures and your own model — with the run-count and criterion (D/A/E/ME)
+  guidance, the pitfalls that cost a batch of experiments, and links into the
+  notebook that works each one through. The browser app links to it from the
+  design-type selector and its footer.
 
 ## [0.2.0] - 2026-07-12
 

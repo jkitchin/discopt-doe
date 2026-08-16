@@ -23,6 +23,8 @@ uv run pre-commit install     # runs ruff + hygiene hooks on every commit
 | Lint | `uv run ruff check .` | `make lint` |
 | Format check | `uv run ruff format --check .` | `make lint` |
 | Build the docs | `uv run jupyter-book build docs/ -W` | `make docs` |
+| Re-execute the notebooks | `uv run python scripts/execute_notebooks.py` | `make notebooks` |
+| Check the notebooks still run | `uv run python scripts/execute_notebooks.py --check` | `make notebooks-check` |
 | Build artifacts | `rm -rf dist && uv build` | `make build` |
 | Check artifacts | `uvx twine check dist/*` | `make check` |
 | All pre-flight checks | — | `make preflight` |
@@ -31,8 +33,14 @@ Notes:
 - The default pytest `addopts` is `-m 'not slow'`, so **slow tests are skipped unless you
   ask for them**. A release must run them (`make test`).
 - Docs build with `-W` (warnings-as-errors). Notebooks are pre-executed and committed
-  (`execute_notebooks: "off"`); regenerate them with `scripts/build_*_notebook.py` when the
-  code they exercise changes.
+  (`execute_notebooks: "off"`), so the committed outputs are exactly what the book
+  publishes. Two separate steps keep them honest:
+  - `scripts/build_*_notebook.py` writes the *source* of the four generated notebooks
+    (the rest are edited directly). Re-run the relevant one when the code it exercises
+    changes.
+  - `scripts/execute_notebooks.py` runs them and writes the outputs back
+    (`make notebooks`). The `notebooks` CI job runs it with `--check` (execute, do not
+    save, fail on any error), so a change that breaks a notebook cannot ship silently.
 - Lint/format is **ruff** only (line-length 100, target py310). It runs via
   **pre-commit** (`.pre-commit-config.yaml`); `docs/notebooks/` is excluded (see
   `[tool.ruff] extend-exclude` in `pyproject.toml`).
@@ -71,8 +79,8 @@ since been removed.)
       `uv sync --python 3.12 && uv run pytest tests/ -q`.
 - [ ] Lint + format clean: `make lint`.
 - [ ] Docs build clean: `make docs`.
-- [ ] If code feeding the notebooks changed, regenerate them
-      (`uv run python scripts/build_*_notebook.py`) and re-commit the executed notebooks.
+- [ ] Notebooks re-executed and committed: `make notebooks` (first re-run any
+      `scripts/build_*_notebook.py` whose code changed, since that rewrites the source).
 
 ### 2. Version & metadata
 

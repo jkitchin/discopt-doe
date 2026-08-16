@@ -34,7 +34,7 @@ package; both share the same `Experiment` interface.
 
 ## Install
 
-Both `discopt-doe` and its `discopt>=0.6` dependency are published on
+Both `discopt-doe` and its `discopt>=0.8` dependency are published on
 [PyPI](https://pypi.org/project/discopt-doe/), so pip resolves everything:
 
 ```bash

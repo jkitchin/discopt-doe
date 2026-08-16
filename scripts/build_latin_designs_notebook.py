@@ -52,9 +52,9 @@ instead.
 | `hyper_graeco_latin_square(k)` | 5       | $k^2$        |
 
 `anova_report` then produces an additive-effects F-table from the
-completed runs — Type-I sums of squares, F-statistics, p-values, with
-support for two-way interactions if you want to test the no-interaction
-assumption explicitly.
+completed runs — Type-I sums of squares, F-statistics, p-values. It can
+also test a two-way interaction, though in a Latin square that costs you
+one of the blocks; §2 shows why.
 
 ## Plan
 
@@ -243,13 +243,21 @@ for e in table.rows:
 )
 
 md(
-    """### Testing the no-interaction assumption
+    r"""### Testing the no-interaction assumption
 
-A Latin square cannot estimate interactions in general (the design
-doesn't have enough degrees of freedom). But if you have
-*replicates* — independent repeats of the entire square — you can
-add a `replicate` column and request specific 2-way interactions via
-the `interactions=` argument."""
+A Latin square cannot estimate interactions, and the reason is worth
+being precise about: it is not merely that the design runs out of
+degrees of freedom. In a $k \times k$ square each treatment appears
+exactly once per row, so **`row` and `treatment` together determine
+`column`**. The `row × treatment` subspace therefore *contains* the
+`column` main effect. The two terms are aliased.
+
+Replicating the square adds residual degrees of freedom, but it does
+not break that aliasing. If you ask for `row × treatment` while
+`column` is still in the model, the marginal (Type-I, unadjusted) sums
+of squares count the same variation twice, the explained SS exceeds the
+total, and `anova_report` refuses rather than printing a table with a
+negative residual."""
 )
 
 code(
@@ -273,9 +281,59 @@ for r in design_rep.rows:
     )
     rows_rep.append({**r, "y": float(y)})
 
-table_int = anova_report(
+print(f"{len(rows_rep)} runs = 2 replicates of a 4x4 square")
+"""
+)
+
+md(
+    """What replication *does* buy you first is a block for the replicate
+itself — whether the second pass through the square sat at a different
+level than the first. Pass `include_replicate=True` and the `replicate`
+column is added as an extra blocking factor:"""
+)
+
+code(
+    """table_rep = anova_report(
     rows_rep, response="y",
     factors=["row", "column", "treatment"],
+    include_replicate=True,
+)
+print(table_rep.summary())
+"""
+)
+
+md(
+    """`replicate` is non-significant here, which is what we want: the two
+passes agree, so nothing systematic drifted between them.
+
+Now the interaction. Asking for `row × treatment` with `column` still
+in the model is the aliased request described above, and it is refused:"""
+)
+
+code(
+    """try:
+    anova_report(
+        rows_rep, response="y",
+        factors=["row", "column", "treatment"],
+        interactions=[("row", "treatment")],
+    )
+except ValueError as err:
+    print("refused:", err)
+"""
+)
+
+md(
+    """To actually test the assumption you have to pay for it by dropping
+the `column` block. With `column` out of the model, every
+(`row`, `treatment`) cell holds exactly two observations — a balanced,
+fully orthogonal two-way layout with replication — and the interaction
+is estimable on 9 degrees of freedom:"""
+)
+
+code(
+    """table_int = anova_report(
+    rows_rep, response="y",
+    factors=["row", "treatment"],
     interactions=[("row", "treatment")],
 )
 print(table_int.summary())
@@ -283,11 +341,18 @@ print(table_int.summary())
 )
 
 md(
-    """The `row × treatment` interaction is non-significant — exactly
-what we'd expect, because the synthetic data was generated from an
-additive model. If you saw a significant interaction here, the
-no-interaction assumption that underlies the Latin square would be
-violated and you should consider switching to a factorial design.
+    """The `row × treatment` interaction is non-significant — exactly what
+we'd expect, because the synthetic data was generated from an additive
+model. If you saw a significant interaction here, the no-interaction
+assumption that underlies the Latin square would be violated and you
+should consider switching to a factorial design.
+
+Note the price of the test: `column`'s variance is now sitting in the
+residual, so the residual MS is larger and every F-statistic in this
+table is smaller than in the additive one above. That is the trade the
+Latin square makes — it buys its economy by assuming the interactions
+away, and you can only check the assumption by giving up one of the
+blocks.
 """
 )
 

@@ -12,7 +12,11 @@ license = { text = "EPL-2.0" }
 authors = [{ name = "John Kitchin", email = "jkitchin@andrew.cmu.edu" }]
 dependencies = [
     # Public parametric-compile API + the "discopt.cli" plugin hook land in 0.6.
-    "discopt>=0.6",
+    # The floor is 0.8 because that release fixes solver answers this package
+    # relies on: a GDP disjunction wrongly declared infeasible, a false
+    # `Unbounded` on a bounded LP, vectorized models silently unrelaxed, and a
+    # non-zero `Constraint.rhs` silently ignored through the public API.
+    "discopt>=0.8",
     "jax>=0.4",          # fim.py / model_based.py use jax directly
     "numpy>=1.24",
     "scipy>=1.10",

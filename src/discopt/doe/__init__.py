@@ -61,10 +61,13 @@ from importlib.metadata import PackageNotFoundError as _PkgNotFound
 from importlib.metadata import version as _dist_version
 
 # discopt-doe consumes the public discopt.parametric API and the
-# "discopt.cli" plugin hook, both introduced in discopt 0.6. A stale base
-# install fails here with a clear message instead of an AttributeError later.
-# Two-component compare so 0.6.0.dev0 local builds pass.
-_MIN_DISCOPT = (0, 6)
+# "discopt.cli" plugin hook, both introduced in discopt 0.6, and the solver
+# correctness fixes that landed in 0.8 (false `infeasible` on a GDP
+# disjunction, false `Unbounded` on a bounded LP, an ignored non-zero
+# `Constraint.rhs`). A stale base install fails here with a clear message
+# instead of a wrong answer or an AttributeError later. Two-component compare
+# so 0.8.0.dev0 local builds pass.
+_MIN_DISCOPT = (0, 8)
 
 
 def _version_prefix(found: str) -> tuple[int, ...]:

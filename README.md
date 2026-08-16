@@ -38,7 +38,7 @@ machine. See [docs/browser-app.md](docs/browser-app.md).
 
 ## Install
 
-Both `discopt-doe` and its `discopt` dependency are published on
+Both `discopt-doe` and its `discopt>=0.8` dependency are published on
 [PyPI](https://pypi.org/project/discopt-doe/), so a plain pip install resolves
 everything:
 
@@ -53,10 +53,6 @@ Or with uv:
 ```bash
 uv pip install "discopt-doe[gui]"
 ```
-
-Requires `discopt>=0.6` (the first release with the public
-`discopt.parametric` API and the CLI plugin hook); it is pulled in
-automatically.
 
 From source, to work on the package itself:
 
@@ -187,7 +183,7 @@ a `[tool.uv.sources]` override pointing `discopt` at your editable clone:
 
 ```toml
 [tool.uv.sources]
-discopt = { path = "../../projects/discopt", editable = true }
+discopt = { path = "../discopt", editable = true }
 ```
 
 Docs are a Jupyter Book:

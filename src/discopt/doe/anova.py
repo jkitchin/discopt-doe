@@ -158,11 +158,16 @@ def anova_report(
         raise ValueError(f"response column {response!r} missing from rows")
 
     if factors is None:
-        candidates = [k for k in rows[0].keys() if k != response and not _is_bookkeeping_column(k)]
-        if include_replicate and "replicate" in rows[0]:
-            candidates.append("replicate")
-        factors = candidates
+        factors = [k for k in rows[0].keys() if k != response and not _is_bookkeeping_column(k)]
     factors = list(factors)
+    # ``replicate`` is a bookkeeping column, so automatic detection skips it and
+    # a caller naming its factors has no reason to list it -- which is exactly
+    # why the flag has to be honoured in both cases. Gating it on
+    # ``factors is None`` made it silently inert for every caller that passed
+    # ``factors=``, the common case, so a blocked analysis quietly came back
+    # unblocked with the replicate variance left in the residual.
+    if include_replicate and "replicate" in rows[0] and "replicate" not in factors:
+        factors.append("replicate")
     if not factors:
         raise ValueError("no factor columns identified")
 
