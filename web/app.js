@@ -16,6 +16,25 @@ const WHEEL_DIR = "wheels/";
 
 const $ = (id) => document.getElementById(id);
 
+/**
+ * Send one Google Analytics event.
+ *
+ * Page counts say little about this app; what matters is which designs people
+ * actually generate and whether they ever come back with data. GA4 event names
+ * take letters, digits and underscores only, so the design type rides along as
+ * a parameter rather than in the name.
+ *
+ * Best-effort by design: read off `globalThis` so the Node test harness does
+ * not trip over a missing `window`, and a `gtag` that is absent (ad blocker),
+ * still loading, or deliberately unconfigured (localhost — see index.html) is
+ * a no-op.
+ */
+function track(name, template) {
+  const gtag = globalThis.gtag;
+  if (typeof gtag !== "function") return;
+  gtag("event", name, template ? { template } : {});
+}
+
 const state = {
   pyodide: null,
   templates: new Map(),
@@ -614,7 +633,11 @@ async function generate() {
     $("design-result").hidden = false;
     $("download-design").hidden = false;
     download(out.file_path, out.download_name);
+    track("design", out.template);
   } catch (err) {
+    // Which templates fail in the wild is otherwise invisible: the error is
+    // shown to the one person who hit it and nowhere else.
+    track("design_failed", state.current?.name);
     showError($("design-error"), err);
     $("design-result").hidden = true;
     $("download-design").hidden = true;
@@ -953,10 +976,13 @@ async function analyzeFile(file) {
         "columns untouched.",
       "If another tool re-exported the file, generate a fresh design and copy your numbers in.",
     ], err);
+    track("analyze_rejected");
     return;
   }
 
   const s = out.status;
+  // The funnel question: do people run the experiments and come back at all?
+  track("analyze", s.template);
   box.appendChild(
     block(
       "Campaign",
@@ -1242,5 +1268,8 @@ for (const evt of ["dragleave", "drop"]) {
 
 boot().catch((err) => {
   setBoot(`Could not start: ${err.message}`, "failed");
+  // A CDN or wheel-install failure leaves the page dead on arrival, and the
+  // page_view alone looks like an ordinary visit.
+  track("boot_failed");
   console.error(err);
 });

@@ -6,6 +6,33 @@
 <title>discopt-doe — design experiments in your browser</title>
 <meta name="description" content="Generate a design of experiments spreadsheet, fill it in, and upload it back for fitting and ANOVA. Runs entirely in your browser.">
 <link rel="stylesheet" href="style.css">
+<!-- Google Analytics (GA4) — the same property as kitchingroup.cheme.cmu.edu,
+     so the app's traffic lands beside the group site's. Segment the two on the
+     `hostname` dimension.
+
+     Wrapped rather than pasted verbatim for one reason: gtag.js has no local
+     opt-out of its own, so a plain snippet would count every page load from
+     `build_web_app.py --serve` as a real visit. `gtag` is defined either way,
+     so the events in app.js are a harmless no-op when it is not configured —
+     which is also what happens when an ad blocker eats the script. -->
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag() { dataLayer.push(arguments); }
+  {
+    const h = location.hostname;
+    const local =
+      h === "" ||
+      /^(localhost$|127\.|0\.0\.0\.0$|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)/.test(h);
+    if (!local) {
+      const tag = document.createElement("script");
+      tag.async = true;
+      tag.src = "https://www.googletagmanager.com/gtag/js?id=G-PH8NF4F0RE";
+      document.head.appendChild(tag);
+      gtag("js", new Date());
+      gtag("config", "G-PH8NF4F0RE");
+    }
+  }
+</script>
 </head>
 <body>
 
@@ -13,7 +40,7 @@
   <div class="wrap">
     <h1>discopt&#8209;doe</h1>
     <p class="tagline">Design an experiment, download the spreadsheet, fill it in, upload it back.
-      Everything runs in your browser — nothing is uploaded anywhere.</p>
+      Everything runs in your browser — your data never leaves it.</p>
     <p id="boot-status" class="boot" role="status" aria-live="polite">
       <span class="spinner" aria-hidden="true"></span><span id="boot-text">Starting Python…</span>
     </p>

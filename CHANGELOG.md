@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The browser app is counted in Google Analytics.** A GA4 tag on
+  `web/index.html` only — the docs are not instrumented — reporting to the same
+  property as `kitchingroup.cheme.cmu.edu`, so the app's traffic lands beside
+  the group site's and the two separate on the `hostname` dimension. Beyond the
+  page view it records five events, because page views answer nothing about an
+  app whose whole point is what people build with it: `design` and
+  `design_failed` (which design types get generated, and which ones fail in the
+  wild — otherwise visible only to the person who hit the error), `analyze` and
+  `analyze_rejected` (the funnel question: do people run the experiments and
+  come back with data?), and `boot_failed` (a Pyodide or wheel-install failure
+  leaves the page dead on arrival and otherwise looks like an ordinary visit).
+  The design type rides along as a `template` parameter, since GA4 event names
+  take no hyphens. The snippet is wrapped rather than pasted verbatim: gtag.js
+  has no local opt-out of its own, so a plain one would count every load from
+  `build_web_app.py --serve` as a real visit. Every call is best-effort — read
+  off `globalThis` so the Node test harness does not trip over a missing
+  `window`, and an absent, still-loading or unconfigured `gtag` is a no-op.
+  The masthead's "nothing is uploaded anywhere" is now "your data never leaves
+  it", which is the claim that was ever the point and is still true.
+
 ### Changed
 - **The `discopt` floor moved from 0.6 to 0.8.** 0.6 is still the release that
   introduced the public `discopt.parametric` API and the `"discopt.cli"` plugin
