@@ -15,7 +15,9 @@ machine you cannot install software on.
 
 **Design.** Choose a design type, name your factors and their ranges, and it
 generates the run list as a `.xlsx` campaign workbook — the same format
-{doc}`the CLI <notebooks/doe_cli>` reads and writes.
+{doc}`the CLI <notebooks/doe_cli>` reads and writes. If you are not sure which
+design type you want, {doc}`choosing-a-design` routes you there from the
+question you are trying to answer.
 
 - **Space-filling and response surface** — Latin hypercube, central composite,
   Box-Behnken.

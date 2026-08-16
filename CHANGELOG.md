@@ -246,6 +246,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     summary tables already report it), and the repeated `discopt.solver`
     "duals withheld" warning is scoped away from the profile loop — leaving the
     one occurrence where it is the point.
+- **New chapter: "Choosing a design"** (`docs/choosing-a-design.md`), a router
+  from the question you are trying to answer to the design that answers it —
+  screening, blocking, response surfaces, space filling, optimal design,
+  mixtures and your own model — with the run-count and criterion (D/A/E/ME)
+  guidance, the pitfalls that cost a batch of experiments, and links into the
+  notebook that works each one through. The browser app links to it from the
+  design-type selector and its footer.
 
 ## [0.2.0] - 2026-07-12
 
