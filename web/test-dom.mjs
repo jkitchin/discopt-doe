@@ -524,6 +524,38 @@ await scenario(
   }
 }
 
+// ── analytics events, when there is anything listening ──────────────
+
+{
+  // Everything above ran with no `gtag` on globalThis, which is the no-op path
+  // — that it got this far is the check that a blocked or unconfigured tag
+  // cannot take the app down with it. Now the other side: the events have to
+  // carry the design type, or they answer nothing.
+  const sent = [];
+  globalThis.gtag = (kind, name, params) => sent.push([kind, name, params?.template]);
+
+  RESPONSES = { inspect_workbook: inspected([1, 2, 3, 4], "latin-hypercube"), run_fit: () => FIT };
+  await acceptFile(file("done.xlsx"));
+
+  RESPONSES = { inspect_workbook: () => ({ ok: false, error: "not a campaign workbook" }) };
+  await acceptFile(file("stranger.xlsx"));
+
+  delete globalThis.gtag;
+
+  const seen = sent.map((e) => e.filter(Boolean).join(":"));
+  // GA4 rejects an event name with a hyphen in it, so this is not cosmetic.
+  const badName = sent.find(([, name]) => !/^[a-z][a-z0-9_]{0,39}$/.test(name));
+  if (!seen.includes("event:analyze:latin-hypercube") || !seen.includes("event:analyze_rejected")) {
+    failures++;
+    console.log(`FAIL  the analytics events are wrong (got: ${seen.join(", ") || "none"})`);
+  } else if (badName) {
+    failures++;
+    console.log(`FAIL  "${badName[1]}" is not a legal GA4 event name`);
+  } else {
+    console.log("PASS  an analysis and a refusal are each counted, by design type");
+  }
+}
+
 console.error = consoleError;
 cleanup();
 if (missing.length) {

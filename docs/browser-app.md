@@ -4,8 +4,11 @@ There is a
 **[browser version of the design workflow](https://jkitchin.github.io/discopt-doe/app/)**
 that needs no installation at all — no Python, no uv, no compiler. It runs in your
 tab: pick a design, download the spreadsheet, run your experiments, fill in the
-response column, and upload it back for fitting and ANOVA. Nothing is sent to a
-server; there is no server.
+response column, and upload it back for fitting and ANOVA. Your data never
+leaves your browser — there is no server to send it to. The page itself is
+counted in the group's Google Analytics, along with which design types get
+generated and whether a workbook comes back, which is what says where this is
+worth improving; none of that includes anything from your workbook.
 
 It is the right starting point when you want to hand a colleague a design
 without first walking them through a Python install, or when you are on a
