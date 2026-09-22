@@ -41,6 +41,7 @@ __all__ = [
     "StationaryPointCI",
     "SteepestAscentPath",
     "canonical_analysis",
+    "quadratic_from_fit",
     "desirability",
     "overall_desirability",
     "quadratic_form",
@@ -125,6 +126,192 @@ def quadratic_form(
             B[i, j] = B[j, i] = cross[idx] / 2.0
             idx += 1
     return b0, b, B
+
+
+# --------------------------------------------------------------------------
+# Getting coefficients out of somebody else's fit
+# --------------------------------------------------------------------------
+
+_INTERCEPT_SPELLINGS = ("Intercept", "(Intercept)", "const", "1")
+
+
+def _square_spellings(f: str) -> tuple[str, ...]:
+    return (
+        f"I({f} ** 2)",
+        f"I({f}**2)",
+        f"I({f} * {f})",
+        f"{f}:{f}",
+        f"{f}**2",
+        f"{f}^2",
+        f"{f}_sq",
+        f"{f}_squared",
+        f"np.power({f}, 2)",
+        f"pow({f}, 2)",
+    )
+
+
+def _cross_spellings(a: str, b: str) -> tuple[str, ...]:
+    return (
+        f"{a}:{b}",
+        f"{b}:{a}",
+        f"{a}*{b}",
+        f"{b}*{a}",
+        f"I({a} * {b})",
+        f"I({b} * {a})",
+        f"I({a}*{b})",
+        f"I({b}*{a})",
+        f"{a}_{b}",
+        f"{b}_{a}",
+    )
+
+
+def _named_coefficients(fit: Any) -> tuple[Mapping[str, float], list[str]]:
+    """``(name -> value, order)`` from a fit object, a Series or a mapping."""
+    params = getattr(fit, "params", fit)
+    keys = getattr(params, "index", None)  # pandas Series
+    if keys is not None:
+        names = [str(k) for k in keys]
+        return {n: float(v) for n, v in zip(names, np.asarray(params, dtype=float))}, names
+    if isinstance(params, Mapping):
+        return {str(k): float(v) for k, v in params.items()}, [str(k) for k in params]
+    raise TypeError(
+        "expected a fit with named coefficients (a statsmodels result, a pandas "
+        f"Series, or a mapping), got {type(fit).__name__}"
+    )
+
+
+def quadratic_from_fit(
+    fit: Any,
+    factors: Sequence[str],
+    *,
+    aliases: Mapping[str, str] | None = None,
+    covariance: Any = None,
+    dof: int | None = None,
+) -> dict[str, Any]:
+    """Read a quadratic fitted elsewhere into this module's convention.
+
+    A model fitted with a formula interface names its terms after the formula
+    (``Intercept``, ``x1``, ``I(x1 ** 2)``, ``x1:x2``), while everything here
+    speaks ``b0``, ``b1``, ``b11``, ``b12``. Translating by hand means writing
+    two parallel lists in exactly the right order, and getting the cross-term
+    order wrong is silent: the analysis still runs and reports the wrong
+    stationary point. This does the translation, and says what it matched.
+
+    The result has the shape of a
+    :func:`~discopt.doe.symbolic.fit_least_squares` result, so it can be passed
+    straight to :func:`canonical_analysis` or :func:`stationary_point_ci`, which
+    then take the covariance and the degrees of freedom from it::
+
+        quad = smf.ols("y ~ x1 + x2 + I(x1**2) + I(x2**2) + x1:x2", data).fit()
+        fitted = quadratic_from_fit(quad, ["x1", "x2"])
+        ci = stationary_point_ci(fitted, center=CENTER, half_range=HALF)
+
+    Parameters
+    ----------
+    fit : object
+        Anything with named coefficients: a statsmodels results object (its
+        ``cov_params()`` and ``df_resid`` are used when present), a pandas
+        ``Series``, or a plain mapping.
+    factors : sequence of str
+        The factor names as the fit spells them, in the order the coded
+        coordinates should come out in. This order fixes the meaning of every
+        ``b1``/``b11``/``b12``, so it is required rather than guessed.
+    aliases : mapping, optional
+        Overrides for terms spelled in a way this does not recognize, keyed by
+        the target name: ``{"b12": "x1_by_x2"}``.
+    covariance : array or DataFrame, optional
+        Coefficient covariance, if it should not be taken from the fit.
+    dof : int, optional
+        Residual degrees of freedom, if it should not be taken from the fit.
+
+    Returns
+    -------
+    dict
+        ``estimates`` (keyed ``b0``, ``b1``, ...), ``parameter_names``,
+        ``covariance`` (reordered to match, or ``None``),
+        ``degrees_of_freedom``, and ``terms``: which source term each
+        coefficient came from, which is worth a glance the first time.
+    """
+    values, _ = _named_coefficients(fit)
+    lookup = {k.replace(" ", ""): k for k in values}
+    factors = [str(f) for f in factors]
+    if len(set(factors)) != len(factors):
+        raise ValueError(f"factors must be distinct, got {factors}")
+    aliases = dict(aliases or {})
+    k = len(factors)
+    names = _quadratic_names(k)
+
+    wanted: dict[str, tuple[str, ...]] = {"b0": _INTERCEPT_SPELLINGS}
+    for i, f in enumerate(factors, start=1):
+        wanted[f"b{i}"] = (f,)
+    for i, f in enumerate(factors, start=1):
+        wanted[f"b{i}{i}"] = _square_spellings(f)
+    for i in range(k):
+        for j in range(i + 1, k):
+            wanted[f"b{i + 1}{j + 1}"] = _cross_spellings(factors[i], factors[j])
+
+    estimates: dict[str, float] = {}
+    terms: dict[str, str] = {}
+    missing: list[str] = []
+    for name in names:
+        candidates = (aliases[name],) if name in aliases else wanted[name]
+        for cand in candidates:
+            key = lookup.get(str(cand).replace(" ", ""))
+            if key is not None:
+                estimates[name] = float(values[key])
+                terms[name] = key
+                break
+        else:
+            missing.append(f"{name} (looked for {list(candidates)})")
+    if missing:
+        raise ValueError(
+            "could not find a term for "
+            + "; ".join(missing)
+            + f". The fit has {sorted(values)}. Pass aliases={{'b12': '<term>'}} for "
+            "any term spelled differently."
+        )
+
+    cov = covariance if covariance is not None else _fit_covariance(fit)
+    if cov is not None:
+        cov = _reorder_covariance(cov, fit, [terms[n] for n in names])
+    if dof is None:
+        raw = getattr(fit, "df_resid", None)
+        dof = int(raw) if raw is not None else None
+
+    return {
+        "estimates": estimates,
+        "parameter_names": names,
+        "covariance": cov,
+        "degrees_of_freedom": dof,
+        "terms": terms,
+    }
+
+
+def _fit_covariance(fit: Any) -> Any:
+    cov_params = getattr(fit, "cov_params", None)
+    if callable(cov_params):
+        return cov_params()
+    return getattr(fit, "covariance", None)
+
+
+def _reorder_covariance(cov: Any, fit: Any, order: Sequence[str]) -> np.ndarray:
+    """Covariance rows/columns in ``order``, by label when labelled.
+
+    A covariance that arrives unlabelled is assumed to follow the fit's own
+    coefficient order, which is the only thing it can mean.
+    """
+    loc = getattr(cov, "loc", None)
+    if loc is not None:
+        return np.asarray(loc[list(order), list(order)], dtype=float)
+    arr = np.asarray(cov, dtype=float)
+    _, source_order = _named_coefficients(fit)
+    if arr.shape != (len(source_order), len(source_order)):
+        raise ValueError(
+            f"covariance has shape {arr.shape}, expected "
+            f"({len(source_order)}, {len(source_order)}) to match the fit's coefficients"
+        )
+    idx = [source_order.index(name) for name in order]
+    return arr[np.ix_(idx, idx)]
 
 
 def _resolve_bB(coefficients, b, B, b0):

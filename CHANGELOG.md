@@ -115,6 +115,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of a misleading `0.0000`.
 
 ### Added
+- **`quadratic_from_fit`: a quadratic fitted elsewhere, in this package's
+  convention.** A model fitted through a formula interface names its terms after
+  the formula (`Intercept`, `I(x1 ** 2)`, `x1:x2`) while the RSM tools speak
+  `b0`, `b11`, `b12`, so using `canonical_analysis` or `stationary_point_ci` on
+  someone else's fit meant writing two parallel name lists in exactly the right
+  order. Getting the cross-term order wrong is silent: the analysis still runs
+  and reports the wrong stationary point. The adapter takes any fit with named
+  coefficients (a statsmodels result, a pandas `Series`, a mapping) plus the
+  factor names, recognizes the usual spellings (`I(x ** 2)`, `x:x`, `x_sq`,
+  `x^2`, `a:b`, `a*b`, `Intercept`, `const`), and returns a
+  `fit_least_squares`-shaped dict -- estimates, reordered covariance and
+  residual degrees of freedom -- that the analysis functions accept directly. It
+  also reports which source term each coefficient came from, and an unrecognized
+  term raises with what it searched for rather than guessing (`aliases=` covers
+  the rest).
 - **Campaigns: runs with conditions.**
   - `campaign_experiment(model, runs)` turns a per-run model (a `SymbolicModel`,
     an `ODEExperiment` or an `Experiment` with design inputs) plus a list of run

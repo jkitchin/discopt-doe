@@ -57,6 +57,10 @@ doe = "discopt.doe.cli"
 dev = [
     "pytest>=8",
     "pytest-timeout",
+    # quadratic_from_fit translates a formula-fitted quadratic into this
+    # package's coefficient names; the test that pins it against the
+    # hand-written translation needs a real formula fit to be worth anything.
+    "statsmodels>=0.14",
     # tutorial notebooks and exploration.plot_* use matplotlib
     "matplotlib>=3.5",
     # notebook build scripts (scripts/build_*_notebook.py)
