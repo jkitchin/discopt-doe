@@ -115,6 +115,11 @@ function fillForm(t, random) {
       return { name, levels: Array.from({ length: k }, (_, j) => `${name}${j + 1}`).join(",") };
     }
     if (style === "levels2") return { name, low: "lo", high: "hi" };
+    // A mixture component's bounds are proportions of the mixture total (1 by
+    // default), and together they must leave room for a blend to exist.
+    if (t.name.startsWith("scheffe-")) {
+      return { name, low: [0, 0, 0.05][Math.floor(random() * 3)], high: [1, 0.8, 0.6][Math.floor(random() * 3)] };
+    }
     // Bounds worth trying: a unit box, a wide one, and one far from zero.
     const lo = [0, -5, 300, 0.001][Math.floor(random() * 4)];
     const span = [1, 10, 200, 0.5][Math.floor(random() * 4)];
@@ -152,6 +157,14 @@ function fillForm(t, random) {
     else if (key === "seed") el.value = Math.floor(random() * 1000);
     else if (key === "response") el.value = "y";
     else if (key === "outside_bounds") el.checked = random() < 0.5;
+    else if (key === "generators") {
+      // One generator for the last factor, written in the other factors'
+      // names: a half fraction of whatever factor count was drawn.
+      const names = app.state.factorRows.map((r) => r.name);
+      el.value = `${names.at(-1)}=${names.slice(0, -1).join("*")}`;
+    } else if (key === "optimize") {
+      el.value = ["discrepancy", "maximin", "none"][Math.floor(random() * 3)];
+    } else if (key === "fake_factors") el.value = Math.floor(random() * 2);
   }
 }
 
@@ -221,7 +234,14 @@ const report = (label, problems, detail = "") => {
   }
 };
 
-const COMBINATORIAL = ["latin-square", "graeco-latin", "hyper-graeco-latin", "factorial-2level"];
+const COMBINATORIAL = [
+  "latin-square",
+  "graeco-latin",
+  "hyper-graeco-latin",
+  "factorial-2level",
+  "fractional-factorial",
+  "plackett-burman",
+];
 
 for (const t of TEMPLATES) {
   for (let round = 0; round < ROUNDS; round++) {

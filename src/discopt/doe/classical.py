@@ -14,7 +14,10 @@ Latin hypercube
     exactly one point in each of ``n`` equal-probability strata per factor.
     The general-purpose space-filling design for computer experiments,
     surrogate fitting, and any situation where you want good coverage of a
-    continuous box without assuming a model form.
+    continuous box without assuming a model form. It can be improved for
+    low centred discrepancy or for maximin distance; quasi-random (Sobol,
+    Halton) designs and the metrics that compare them all live in
+    :mod:`discopt.doe.spacefilling`.
 
 Central composite
     :func:`central_composite_design` — the workhorse for fitting a full
@@ -94,6 +97,26 @@ class ClassicalDesign:
             dtype=np.float64,
         )
 
+    def to_unit_matrix(self) -> np.ndarray:
+        """Return the runs scaled to the unit cube, ``(x - lb) / (ub - lb)``.
+
+        Space-filling metrics are defined on ``[0, 1]^k``, so this is the
+        matrix to compare designs on. Runs a textbook-scaled central composite
+        design places outside the bounds map outside ``[0, 1]``.
+        """
+        lbs = np.array([lo for lo, _ in self.bounds], dtype=np.float64)
+        ubs = np.array([hi for _, hi in self.bounds], dtype=np.float64)
+        return (self.to_matrix() - lbs) / (ubs - lbs)
+
+    def metrics(self, p: float = 15.0) -> dict[str, object]:
+        """Space-filling metrics of this design on the unit cube.
+
+        See :func:`discopt.doe.spacefilling.space_filling_metrics`.
+        """
+        from discopt.doe.spacefilling import space_filling_metrics
+
+        return space_filling_metrics(self, p=p)
+
     def design_rows(self) -> list[dict[str, float]]:
         """Return factor-only dicts, ready for ``Workbook.append_runs``.
 
@@ -169,13 +192,31 @@ def _finalize(
     )
 
 
-def _lhs_unit_samples(k: int, n: int, seed: int | None, optimize: bool) -> np.ndarray:
+def _resolve_lhs_optimize(optimize: bool | str | None) -> str:
+    """Map the public ``optimize`` argument onto ``"plain"``, ``"cd"`` or ``"maximin"``."""
+    if optimize is True:
+        return "cd"
+    if optimize is False or optimize is None:
+        return "plain"
+    if isinstance(optimize, str):
+        key = optimize.strip().lower()
+        if key in ("discrepancy", "cd", "random-cd"):
+            return "cd"
+        if key == "maximin":
+            return "maximin"
+        if key in ("none", "plain"):
+            return "plain"
+    raise ValueError(f"optimize must be True, False, 'discrepancy' or 'maximin'; got {optimize!r}")
+
+
+def _lhs_unit_samples(k: int, n: int, seed: int | None, optimize: bool | str) -> np.ndarray:
     """Return ``(n, k)`` Latin hypercube samples on the unit cube.
 
     Prefers ``scipy.stats.qmc.LatinHypercube``; falls back to an explicit
     stratified permutation when scipy is built without ``qmc`` — the same
     degradation the ``optimize`` template applies to its Sobol seeding.
     """
+    mode = _resolve_lhs_optimize(optimize)
     try:
         from scipy.stats import qmc
     except ImportError:
@@ -184,23 +225,82 @@ def _lhs_unit_samples(k: int, n: int, seed: int | None, optimize: bool) -> np.nd
         strata = np.tile(np.arange(n, dtype=np.float64), (k, 1))
         for dim in range(k):
             rng.shuffle(strata[dim])
-        return ((strata + rng.random((k, n))) / n).T
+        unit = ((strata + rng.random((k, n))) / n).T
+        return _maximin_swaps(unit, seed) if mode == "maximin" else unit
 
     sampler = qmc.LatinHypercube(
         d=k,
         seed=seed,
         # "random-cd" iteratively lowers centred discrepancy, giving noticeably
         # better coverage than a plain permutation at these sample sizes.
-        **({"optimization": "random-cd"} if optimize else {}),
+        **({"optimization": "random-cd"} if mode == "cd" else {}),
     )
-    return sampler.random(n)
+    unit = sampler.random(n)
+    return _maximin_swaps(unit, seed) if mode == "maximin" else unit
+
+
+# Exponent of the Morris-Mitchell phi_p criterion. Large enough that phi_p is
+# driven by the closest pairs (it tends to 1 / min distance as p grows), small
+# enough that d ** -p stays far from overflow for any sensible design.
+_PHI_P = 15.0
+
+
+def _maximin_swaps(unit: np.ndarray, seed: int | None) -> np.ndarray:
+    """Improve a Latin hypercube for maximin distance by column swaps.
+
+    Morris & Mitchell (1995): exchange two runs' values in one column, which
+    keeps every column a permutation of its strata (the design stays Latin),
+    and accept by simulated annealing on
+    ``phi_p = (sum_{i<j} d_ij^-p)^(1/p)``, a smooth surrogate for the minimum
+    pairwise distance. Only the two swapped rows' distances change, so each
+    step costs ``O(n k)``. The best design seen is returned.
+    """
+    x = np.array(unit, dtype=np.float64, copy=True)
+    n, k = x.shape
+    if n < 3 or k < 1:
+        return x
+    rng = np.random.default_rng(None if seed is None else seed + 7919)
+    p = _PHI_P
+
+    diff = x[:, None, :] - x[None, :, :]
+    dist = np.sqrt(np.einsum("ijk,ijk->ij", diff, diff))
+    np.fill_diagonal(dist, np.inf)
+    inv = dist**-p  # zeros on the diagonal
+    total = float(np.sum(np.triu(inv, 1)))
+
+    best_x, best_total = x.copy(), total
+    n_iter = int(min(20000, max(2000, 60 * n)))
+    # Start hot enough to accept a typical uphill step about half the time,
+    # then cool geometrically to (effectively) greedy by the end.
+    temp = 0.05 * total
+    cool = (1e-4) ** (1.0 / n_iter)
+    others = np.arange(n)
+    for _ in range(n_iter):
+        a, b = rng.choice(n, 2, replace=False)
+        j = int(rng.integers(k))
+        xa, xb = x[a].copy(), x[b].copy()
+        xa[j], xb[j] = xb[j], xa[j]
+        mask = (others != a) & (others != b)
+        da = np.sqrt(np.sum((x[mask] - xa) ** 2, axis=1))
+        db = np.sqrt(np.sum((x[mask] - xb) ** 2, axis=1))
+        new_a, new_b = da**-p, db**-p
+        delta = float(np.sum(new_a) + np.sum(new_b) - np.sum(inv[a, mask]) - np.sum(inv[b, mask]))
+        if delta <= 0.0 or rng.random() < math.exp(-delta / max(temp, 1e-300)):
+            x[a], x[b] = xa, xb
+            inv[a, mask] = inv[mask, a] = new_a
+            inv[b, mask] = inv[mask, b] = new_b
+            total += delta
+            if total < best_total:
+                best_total, best_x = total, x.copy()
+        temp *= cool
+    return best_x
 
 
 def latin_hypercube_design(
     factors: Mapping[str, tuple[float, float]],
     n_samples: int,
     *,
-    optimize: bool = True,
+    optimize: bool | str = True,
     seed: int | None = None,
 ) -> ClassicalDesign:
     """Build a Latin hypercube design over a continuous factor box.
@@ -220,10 +320,19 @@ def latin_hypercube_design(
     n_samples : int
         Number of runs. Must be at least 2. A common rule of thumb for
         surrogate fitting is ``10 * n_factors``.
-    optimize : bool, default True
-        Improve space-filling by minimizing centred discrepancy. Costs a
-        little sampling time and needs ``scipy.stats.qmc``; set False for a
-        plain stratified permutation.
+    optimize : bool or {"discrepancy", "maximin"}, default True
+        How to improve on a plain stratified permutation:
+
+        * ``True`` or ``"discrepancy"`` — minimize centred discrepancy
+          (``scipy.stats.qmc`` "random-cd"): even coverage of the box and of
+          its low-dimensional projections.
+        * ``"maximin"`` — maximize the distance between the closest runs
+          (Morris & Mitchell 1995 column-exchange annealing on ``phi_p``):
+          no two runs nearly duplicate each other.
+        * ``False`` — plain stratified permutation.
+
+        Every option keeps the Latin property (one run per stratum per
+        factor). Compare the results with :meth:`ClassicalDesign.metrics`.
     seed : int, optional
         Reproducible sampling and run-order seed.
 
@@ -241,6 +350,7 @@ def latin_hypercube_design(
     names, lbs, ubs = _validate_factors(factors)
     if n_samples < 2:
         raise ValueError(f"n_samples must be >= 2, got {n_samples}")
+    _resolve_lhs_optimize(optimize)  # validate before any sampling
 
     unit = _lhs_unit_samples(len(names), int(n_samples), seed, optimize)
     values = lbs + unit * (ubs - lbs)

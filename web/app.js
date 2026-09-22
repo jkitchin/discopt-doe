@@ -352,7 +352,19 @@ const OPTION_SPECS = {
     options: ["determinant", "trace", "min_eigenvalue", "condition_number"],
   },
   outside_bounds: { label: "Axial points outside bounds", type: "check", value: false },
+  runs: { label: "Runs (blank = smallest)", type: "number", value: "", min: 4 },
+  generators: { label: "Generators (e.g. D=ABC, E=ABD)", type: "text", value: "" },
+  fake_factors: { label: "Fake factors", type: "number", value: 0, min: 0 },
+  optimize: {
+    label: "Space-filling criterion",
+    type: "select",
+    value: "discrepancy",
+    options: ["discrepancy", "maximin", "none"],
+  },
 };
+
+// Designs whose natural first analysis is a main-effects (linear) fit.
+const LINEAR_BASIS_DEFAULT = new Set(["latin-hypercube", "definitive-screening"]);
 
 function renderOptions() {
   const box = $("opts");
@@ -378,9 +390,10 @@ function renderOptions() {
         opt.value = opt.textContent = o;
         input.appendChild(opt);
       }
-      // Latin hypercubes default to a linear fit; the RSM designs to quadratic.
+      // Latin hypercubes and definitive screening default to a linear fit; the
+      // RSM designs to quadratic.
       input.value =
-        key === "basis" && state.current.name !== "latin-hypercube" ? "quadratic" : spec.value;
+        key === "basis" && !LINEAR_BASIS_DEFAULT.has(state.current.name) ? "quadratic" : spec.value;
     } else {
       input = document.createElement("input");
       input.type = spec.type === "check" ? "checkbox" : spec.type;
@@ -1174,10 +1187,36 @@ async function runAnalyses(out, pending, diag) {
           (anova.balanced ? " · balanced" : " · unbalanced (marginal SS)") +
           ` · significance at α = ${ALPHA}`,
         (el) => {
-          const rows = anova.rows.map((r) => ({ ...r, significant: verdict(r.p) }));
-          dataTable(el, ["source", "ss", "df", "ms", "f", "p", "significant"], rows, {
-            cellClass: (v, c) => (c === "significant" ? (VERDICT_CLASS[v] ?? "") : ""),
-          });
+          if (anova.rows.length) {
+            const rows = anova.rows.map((r) => ({ ...r, significant: verdict(r.p) }));
+            dataTable(el, ["source", "ss", "df", "ms", "f", "p", "significant"], rows, {
+              cellClass: (v, c) => (c === "significant" ? (VERDICT_CLASS[v] ?? "") : ""),
+            });
+          } else {
+            el.appendChild(
+              note("No ANOVA for a saturated design", [
+                "Every run went into estimating an effect, so there is no residual to test " +
+                  "against. The effects below are judged against Lenth's pseudo standard " +
+                  "error instead, which assumes most effects are inert.",
+              ]),
+            );
+          }
+          if (anova.effects?.length) {
+            const heading = document.createElement("h4");
+            heading.textContent = "Effect estimates (high minus low)";
+            el.appendChild(heading);
+            const effects = anova.effects.map((e) => ({
+              effect: e.effect_name ?? e.factor,
+              estimate: e.effect,
+              se: e.se,
+              t: e.t,
+              p: e.p,
+              significant: verdict(e.p),
+            }));
+            dataTable(el, ["effect", "estimate", "se", "t", "p", "significant"], effects, {
+              cellClass: (v, c) => (c === "significant" ? (VERDICT_CLASS[v] ?? "") : ""),
+            });
+          }
           const legend = document.createElement("p");
           legend.className = "hint";
           legend.textContent =

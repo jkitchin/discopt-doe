@@ -48,7 +48,15 @@ TEMPLATE_GROUPS = [
     {
         "label": "Screening & blocking",
         "hint": "Which factors matter, and how to block out nuisance variation.",
-        "templates": ["factorial-2level", "latin-square", "graeco-latin", "hyper-graeco-latin"],
+        "templates": [
+            "factorial-2level",
+            "fractional-factorial",
+            "plackett-burman",
+            "definitive-screening",
+            "latin-square",
+            "graeco-latin",
+            "hyper-graeco-latin",
+        ],
     },
     {
         "label": "Model-based optimal",
@@ -87,7 +95,12 @@ TEMPLATE_UI: dict[str, dict[str, Any]] = {
             "n": 6,
         },
     },
-    "latin-hypercube": {"factors": "bounds", "options": ["n", "basis"], "min": 1, "max": 12},
+    "latin-hypercube": {
+        "factors": "bounds",
+        "options": ["n", "optimize", "basis"],
+        "min": 1,
+        "max": 12,
+    },
     "central-composite": {
         "factors": "bounds",
         "options": ["center_points", "alpha", "outside_bounds"],
@@ -100,6 +113,24 @@ TEMPLATE_UI: dict[str, dict[str, Any]] = {
         "options": ["center_points", "replicates"],
         "min": 2,
         "max": 8,
+    },
+    "fractional-factorial": {
+        "factors": "levels2",
+        "options": ["generators", "center_points", "replicates"],
+        "min": 3,
+        "max": 15,
+    },
+    "plackett-burman": {
+        "factors": "levels2",
+        "options": ["runs", "center_points", "replicates"],
+        "min": 2,
+        "max": 23,
+    },
+    "definitive-screening": {
+        "factors": "bounds",
+        "options": ["fake_factors", "center_points", "basis"],
+        "min": 3,
+        "max": 12,
     },
     "latin-square": {"factors": "levels", "options": ["replicates"], "min": 3, "max": 3},
     "graeco-latin": {"factors": "levels", "options": ["replicates"], "min": 4, "max": 4},
@@ -254,6 +285,14 @@ def create_design(spec_json: str) -> str:
         basis=spec.get("basis") or "quadratic",
         alpha=str(spec.get("alpha") or "rotatable"),
         within_bounds=not bool(spec.get("outside_bounds")),
+        # Screening-design options. The fractional factorial only offers the
+        # generator route here: the MILP fraction search needs the base discopt
+        # solver, which has no WebAssembly build.
+        generators=[g.strip() for g in str(spec.get("generators") or "").split(",") if g.strip()]
+        or None,
+        runs=int(spec["runs"]) if spec.get("runs") not in (None, "") else None,
+        fake_factors=int(spec.get("fake_factors") or 0),
+        lhs_optimize=str(spec.get("optimize") or "discrepancy"),
         # The autodiff path cannot run here; the closed form is exact for every
         # one of these templates, so route the parametric family through it.
         use_linear_design=template in LINEAR_TEMPLATES,

@@ -243,16 +243,25 @@ def response_surface_template(
 
 
 def template_parameter_names(
-    template: str, *, degree: int | None = None, n_inputs: int, basis: str | None = None
+    template: str,
+    n_inputs: int | None = None,
+    *,
+    degree: int | None = None,
+    basis: str | None = None,
 ) -> list[str]:
     """Return the ordered parameter-name list a template would emit.
 
     Used by the CLI/workbook to populate the ``parameters`` sheet
     layout without constructing an Experiment.
 
-    ``basis`` applies only to the classical design templates, which record
-    the model they are meant to be analysed with rather than defining one.
+    ``n_inputs`` may be passed positionally, e.g.
+    ``template_parameter_names("response-surface-2d", 2)``; ``polynomial-1d``
+    does not need it. ``basis`` applies only to the classical design templates,
+    which record the model they are meant to be analysed with rather than
+    defining one.
     """
+    if n_inputs is None and template != "polynomial-1d" and template != SYMBOLIC_TEMPLATE:
+        raise ValueError(f"template {template!r} needs n_inputs (the number of design factors)")
     if template == SYMBOLIC_TEMPLATE:
         raise ValueError(
             "a user-defined model's parameter names come from its metadata, not from "
@@ -648,6 +657,9 @@ TEMPLATE_NAMES = (
     "graeco-latin",
     "hyper-graeco-latin",
     "factorial-2level",
+    "fractional-factorial",
+    "plackett-burman",
+    "definitive-screening",
     "latin-hypercube",
     "central-composite",
     "box-behnken",
@@ -659,14 +671,27 @@ TEMPLATE_NAMES = (
 # an FIM-based optimal design. ``do_new`` branches on this set to skip
 # the optimization pipeline entirely.
 COMBINATORIAL_TEMPLATES = frozenset(
-    {"latin-square", "graeco-latin", "hyper-graeco-latin", "factorial-2level"}
+    {
+        "latin-square",
+        "graeco-latin",
+        "hyper-graeco-latin",
+        "factorial-2level",
+        "fractional-factorial",
+        "plackett-burman",
+    }
 )
+
+# Two-level screening designs built from --factor NAME:LOW:HIGH pairs and
+# analysed with `anova` (a subset of the combinatorial family).
+TWO_LEVEL_TEMPLATES = frozenset({"factorial-2level", "fractional-factorial", "plackett-burman"})
 
 # Classical designs over a continuous factor box (see discopt.doe.classical).
 # Like the combinatorial family these skip the FIM search, but unlike it they
 # carry a regression basis in ``template_args["basis"]``, so `fit` works on
 # them where `anova` is the right verb for the combinatorial ones.
-CLASSICAL_TEMPLATES = frozenset({"latin-hypercube", "central-composite", "box-behnken"})
+CLASSICAL_TEMPLATES = frozenset(
+    {"latin-hypercube", "central-composite", "box-behnken", "definitive-screening"}
+)
 
 # A user-defined model: the response expression lives in the workbook metadata
 # and is differentiated symbolically (see discopt.doe.symbolic). Unlike every

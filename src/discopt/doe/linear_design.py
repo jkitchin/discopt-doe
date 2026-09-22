@@ -89,11 +89,14 @@ LINEAR_TEMPLATES = frozenset(
         "latin-hypercube",
         "central-composite",
         "box-behnken",
+        "definitive-screening",
     }
 )
 
 # Templates whose fitted model comes from template_args["basis"].
-CLASSICAL_TEMPLATES = frozenset({"latin-hypercube", "central-composite", "box-behnken"})
+CLASSICAL_TEMPLATES = frozenset(
+    {"latin-hypercube", "central-composite", "box-behnken", "definitive-screening"}
+)
 
 # Bases a classical design can be analysed with.
 BASES = ("linear", "quadratic")

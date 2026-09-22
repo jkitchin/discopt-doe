@@ -181,6 +181,12 @@ def anova_report(
         factors.append("replicate")
     if not factors:
         raise ValueError("no factor columns identified")
+    missing = sorted({c for c in [response, *factors] for r in rows if c not in r})
+    if missing:
+        raise ValueError(
+            f"column(s) {missing} missing from some rows; every row must carry the "
+            "response and every factor"
+        )
 
     y = []
     for r in rows:

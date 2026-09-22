@@ -34,6 +34,13 @@ BROWSER_SAFE_MODULES = [
     # has to stay inside the functions that need it.
     "discopt.doe.cli",
     "discopt.doe.classical",
+    "discopt.doe.aliasing",
+    "discopt.doe.mixture",
+    "discopt.doe.prediction",
+    "discopt.doe.restricted",
+    "discopt.doe.rsm",
+    "discopt.doe.screening_designs",
+    "discopt.doe.spacefilling",
     "discopt.doe.latin",
     "discopt.doe.linear_design",
     "discopt.doe.screening",
