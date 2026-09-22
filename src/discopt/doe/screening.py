@@ -87,7 +87,7 @@ import itertools
 import math
 import random
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, Mapping, NamedTuple, Sequence, cast
 
 import numpy as np
 
@@ -219,16 +219,33 @@ def effects_estimates(
     response: str,
     factors: Sequence[str] | None = None,
     levels: Mapping[str, tuple[object, object]] | None = None,
+    *,
+    interactions: Sequence[tuple[str, ...]] | None = None,
 ) -> list[dict[str, object]]:
-    """Signed main-effect estimates for a 2-level design.
+    """Signed effect estimates for a 2-level design.
 
     For each factor, returns ``mean(y | factor=HIGH) - mean(y | factor=LOW)``
-    together with a standard error and t-statistic.
+    together with a standard error, t-statistic and two-sided p-value. With
+    ``interactions`` (e.g. ``[("A", "B"), ("A", "B", "C")]``) the same contrast
+    is computed for each product column: ``mean(y | +1) - mean(y | -1)``.
 
-    The standard error is derived from the residual of the *joint* main-effects
-    model (all factors fitted simultaneously; the columns of a 2-level design
-    are orthogonal), so one factor's real effect does not inflate another
-    factor's standard error. Center-point runs contribute to that residual.
+    The standard error is derived from the residual of the *joint* model (all
+    requested effects fitted simultaneously by least squares; the columns of a
+    2-level design are orthogonal), so one effect's real size does not inflate
+    another's standard error. Center-point runs contribute to that residual.
+    Effects left out of the model end up in the residual: if a real
+    interaction is omitted, every standard error is inflated.
+
+    When the model leaves **no residual degrees of freedom** (an unreplicated
+    design with every effect estimated) there is nothing to estimate sigma
+    from, so the standard error falls back to Lenth's pseudo standard error
+    (:func:`lenth_pse`), which borrows it from the smaller effects under
+    effect sparsity. The ``method`` key says which was used.
+
+    The estimates are contrasts, exact for orthogonal designs. In a design with
+    partial aliasing (Plackett-Burman, definitive screening) a contrast also
+    picks up a fraction of the effects correlated with it; see
+    :func:`discopt.doe.aliasing.alias_structure`.
 
     ``levels`` fixes each factor's ``(low, high)`` orientation (e.g. from a
     :class:`FactorialDesign`'s ``low``/``high``). Without it the low/high are
@@ -239,9 +256,13 @@ def effects_estimates(
     Returns
     -------
     list of dict
-        One entry per factor with keys ``factor``, ``effect``,
-        ``se``, ``t``, ``low``, ``high``, sorted by ``|effect|`` descending.
+        One entry per effect with keys ``factor`` (``"A:B"`` for an
+        interaction), ``effect``, ``se``, ``t``, ``p``, ``low``, ``high``
+        (``-1``/``+1`` for an interaction) and ``method`` (``"residual"`` or
+        ``"lenth"``), sorted by ``|effect|`` descending.
     """
+    from scipy import stats
+
     rows = list(rows)
     if not rows:
         raise ValueError("need at least one row")
@@ -274,7 +295,6 @@ def effects_estimates(
                 "or magnitudes too large to form sums of squares); check the data"
             )
 
-    grand_mean = sum(y) / len(y)
     n = len(y)
 
     # Determine each factor's (low, high). Prefer the caller-supplied
@@ -298,47 +318,190 @@ def effects_estimates(
             lo, hi = sorted_vals[0], sorted_vals[-1]
         levels_per_factor[f] = (lo, hi)
 
-    # First pass: signed effect and level counts per factor.
-    per_factor: dict[str, tuple[object, object, float, int, int]] = {}
-    for f, (lo, hi) in levels_per_factor.items():
-        y_lo = [yi for yi, r in zip(y, rows) if r[f] == lo]
-        y_hi = [yi for yi, r in zip(y, rows) if r[f] == hi]
-        n_lo, n_hi = len(y_lo), len(y_hi)
-        if n_lo == 0 or n_hi == 0:
-            continue
-        effect = sum(y_hi) / n_hi - sum(y_lo) / n_lo
-        per_factor[f] = (lo, hi, effect, n_lo, n_hi)
+    # Coded column per factor: +1 at HIGH, -1 at LOW, 0 anywhere else (centre
+    # points, the middle level of a definitive screening design).
+    coded: dict[str, np.ndarray] = {
+        f: np.array([1.0 if r[f] == hi else (-1.0 if r[f] == lo else 0.0) for r in rows])
+        for f, (lo, hi) in levels_per_factor.items()
+    }
 
-    # Pooled residual variance from the JOINT main-effects model. Each factor's
-    # coded column is +/-1 at high/low (0 at a center point), so the fitted
-    # value is grand_mean + sum_f (effect_f / 2) * code_f. Using this residual
-    # (df = n - 1 - k) instead of each factor's within-level scatter stops one
-    # factor's real effect from inflating another factor's standard error.
-    k = len(per_factor)
-    resid_ss = 0.0
-    for yi, r in zip(y, rows):
-        pred = grand_mean
-        for f, (lo, hi, effect, _nlo, _nhi) in per_factor.items():
-            if r[f] == hi:
-                pred += effect / 2.0
-            elif r[f] == lo:
-                pred -= effect / 2.0
-        resid_ss += (yi - pred) ** 2
-    df_resid = n - 1 - k
-    sigma2 = resid_ss / df_resid if df_resid > 0 else float("nan")
+    # (label, column, low, high) for every effect to estimate.
+    terms: list[tuple[str, np.ndarray, object, object]] = []
+    for f, (lo, hi) in levels_per_factor.items():
+        col = coded[f]
+        if np.any(col > 0) and np.any(col < 0):
+            terms.append((f, col, lo, hi))
+    for inter in interactions or ():
+        inter = tuple(inter)
+        missing = [f for f in inter if f not in coded]
+        if missing:
+            raise ValueError(f"interaction {inter}: unknown or constant factor(s) {missing}")
+        if len(set(inter)) != len(inter) or len(inter) < 2:
+            raise ValueError(f"interaction {inter} needs at least two distinct factors")
+        col = np.prod([coded[f] for f in inter], axis=0)
+        if np.any(col > 0) and np.any(col < 0):
+            terms.append((":".join(inter), col, -1, 1))
+
+    # Signed contrast for each effect.
+    contrasts: list[tuple[str, float, int, int, object, object]] = []
+    for label, col, lo, hi in terms:
+        y_hi = y_arr[col > 0]
+        y_lo = y_arr[col < 0]
+        contrasts.append((label, float(y_hi.mean() - y_lo.mean()), y_lo.size, y_hi.size, lo, hi))
+
+    # Residual of the joint least-squares model on the same columns.
+    X = np.column_stack([np.ones(n)] + [col for _, col, _, _ in terms])
+    coef, *_ = np.linalg.lstsq(X, y_arr, rcond=None)
+    resid_ss = float(np.sum((y_arr - X @ coef) ** 2))
+    df_resid = n - int(np.linalg.matrix_rank(X))
 
     effects: list[dict[str, object]] = []
-    for f, (lo, hi, effect, n_lo, n_hi) in per_factor.items():
-        if df_resid > 0 and sigma2 >= 0.0:
+    if df_resid > 0:
+        sigma2 = resid_ss / df_resid
+        for label, effect, n_lo, n_hi, lo, hi in contrasts:
             se = math.sqrt(sigma2 * (1.0 / n_lo + 1.0 / n_hi))
             t = effect / se if se > 0 else float("nan")
+            p = float(2.0 * stats.t.sf(abs(t), df_resid)) if math.isfinite(t) else float("nan")
+            effects.append(
+                {
+                    "factor": label,
+                    "effect": effect,
+                    "se": se,
+                    "t": t,
+                    "p": p,
+                    "low": lo,
+                    "high": hi,
+                    "method": "residual",
+                }
+            )
+    else:
+        vals = [c[1] for c in contrasts]
+        if len(vals) >= 3:
+            pse = lenth_pse(vals).pse
+            d = len(vals) / 3.0
         else:
-            se = float("nan")
-            t = float("nan")
-        effects.append({"factor": f, "effect": effect, "se": se, "t": t, "low": lo, "high": hi})
+            pse, d = float("nan"), float("nan")
+        for label, effect, _n_lo, _n_hi, lo, hi in contrasts:
+            if math.isfinite(pse) and pse > 0:
+                t = effect / pse
+                p = float(2.0 * stats.t.sf(abs(t), d))
+            else:
+                t = p = float("nan")
+            effects.append(
+                {
+                    "factor": label,
+                    "effect": effect,
+                    "se": pse,
+                    "t": t,
+                    "p": p,
+                    "low": lo,
+                    "high": hi,
+                    "method": "lenth",
+                }
+            )
 
     effects.sort(key=lambda d: abs(float(cast(float, d["effect"]))), reverse=True)
     return effects
+
+
+class LenthResult(NamedTuple):
+    """Lenth's pseudo standard error and the margins of error built on it."""
+
+    pse: float
+    margin_of_error: float
+    simultaneous_margin: float
+
+
+def lenth_pse(effects: Sequence[float], *, alpha: float = 0.05) -> LenthResult:
+    """Lenth's pseudo standard error for an unreplicated 2-level design.
+
+    With every effect estimated there are no residual degrees of freedom. Under
+    effect sparsity most effects are pure noise, so their typical size
+    estimates the standard error of one effect (Lenth 1989):
+
+    ``s0 = 1.5 * median|c|``, then ``PSE = 1.5 * median{|c| : |c| < 2.5 s0}``.
+
+    Parameters
+    ----------
+    effects : sequence of float
+        All ``m`` effect estimates (at least 3).
+    alpha : float, default 0.05
+        Two-sided level of the margins.
+
+    Returns
+    -------
+    LenthResult
+        ``(pse, margin_of_error, simultaneous_margin)``. The margin of error
+        is ``t_{1-alpha/2, m/3} * PSE``, an individual 95 % interval
+        half-width; the simultaneous margin uses
+        ``gamma = (1 + (1 - alpha)**(1/m)) / 2`` in place of ``1 - alpha/2`` and
+        controls the chance of *any* false alarm among the ``m`` effects.
+    """
+    from scipy import stats
+
+    c = np.abs(np.asarray(list(effects), dtype=float))
+    m = c.size
+    if m < 3:
+        raise ValueError(f"Lenth's method needs at least 3 effects, got {m}")
+    if not np.all(np.isfinite(c)):
+        raise ValueError("effects must be finite")
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(f"alpha must be in (0, 1), got {alpha!r}")
+    s0 = 1.5 * float(np.median(c))
+    trimmed = c[c < 2.5 * s0]
+    pse = 1.5 * float(np.median(trimmed)) if trimmed.size else 0.0
+    d = m / 3.0
+    me = float(stats.t.ppf(1.0 - alpha / 2.0, d)) * pse
+    gamma = (1.0 + (1.0 - alpha) ** (1.0 / m)) / 2.0
+    sme = float(stats.t.ppf(gamma, d)) * pse
+    return LenthResult(pse, me, sme)
+
+
+@dataclass(frozen=True)
+class HalfNormalScores:
+    """Coordinates for a half-normal plot of effects (Daniel 1959).
+
+    ``abs_effects`` ascending, with the matching ``labels`` and the half-normal
+    ``quantiles`` ``Phi^-1(0.5 + 0.5 (i - 0.5) / m)``. Inactive effects fall on
+    a line through the origin; active ones stand off it to the upper right.
+    """
+
+    labels: tuple[str, ...]
+    abs_effects: np.ndarray
+    quantiles: np.ndarray
+
+
+def half_normal_scores(
+    effects: Sequence[float] | Mapping[str, float] | Sequence[Mapping[str, object]],
+) -> HalfNormalScores:
+    """Half-normal plotting positions for a set of effects.
+
+    Accepts a plain sequence of numbers, a mapping ``label -> effect``, or the
+    list returned by :func:`effects_estimates`. Returns data only; plot
+    ``quantiles`` (x) against ``abs_effects`` (y) with any library.
+    """
+    from scipy import stats
+
+    if isinstance(effects, Mapping):
+        labels = [str(k) for k in effects]
+        values = [float(v) for v in effects.values()]
+    else:
+        items = list(effects)
+        if items and isinstance(items[0], Mapping):
+            labels = [str(cast(Mapping[str, object], e)["factor"]) for e in items]
+            values = [float(cast(float, cast(Mapping[str, object], e)["effect"])) for e in items]
+        else:
+            values = [float(cast(float, v)) for v in items]
+            labels = [str(i) for i in range(len(values))]
+    if not values:
+        raise ValueError("need at least one effect")
+    a = np.abs(np.asarray(values))
+    order = np.argsort(a, kind="stable")
+    m = a.size
+    q = stats.norm.ppf(0.5 + 0.5 * (np.arange(1, m + 1) - 0.5) / m)
+    return HalfNormalScores(
+        labels=tuple(labels[i] for i in order), abs_effects=a[order], quantiles=q
+    )
 
 
 def _is_numeric(v: object) -> bool:
@@ -347,6 +510,10 @@ def _is_numeric(v: object) -> bool:
 
 __all__ = [
     "FactorialDesign",
+    "HalfNormalScores",
+    "LenthResult",
     "effects_estimates",
     "factorial_2level_design",
+    "half_normal_scores",
+    "lenth_pse",
 ]

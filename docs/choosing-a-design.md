@@ -15,6 +15,9 @@ the CLI takes as `discopt doe new --template NAME`.
 | What you want to know | Design | In the app |
 | --- | --- | --- |
 | Which of these factors actually matter? | 2-level factorial | `factorial-2level` |
+| …and there are too many of them for every combination | Fractional factorial, Plackett-Burman | `fractional-factorial`, `plackett-burman` |
+| …and some may act through curvature | Definitive screening | `definitive-screening` |
+| …and some factors are hard to change, or runs come in batches | Split-plot, blocked factorial | Python: `split_plot_design`, `blocked_factorial_design` |
 | …and something I cannot hold constant is also varying | Latin square family | `latin-square`, `graeco-latin`, `hyper-graeco-latin` |
 | Where is the optimum, and what does the surface look like near it? | Central composite, Box-Behnken | `central-composite`, `box-behnken` |
 | Nothing yet — I want coverage before I commit to a model | Latin hypercube | `latin-hypercube` |
@@ -49,13 +52,37 @@ nothing turns that into a 10-coefficient model over a smaller box.
 - **Replicates** repeat the whole design. Replicate when your measurement noise
   is the thing you are unsure about; add centre points when the *model form* is
   what you are unsure about.
-- $k \gtrsim 7$ makes the full factorial unaffordable (128 runs). Drop to a
-  fractional design — `discopt.doe.fractional_factorial_design` selects the
-  fraction by MILP at a resolution you request {cite:p}`PlackettBurman1946`.
-  That one is Python-only: it needs the base `discopt` solver, which has no
-  WebAssembly build.
+- $k \gtrsim 7$ makes the full factorial unaffordable (128 runs). Drop to one
+  of the designs below.
 
 Worked through in {doc}`notebooks/factor-screening`.
+
+### Many factors, few runs
+
+**`fractional-factorial`** runs a $2^{k-p}$ fraction of the full factorial.
+Give the fraction by its generators, e.g. `D=ABC`, which works everywhere
+including the browser app. Or, in Python and at the command line, ask
+`fractional_factorial_design` to search for a fraction of a given size and
+resolution; the search needs the base `discopt` solver. Every fraction aliases
+some effects with others. `alias_structure(design)` prints the defining
+relation, the resolution and the alias groups, so check it *before* you run
+anything. `fold_over(design)` adds the mirror-image runs that break a
+resolution III design's main-effect aliases.
+
+**`plackett-burman`** estimates up to $N-1$ main effects in $N$ runs, where $N$
+is a multiple of 4 {cite:p}`PlackettBurman1946`. Its main effects are only
+*partially* aliased with two-factor interactions, which spreads a real
+interaction thinly over many columns rather than onto one.
+
+**`definitive-screening`** uses three levels and $2m+1$ runs. Main effects are
+orthogonal to every two-factor interaction *and* every quadratic effect, so a
+curved factor is not mistaken for an inert one {cite:p}`jones2011`. Analyse it
+with `fit` and the default linear model, then follow up on what is active.
+
+A design with as many effects as runs leaves no residual degrees of freedom and
+so no ANOVA. `discopt doe anova` then reports the effects against Lenth's
+pseudo standard error {cite:p}`lenth1989`, which assumes most effects are inert.
+`lenth_pse` and `half_normal_scores` give the same numbers in Python.
 
 ## Something else is varying — blocking
 
@@ -86,6 +113,16 @@ warns that the sums of squares depend on term order. Shown in
 {doc}`notebooks/latin-designs`.
 ```
 
+**Batches and hard-to-change factors.** When a nuisance variable splits the
+runs of a factorial into batches, `blocked_factorial_design` confounds the
+highest-order interactions with the blocks, so the main effects stay clean.
+When a factor is slow or expensive to change, such as a furnace temperature, the
+runs are really a **split-plot**. The factor is set once per *whole plot*, and
+the other factors vary within it. `split_plot_design` builds that structure and
+`split_plot_anova` tests each effect against the right error term
+{cite:p}`Jones2009-splitplot`. Analysing a split-plot as if it were fully
+randomized makes whole-plot effects look far more significant than they are.
+
 ## Where is the optimum? — response surfaces
 
 Both designs here fit a full quadratic — intercept, main, square and cross
@@ -109,6 +146,17 @@ edge midpoint, so no single run combines the extreme level of *every* factor
 or simply outside what the equipment will do. It needs 3–5 factors (a central
 composite handles 2–6).
 
+After the fit, `canonical_analysis` locates the stationary point and says
+whether it is a maximum, minimum, saddle or ridge. `stationary_point_ci` puts a
+confidence interval on its location {cite:p}`delcastillo2001`. A flat optimum
+performs well but is poorly located, and the interval says so.
+`steepest_ascent_path` gives the classical path out of a first-order region,
+and `ridge_analysis` gives the best point at each distance from the centre. To
+compare designs *before* running them, `scaled_prediction_variance` and
+`fds_curve` show how evenly each one predicts over the region
+{cite:p}`zahran2003`. `desirability` and `overall_desirability` combine
+several responses into one {cite:p}`derringer1980`.
+
 ## No model yet — space filling
 
 **`latin-hypercube`.** A stratified sample over the continuous box: each factor
@@ -122,6 +170,13 @@ a surrogate, mapping a region before deciding where to look closely, or feeding
 an active-learning loop. The **fit model** option (`linear` or `quadratic`)
 only tells the later `fit` step which basis to estimate; it does not change the
 sample.
+
+The **space-filling criterion** chooses among the many Latin hypercubes of the
+same size. `discrepancy` (the default) makes the points uniform. `maximin`
+pushes the closest pair of points as far apart as possible, which suits fitting
+a Gaussian-process surrogate {cite:p}`morris1995`. `space_filling_metrics` scores
+any design on both criteria, and `quasi_random_design` gives Sobol and Halton
+sequences for comparison.
 
 ## Estimate a known model precisely — optimal design
 
@@ -169,6 +224,15 @@ With $q$ components:
 Start linear unless you have reason to expect synergy between components; the
 quadratic terms are what a *blend* being better than either ingredient alone
 looks like. See {doc}`notebooks/mixture-designs`.
+
+**Component bounds.** Real formulations bound each component, and the bounds
+carve an irregular region out of the simplex. `check_mixture_bounds` reports
+whether the bounds can be met at all and tightens the ones the others imply.
+`extreme_vertices_design` gives the classical design on the region: its
+vertices, edge and face centroids, and the overall centroid
+{cite:p}`mclean1966`. `to_pseudo_components` rescales the region so the
+standard Scheffé designs apply again. The optimal-design templates accept the
+same bounds and refuse ones that no blend can satisfy.
 
 ## Your own model
 

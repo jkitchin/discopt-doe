@@ -72,6 +72,9 @@ def test_templates_lists_all():
         "graeco-latin",
         "hyper-graeco-latin",
         "factorial-2level",
+        "fractional-factorial",
+        "plackett-burman",
+        "definitive-screening",
         "latin-hypercube",
         "central-composite",
         "box-behnken",
@@ -906,3 +909,154 @@ def test_anova_on_factorial_workbook_with_center_points(tmp_path):
     sources = {row["source"]: row for row in out["rows"]}
     assert sources["A"]["df"] == 1 and sources["B"]["df"] == 1
     assert sources["curvature"]["df"] == 1
+
+
+# ──────────────────────────────────────────────────────────────────
+# Screening templates: plackett-burman, fractional-factorial,
+# definitive-screening; latin-hypercube --optimize
+# ──────────────────────────────────────────────────────────────────
+
+
+def _screen_params(tmp_path, template, **kw):
+    base = dict(
+        output=tmp_path / f"{template}.xlsx",
+        n=0,
+        inputs=[],
+        response_name="y",
+        measurement_error=1.0,
+        criterion="anova",
+        seed=0,
+        n_starts=1,
+        template=template,
+    )
+    base.update(kw)
+    return NewParams(**base)
+
+
+def test_plackett_burman_workbook_round_trip(tmp_path):
+    pairs = {f"X{i}": (-1.0, 1.0) for i in range(1, 6)}  # 5 factors, 8 runs: 2 df left
+    out = do_new(_screen_params(tmp_path, "plackett-burman", factor_pairs=pairs))
+    assert len(out["new_run_ids"]) == 8
+    rng = np.random.default_rng(1)
+    _fill_response(
+        tmp_path / "plackett-burman.xlsx",
+        "y",
+        lambda r: 3.0 * r["X1"] - 2.0 * r["X4"] + rng.normal(0, 0.01),
+    )
+    table = do_anova({"workbook": str(tmp_path / "plackett-burman.xlsx")})
+    ss = {row["source"]: row["ss"] for row in table["rows"]}
+    assert ss["X1"] == pytest.approx(8 * 9.0, rel=1e-3)
+    fx = {e["factor"]: e["effect"] for e in table["effects"]}
+    assert fx["X1"] == pytest.approx(6.0, abs=0.05) and fx["X4"] == pytest.approx(-4.0, abs=0.05)
+    assert do_status({"workbook": str(tmp_path / "plackett-burman.xlsx")})[
+        "next_command"
+    ].startswith("discopt doe anova")
+
+
+def test_saturated_plackett_burman_reports_lenth_effects(tmp_path):
+    """7 factors in 8 runs leaves no residual df: no ANOVA F-test exists, so
+    `anova` reports the effects against Lenth's pseudo standard error."""
+    pairs = {f"X{i}": (-1.0, 1.0) for i in range(1, 8)}
+    do_new(_screen_params(tmp_path, "plackett-burman", factor_pairs=pairs))
+    rng = np.random.default_rng(2)
+    _fill_response(
+        tmp_path / "plackett-burman.xlsx",
+        "y",
+        lambda r: 5.0 * r["X1"] + rng.normal(0, 0.3),
+    )
+    out = do_anova({"workbook": str(tmp_path / "plackett-burman.xlsx")})
+    assert out["rows"] == []
+    assert all(e["method"] == "lenth" for e in out["effects"])
+    assert "saturated" in out["summary"]
+
+
+def test_fractional_factorial_from_generators(tmp_path):
+    pairs = {n: (-1.0, 1.0) for n in "ABCD"}
+    out = do_new(
+        _screen_params(
+            tmp_path,
+            "fractional-factorial",
+            factor_pairs=pairs,
+            generators=["D=ABC"],
+            center_points=2,
+        )
+    )
+    assert len(out["new_run_ids"]) == 10
+    wb = Workbook.open(tmp_path / "fractional-factorial.xlsx")
+    rows = wb.pending_runs()
+    corners = [r for r in rows if r["A"] != 0.0]
+    assert all(r["D"] == r["A"] * r["B"] * r["C"] for r in corners)
+    assert wb.template_args()["generators"] == ["D=ABC"]
+
+
+def test_fractional_factorial_needs_generators_or_runs(tmp_path):
+    pairs = {n: (-1.0, 1.0) for n in "ABCD"}
+    with pytest.raises(DoEError, match="--generator"):
+        do_new(_screen_params(tmp_path, "fractional-factorial", factor_pairs=pairs))
+
+
+def test_definitive_screening_workbook_fits_main_effects(tmp_path):
+    inputs = [("T", 300.0, 400.0), ("P", 1.0, 5.0), ("F", 10.0, 20.0), ("X", 0.0, 1.0)]
+    out = do_new(
+        _screen_params(
+            tmp_path, "definitive-screening", inputs=inputs, criterion="classical", basis="linear"
+        )
+    )
+    assert len(out["new_run_ids"]) == 9  # 2m + 1 with m = 4
+    _fill_response(
+        tmp_path / "definitive-screening.xlsx", "y", lambda r: 1.0 + 0.02 * r["T"] - 0.5 * r["P"]
+    )
+    fit = do_fit({"workbook": str(tmp_path / "definitive-screening.xlsx")})
+    est = {p["name"]: p["estimate"] for p in fit["parameters"]}
+    assert est["b1"] == pytest.approx(0.02, abs=1e-8)
+    assert est["b2"] == pytest.approx(-0.5, abs=1e-8)
+
+
+def test_definitive_screening_rejects_unestimable_basis(tmp_path):
+    inputs = [(n, 0.0, 1.0) for n in "ABCD"]
+    with pytest.raises(DoEError, match="--basis linear"):
+        do_new(
+            _screen_params(
+                tmp_path,
+                "definitive-screening",
+                inputs=inputs,
+                criterion="classical",
+                basis="quadratic",
+            )
+        )
+
+
+def test_latin_hypercube_maximin_option(tmp_path):
+    out = do_new(
+        _screen_params(
+            tmp_path,
+            "latin-hypercube",
+            n=12,
+            inputs=[("a", 0.0, 1.0), ("b", 0.0, 1.0)],
+            criterion="classical",
+            basis="linear",
+            lhs_optimize="maximin",
+        )
+    )
+    assert len(out["new_run_ids"]) == 12
+    assert Workbook.open(tmp_path / "latin-hypercube.xlsx").template_args()["optimize"] == "maximin"
+
+
+def test_scheffe_rejects_infeasible_component_bounds(tmp_path):
+    """Bounds that cannot sum to the mixture total used to be clipped away,
+    returning a design that broke them; now they are refused up front."""
+    with pytest.raises(DoEError, match="mixture total"):
+        do_new(
+            NewParams(
+                output=tmp_path / "m.xlsx",
+                n=6,
+                inputs=[("A", 300.0, 500.0), ("B", 300.0, 500.0), ("C", 0.0, 1.0)],
+                response_name="y",
+                measurement_error=1.0,
+                criterion="determinant",
+                seed=0,
+                n_starts=1,
+                template="scheffe-linear",
+                mixture_total=1.0,
+            )
+        )

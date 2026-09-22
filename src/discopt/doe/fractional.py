@@ -57,6 +57,17 @@ parameter-estimation-friendly design, an exact D-optimal design via
 typically be the better choice -- it does not constrain the runs to lie
 on the :math:`\\{-1, +1\\}` lattice and adapts to your prior model.
 
+Explicit generators
+-------------------
+
+If you already know the fraction you want -- from a table of minimum-aberration
+designs, or to keep a suspected interaction off a particular main effect --
+pass ``generators=["D=AB", "E=AC", "F=BC", "G=ABC"]``. The runs are then built
+directly from the full factorial in the base factors: no solver, no
+enumeration of all :math:`2^k` corners, and any number of factors. Signs are
+allowed (``"E=-ABC"``); for multi-character factor names separate the
+factors with ``*`` or ``:`` (``"cat=temp*time"``).
+
 Notes on infeasibility
 ----------------------
 
@@ -76,7 +87,8 @@ from __future__ import annotations
 
 import itertools
 import random
-from typing import Mapping, cast
+import re
+from typing import Mapping, Sequence, cast
 
 import numpy as np
 
@@ -93,8 +105,9 @@ def fractional_factorial_design(
     replicates: int = 1,
     seed: int | None = None,
     time_limit: float = 60.0,
+    generators: Sequence[str] | None = None,
 ) -> FactorialDesign:
-    """Build a fractional factorial design by row-selection MILP.
+    """Build a fractional factorial design by row-selection MILP or generators.
 
     Parameters
     ----------
@@ -125,6 +138,13 @@ def fractional_factorial_design(
         deterministic).
     time_limit : float, default 60.0
         Solver wall-clock limit in seconds.
+    generators : sequence of str, optional
+        Build the fraction from explicit generators instead of the MILP, e.g.
+        ``["D=AB", "E=AC"]``. Each defines one factor as a signed product of
+        the base factors (those not defined by any generator). The design has
+        :math:`2^{k-p}` runs for :math:`p` generators; ``n_runs``, if given,
+        must agree. The resulting resolution must be at least ``resolution``.
+        ``extra_pairs`` is not used on this path.
 
     Returns
     -------
@@ -165,6 +185,23 @@ def fractional_factorial_design(
     k = len(names)
     if k < 2:
         raise ValueError(f"fractional factorial needs k >= 2 factors; got {k}")
+    if generators is not None:
+        if extra_pairs:
+            raise ValueError("extra_pairs is not supported together with generators")
+        coded = _generator_design(names, generators)
+        if n_runs is not None and n_runs != coded.shape[0]:
+            raise ValueError(
+                f"n_runs={n_runs} disagrees with the {len(generators)} generator(s): "
+                f"{k} factors and {len(generators)} generators give {coded.shape[0]} runs"
+            )
+        from discopt.doe.aliasing import alias_structure
+
+        got = alias_structure(coded, list(names), max_order=1).resolution
+        if got is not None and got < resolution:
+            raise ValueError(
+                f"these generators give a resolution {got} design; {resolution} was requested"
+            )
+        return _rows_from_codes(names, lows, highs, coded, center_points, replicates, seed)
     if k > 12:
         raise ValueError(f"fractional factorial supports up to 12 factors via MILP, got {k}")
 
@@ -244,15 +281,30 @@ def fractional_factorial_design(
             pair_products.append(intercept * twofi)
 
     selected_rows = _solve_row_milp(N, n_runs, pair_products, time_limit)
+    return _rows_from_codes(
+        names, lows, highs, codes[selected_rows], center_points, replicates, seed
+    )
 
+
+def _rows_from_codes(
+    names: tuple[str, ...],
+    lows: list[object],
+    highs: list[object],
+    coded: np.ndarray,
+    center_points: int,
+    replicates: int,
+    seed: int | None,
+) -> FactorialDesign:
+    """Map coded +-1 rows back to factor levels, add centres, randomize."""
+    k = len(names)
     # Map coded rows back to original factor levels.
     rng = random.Random(seed)
     rows: list[dict[str, object]] = []
     for r in range(replicates):
         rep_rows: list[dict[str, object]] = []
-        for idx in selected_rows:
+        for code in coded:
             row: dict[str, object] = {
-                names[i]: highs[i] if codes[idx, i] == 1 else lows[i] for i in range(k)
+                names[i]: highs[i] if code[i] == 1 else lows[i] for i in range(k)
             }
             row["replicate"] = r
             row["is_center"] = False
@@ -279,6 +331,54 @@ def fractional_factorial_design(
         high=tuple(highs),
         rows=rows,
     )
+
+
+def _generator_design(names: tuple[str, ...], generators: Sequence[str]) -> np.ndarray:
+    """Coded +-1 design matrix defined by generators like ``"D=AB"``."""
+    if not generators:
+        raise ValueError("generators must be a non-empty list like ['D=AB']")
+    index = {n: i for i, n in enumerate(names)}
+    single = all(len(n) == 1 for n in names)
+    defined: dict[str, tuple[int, list[str]]] = {}
+    for g in generators:
+        if "=" not in g:
+            raise ValueError(f"generator {g!r} must look like 'D=AB'")
+        lhs, rhs = (part.strip() for part in g.split("=", 1))
+        if lhs not in index:
+            raise ValueError(f"generator {g!r}: unknown factor {lhs!r}")
+        if lhs in defined:
+            raise ValueError(f"factor {lhs!r} is defined by more than one generator")
+        sign = 1
+        if rhs.startswith(("-", "+")):
+            sign = -1 if rhs[0] == "-" else 1
+            rhs = rhs[1:].strip()
+        if re.search(r"[*:\s]", rhs):
+            tokens = [t for t in re.split(r"[*:\s]+", rhs) if t]
+        elif single:
+            tokens = list(rhs)
+        else:
+            tokens = [rhs]
+        unknown = [t for t in tokens if t not in index]
+        if unknown or not tokens:
+            raise ValueError(f"generator {g!r}: unknown factor(s) {unknown or [rhs]}")
+        if len(set(tokens)) != len(tokens):
+            raise ValueError(f"generator {g!r}: a factor appears twice")
+        defined[lhs] = (sign, tokens)
+    base = [n for n in names if n not in defined]
+    for lhs, (_s, tokens) in defined.items():
+        bad = [t for t in tokens if t not in base]
+        if bad:
+            raise ValueError(
+                f"generator for {lhs!r} uses {bad}, which are not base factors; "
+                f"write every generator in terms of the base factors {base}"
+            )
+    if len(base) > 20:
+        raise ValueError(f"{len(base)} base factors would give 2^{len(base)} runs; too large")
+    full = np.array(list(itertools.product((-1, 1), repeat=len(base))), dtype=np.int64)
+    cols: dict[str, np.ndarray] = {b: full[:, j] for j, b in enumerate(base)}
+    for lhs, (sgn, tokens) in defined.items():
+        cols[lhs] = sgn * np.prod([cols[t] for t in tokens], axis=0)
+    return np.column_stack([cols[n] for n in names])
 
 
 def _min_runs(k: int, resolution: int) -> int:

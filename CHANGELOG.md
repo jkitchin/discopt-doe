@@ -56,10 +56,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The results match an equivalent least-squares fit exactly. Centre rows are
   recognized by the `is_center` flag or, for data read back from a workbook, as
   the runs where every numeric factor sits at the midpoint of its two levels.
+- **`project_to_simplex(..., bounds=)`** is now the exact Euclidean projection
+  onto the bounded simplex. It used to clip after projecting, which could leave
+  the sum off the total. **`sample_simplex(..., bounds=)`** now samples the
+  bounded region uniformly, where clip-and-rescale could push a component back
+  outside its bounds. Infeasible bounds now raise instead of producing a design
+  that violates them. The Scheffé templates check the bounds up front with a
+  clear message.
+- `template_parameter_names` accepts `n_inputs` positionally.
+- `anova_report` raises a `ValueError` naming a missing column instead of a
+  bare `KeyError`.
 - **`AnovaTable.summary()`** prints `---` for the Total row's mean square
   instead of a misleading `0.0000`.
 
 ### Added
+- **Screening designs and their diagnostics.**
+  - `plackett_burman_design` (4 to 32 runs) and `definitive_screening_design`
+    (Jones & Nachtsheim 2011, built from conference matrices).
+  - `fold_over`, and `full_factorial_design` for general mixed-level factorials.
+  - `fractional_factorial_design(..., generators=["D=ABC", ...])` builds a
+    fraction directly from its generators. It needs no solver and never
+    enumerates all 2^k runs.
+  - `alias_structure` gives the defining relation, resolution, alias groups,
+    and effect-correlation map of any two-level or three-level design,
+    including nonregular ones.
+  - `lenth_pse` and `half_normal_scores` handle unreplicated designs.
+    `effects_estimates` now also estimates interactions and reports p-values.
+    When no residual df are left it uses Lenth's PSE instead of returning NaN.
+- **Response-surface analysis.**
+  - `canonical_analysis` finds the stationary point and classifies it as a
+    maximum, minimum, saddle or ridge.
+  - `stationary_point_ci` gives a delta-method confidence interval on the
+    optimum's location.
+  - `steepest_ascent_path` and `ridge_analysis`.
+  - `desirability` and `overall_desirability` (Derringer & Suich).
+  - These accept a `fit_least_squares` result directly.
+- **Prediction variance.** `prediction_variance`,
+  `scaled_prediction_variance`, `fds_curve` (fraction-of-design-space plots),
+  and `i_criterion`/`g_criterion`. They work over box and mixture regions, for
+  the linear templates, any basis, or a `SymbolicModel`.
+- **Restricted randomization.**
+  - `blocked_factorial_design` uses minimum-aberration block generators and
+    supports partial confounding.
+  - `split_plot_design` builds split-plot designs, and `split_plot_anova`
+    analyzes them with two error strata and variance components.
+- **Space filling.**
+  - `latin_hypercube_design(optimize="maximin")` uses Morris–Mitchell
+    annealing.
+  - `space_filling_metrics` reports minimum distance, φp, centered
+    discrepancy, and projection gaps.
+  - `quasi_random_design` gives Sobol and Halton designs, and
+    `ClassicalDesign.to_unit_matrix()` rescales a design to the unit cube.
+- **Constrained mixtures.**
+  - `check_mixture_bounds` tests bound consistency and tightens implied bounds.
+  - `extreme_vertices` and `extreme_vertices_design` (McLean & Anderson 1966).
+  - Pseudo-component transforms, and `cox_direction_trace` for trace plots.
+- **CLI and browser app templates.** `fractional-factorial` (generators; the
+  `--runs` MILP search is CLI-only), `plackett-burman` and
+  `definitive-screening` are available as `discopt doe new` templates and in
+  the browser app. `latin-hypercube` takes `--optimize
+  {discrepancy,maximin,none}`. `discopt doe anova` on a two-level design now
+  also reports signed effects. On a saturated design it reports them against
+  Lenth's PSE instead of failing.
 - `fit_least_squares(..., level=0.95)`: the confidence level of the reported
   intervals. `initial` is now optional; a model linear in its parameters
   converges from the default start.

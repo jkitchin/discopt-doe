@@ -182,7 +182,13 @@ class DoEError(Exception):
 # Mirrors discopt.doe.templates.CLASSICAL_TEMPLATES. Duplicated as a literal so
 # the hot paths that only need the membership test don't import the templates
 # module (which reaches discopt.modeling) just to branch on a name.
-_CLASSICAL_TEMPLATE_NAMES = frozenset({"latin-hypercube", "central-composite", "box-behnken"})
+_CLASSICAL_TEMPLATE_NAMES = frozenset(
+    {"latin-hypercube", "central-composite", "box-behnken", "definitive-screening"}
+)
+# Mirrors discopt.doe.templates.TWO_LEVEL_TEMPLATES, for the same reason.
+_TWO_LEVEL_TEMPLATE_NAMES = frozenset(
+    {"factorial-2level", "fractional-factorial", "plackett-burman"}
+)
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -294,6 +300,14 @@ class NewParams:
     # analysed with, and travels in the workbook metadata for `fit`.
     basis: str = "quadratic"
     alpha: str = "rotatable"
+    # Screening-design options: fractional-factorial generators / run count /
+    # resolution, Plackett-Burman run count (both via `runs`), definitive
+    # screening fake factors, and the Latin-hypercube optimization criterion.
+    generators: list[str] | None = None
+    runs: int | None = None
+    resolution: int = 3
+    fake_factors: int = 0
+    lhs_optimize: str = "discrepancy"
     within_bounds: bool = True
     # Build parametric designs from the closed-form linear FIM instead of jax
     # autodiff. Identical results for every built-in template; exists for
@@ -393,9 +407,20 @@ def _mixture_constraints(
     # package. Every mixture design in the browser died on that import.
     from discopt.doe.simplex import project_to_simplex, sum_constraint
 
+    from discopt.doe.mixture import check_mixture_bounds
+
     components = [name for name, _, _ in inputs]
     bounds = {name: (lb, ub) for name, lb, ub in inputs}
     total = float(mixture_total) if mixture_total is not None else 1.0
+    # Reject impossible component bounds before any search runs. They used to
+    # be clipped away silently, which returned a design that broke the very
+    # bounds it was given.
+    check = check_mixture_bounds(bounds, total)
+    if not check.feasible:
+        raise DoEError(
+            f"{check.message} Component bounds are in the same units as the "
+            f"mixture total ({total:g}); widen them or change --mixture-total."
+        )
     g = sum_constraint(components, total=total)
 
     def proj(point: dict[str, float]) -> dict[str, float]:
@@ -531,12 +556,37 @@ _TEMPLATE_DESCRIPTIONS = {
         "factors only), --replicates R. Use this to answer 'does each "
         "factor matter?' before fitting a response surface."
     ),
+    "fractional-factorial": (
+        "2-level fractional factorial for screening many factors in few runs. "
+        "Inputs: --factor NAME:LOW:HIGH (repeatable, 3-15 factors) and either "
+        "--generator 'D=ABC' (repeatable; written in the factor names -- "
+        "single-letter names concatenate, longer ones join with '*', e.g. "
+        "'cat=temp*time') or --runs N [--resolution R] to search for a "
+        "fraction (the search needs the base discopt solver). Optional: "
+        "--center-points N, --replicates R. Check what is aliased with what "
+        "using discopt.doe.alias_structure before you run it."
+    ),
+    "plackett-burman": (
+        "Plackett-Burman screening design: main effects of up to N-1 two-level "
+        "factors in N runs (N a multiple of 4). Inputs: --factor NAME:LOW:HIGH "
+        "(repeatable, 2-23 factors). Optional: --runs N (default: the smallest "
+        "multiple of 4 above the factor count), --center-points N, --replicates R. "
+        "Main effects are partially aliased with two-factor interactions."
+    ),
+    "definitive-screening": (
+        "Definitive screening design (Jones & Nachtsheim 2011): three levels per "
+        "factor in 2m+1 runs; main effects are clear of every two-factor "
+        "interaction and quadratic effect. Inputs: --input NAME:LB:UB (3-12 "
+        "factors). Optional: --fake-factors F, --center-points N (default 1), "
+        "--basis (default linear). Use `fit` on the completed runs."
+    ),
     "latin-hypercube": (
         "Latin hypercube: space-filling stratified sample over a continuous "
         "box, with the run count set by you rather than by the factor count. "
         "Inputs: --input NAME:LB:UB (repeatable), --n RUNS. Optional: "
         "--basis {linear,quadratic} (default linear here; the model `fit` "
-        "will estimate). Use this for surrogate fitting or when you want "
+        "will estimate), --optimize {discrepancy,maximin,none} (default "
+        "discrepancy). Use this for surrogate fitting or when you want "
         "coverage without assuming a model form."
     ),
     "central-composite": (
@@ -609,7 +659,7 @@ def _validate_new_column_names(params: NewParams) -> None:
     """
     from discopt.doe.templates import COMBINATORIAL_TEMPLATES
 
-    if params.template == "factorial-2level":
+    if params.template in _TWO_LEVEL_TEMPLATE_NAMES:
         names = list((params.factor_pairs or {}).keys())
     elif params.template in COMBINATORIAL_TEMPLATES:
         names = list((params.levels or {}).keys())
@@ -649,7 +699,7 @@ def do_new(params: NewParams) -> dict[str, Any]:
             "required sum of the component values."
         )
 
-    if params.template == "factorial-2level":
+    if params.template in _TWO_LEVEL_TEMPLATE_NAMES:
         return _do_new_factorial(params)
     if params.template == "optimize":
         return _do_new_optimize(params)
@@ -767,23 +817,69 @@ def do_new(params: NewParams) -> dict[str, Any]:
 
 
 def _do_new_factorial(params: NewParams) -> dict[str, Any]:
-    """Build a 2-level full factorial design and persist as a workbook."""
+    """Build a 2-level screening design and persist it as a workbook.
+
+    Handles the full factorial, fractional factorials (from generators or the
+    MILP fraction search) and Plackett-Burman designs; all are analysed with
+    ``discopt doe anova``.
+    """
     from discopt.doe import factorial_2level_design
 
+    template = params.template or "factorial-2level"
     pairs = params.factor_pairs
     if not pairs:
-        raise DoEError("factorial-2level requires --factor NAME:LOW:HIGH (repeatable)")
+        raise DoEError(f"{template} requires --factor NAME:LOW:HIGH (repeatable)")
     if len(pairs) < 2:
-        raise DoEError("factorial-2level needs at least 2 factors")
-    if len(pairs) > 8:
-        raise DoEError("factorial-2level supports up to 8 factors")
+        raise DoEError(f"{template} needs at least 2 factors")
+    limits = {"factorial-2level": 8, "fractional-factorial": 15, "plackett-burman": 23}
+    if len(pairs) > limits[template]:
+        raise DoEError(f"{template} supports up to {limits[template]} factors")
 
-    design = factorial_2level_design(
-        pairs,
-        center_points=params.center_points,
-        replicates=params.replicates,
-        seed=params.seed,
-    )
+    extra_args: dict[str, Any] = {}
+    try:
+        if template == "factorial-2level":
+            design = factorial_2level_design(
+                pairs,
+                center_points=params.center_points,
+                replicates=params.replicates,
+                seed=params.seed,
+            )
+        elif template == "plackett-burman":
+            from discopt.doe.screening_designs import plackett_burman_design
+
+            design = plackett_burman_design(
+                pairs,
+                n_runs=params.runs,
+                center_points=params.center_points,
+                replicates=params.replicates,
+                seed=params.seed,
+            )
+            extra_args["runs"] = len([r for r in design.rows if not r.get("is_center")]) // max(
+                1, int(params.replicates)
+            )
+        else:  # fractional-factorial
+            from discopt.doe.fractional import fractional_factorial_design
+
+            if not params.generators and not params.runs:
+                raise DoEError(
+                    "fractional-factorial needs --generator 'D=ABC' (repeatable) or --runs N"
+                )
+            design = fractional_factorial_design(
+                pairs,
+                n_runs=params.runs,
+                resolution=int(params.resolution),
+                generators=list(params.generators) if params.generators else None,
+                center_points=params.center_points,
+                replicates=params.replicates,
+                seed=params.seed,
+            )
+            if params.generators:
+                extra_args["generators"] = list(params.generators)
+            else:
+                extra_args["runs"] = int(params.runs or 0)
+                extra_args["resolution"] = int(params.resolution)
+    except ValueError as e:
+        raise DoEError(str(e)) from e
 
     factor_names = list(pairs.keys())
     input_specs_data: list[tuple[str, float, float]] = []
@@ -805,7 +901,8 @@ def _do_new_factorial(params: NewParams) -> dict[str, Any]:
         "levels": {name: [pairs[name][0], pairs[name][1]] for name in factor_names},
         "replicates": int(params.replicates),
         "center_points": int(params.center_points),
-        "family": "factorial-2level",
+        "family": template,
+        **extra_args,
     }
 
     wb = Workbook.create(
@@ -830,7 +927,7 @@ def _do_new_factorial(params: NewParams) -> dict[str, Any]:
     wb.log(
         "new",
         {
-            "template": "factorial-2level",
+            "template": template,
             "n": len(designs),
             "replicates": params.replicates,
             "center_points": params.center_points,
@@ -841,7 +938,7 @@ def _do_new_factorial(params: NewParams) -> dict[str, Any]:
 
     return {
         "workbook_path": str(wb.path),
-        "template": "factorial-2level",
+        "template": template,
         "module_callable": None,
         "batch": 1,
         "new_run_ids": new_ids,
@@ -1305,12 +1402,20 @@ def _do_new_classical(params: NewParams) -> dict[str, Any]:
     factors = {name: (lb, ub) for name, lb, ub in params.inputs}
     input_names = list(factors)
     template_args: dict[str, Any] = {"basis": params.basis, "family": template}
+    dsd_rows: list[dict[str, float]] = []
 
     try:
         if template == "latin-hypercube":
             if int(params.n) < 2:
                 raise DoEError("latin-hypercube requires --n >= 2")
-            design = latin_hypercube_design(factors, int(params.n), seed=params.seed)
+            optimize: bool | str = {"none": False, "discrepancy": True}.get(
+                params.lhs_optimize, params.lhs_optimize
+            )
+            design = latin_hypercube_design(
+                factors, int(params.n), optimize=optimize, seed=params.seed
+            )
+            if params.lhs_optimize != "discrepancy":
+                template_args["optimize"] = params.lhs_optimize
         elif template == "central-composite":
             alpha: float | str = params.alpha
             if params.alpha not in ("rotatable", "face"):
@@ -1337,7 +1442,29 @@ def _do_new_classical(params: NewParams) -> dict[str, Any]:
                 seed=params.seed,
             )
             template_args["center_points"] = int(params.center_points or 3)
-        else:  # pragma: no cover - do_new only routes the three names here
+        elif template == "definitive-screening":
+            from discopt.doe.screening_designs import definitive_screening_design
+
+            if len(factors) < 3:
+                raise DoEError("definitive-screening needs at least 3 factors")
+            dsd = definitive_screening_design(
+                factors,
+                fake_factors=int(params.fake_factors),
+                center_points=params.center_points if params.center_points else 1,
+                seed=params.seed,
+            )
+            template_args["fake_factors"] = int(params.fake_factors)
+            template_args["center_points"] = int(params.center_points or 1)
+            dsd_rows = [{n: float(r[n]) for n in input_names} for r in dsd.rows]
+            n_params = len(basis_parameter_names(params.basis, len(input_names)))
+            if n_params > len(dsd_rows):
+                raise DoEError(
+                    f"a {params.basis} model has {n_params} coefficients but this "
+                    f"definitive screening design has only {len(dsd_rows)} runs; use "
+                    "--basis linear (the usual first analysis) or add --fake-factors"
+                )
+
+        else:  # pragma: no cover - do_new only routes the classical names here
             raise DoEError(f"unknown classical template {template!r}")
     except ValueError as e:
         # The generators validate factor counts and bounds; surface those as
@@ -1359,7 +1486,7 @@ def _do_new_classical(params: NewParams) -> dict[str, Any]:
         param_initial_guess=None,
     )
 
-    designs = design.design_rows()
+    designs = dsd_rows if template == "definitive-screening" else design.design_rows()
     new_ids = wb.append_runs(1, designs)
     wb.log(
         "new",
@@ -1747,6 +1874,11 @@ def _cmd_new(args) -> int:
         # --outside-bounds is the opt-in for the textbook CCD scaling; the
         # default keeps every run inside the stated factor range.
         within_bounds=not bool(getattr(args, "outside_bounds", False)),
+        generators=getattr(args, "generators", None),
+        runs=getattr(args, "runs", None),
+        resolution=int(getattr(args, "resolution", 3) or 3),
+        fake_factors=int(getattr(args, "fake_factors", 0) or 0),
+        lhs_optimize=getattr(args, "lhs_optimize", "discrepancy") or "discrepancy",
         optimize_criterion=getattr(args, "optimize_criterion", "maximize") or "maximize",
         optimize_surrogate=getattr(args, "optimize_surrogate", "gp") or "gp",
         optimize_acquisition=(
@@ -2265,16 +2397,54 @@ def do_anova(params: dict[str, Any]) -> dict[str, Any]:
             d["replicate"] = r["replicate"]
         rows.append(d)
 
-    table = anova_report(
-        rows,
-        response=response,
-        factors=factors,
-        interactions=interactions,
-        include_replicate=include_replicate,
-    )
+    # Two-level screening designs also get signed effect estimates. A saturated
+    # design (e.g. 7 factors in an 8-run Plackett-Burman) leaves no residual
+    # degrees of freedom, so there is no ANOVA F-test at all; the effects are
+    # then judged against Lenth's pseudo standard error instead.
+    effects: list[dict[str, Any]] | None = None
+    if template in _TWO_LEVEL_TEMPLATE_NAMES:
+        from discopt.doe import effects_estimates
+
+        lv = template_args.get("levels") or {}
+        levels = {f: (lv[f][0], lv[f][1]) for f in factors if f in lv}
+        fx_rows = [
+            dict(r, is_center=bool(src.get("is_center")) or _is_center_row(r, levels))
+            for r, src in zip(rows, completed)
+        ]
+        effects = [
+            {
+                k: (float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v)
+                for k, v in e.items()
+            }
+            for e in effects_estimates(
+                fx_rows, response, factors=factors, levels=levels, interactions=interactions
+            )
+        ]
+    try:
+        table = anova_report(
+            rows,
+            response=response,
+            factors=factors,
+            interactions=interactions,
+            include_replicate=include_replicate,
+        )
+    except ValueError as e:
+        if effects is None or "no residual degrees of freedom" not in str(e):
+            raise
+        return {
+            "workbook_path": str(wb.path),
+            "response": response,
+            "n_observations": len(rows),
+            "grand_mean": float(np.mean([float(r[response]) for r in rows])),
+            "balanced": True,
+            "rows": [],
+            "effects": effects,
+            "summary": _effects_summary(effects, saturated=True),
+        }
     return {
         "workbook_path": str(wb.path),
         "response": response,
+        "effects": effects,
         "n_observations": table.n_obs,
         "grand_mean": table.grand_mean,
         "balanced": table.balanced,
@@ -2289,8 +2459,39 @@ def do_anova(params: dict[str, Any]) -> dict[str, Any]:
             }
             for r in table.rows
         ],
-        "summary": table.summary(),
+        "summary": table.summary()
+        + ("\n\n" + _effects_summary(effects, saturated=False) if effects else ""),
     }
+
+
+def _is_center_row(row: dict[str, Any], levels: dict[str, tuple[Any, Any]]) -> bool:
+    """True when every factor sits at the midpoint of its two numeric levels."""
+    try:
+        return bool(levels) and all(
+            abs(float(row[f]) - (float(lo) + float(hi)) / 2.0) < 1e-12
+            for f, (lo, hi) in levels.items()
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _effects_summary(effects: list[dict[str, Any]], *, saturated: bool) -> str:
+    """Fixed-width table of signed effects with their standard errors."""
+    method = effects[0].get("method", "") if effects else ""
+    head = "Effects (high minus low)"
+    if saturated:
+        head += " -- saturated design: no residual df, so no ANOVA F-test"
+    if method == "lenth":
+        head += "; SEs are Lenth's pseudo standard error"
+    lines = [head, f"{'Effect':<20s} {'estimate':>10s} {'SE':>9s} {'t':>8s} {'p':>9s}"]
+    for e in effects:
+        p = e.get("p")
+        p_str = "      ---" if p is None or p != p else f"{p:9.4g}"
+        lines.append(
+            f"{str(e.get('effect_name', e.get('factor'))):<20s} {e['effect']:10.4f} "
+            f"{e['se']:9.4f} {e['t']:8.3f} {p_str}"
+        )
+    return "\n".join(lines)
 
 
 def _cmd_anova(args) -> int:
@@ -2607,7 +2808,7 @@ def add_subparser(subparsers) -> None:
 
     for tmpl in TEMPLATE_NAMES:
         sp = new_sub.add_parser(tmpl, help=_TEMPLATE_DESCRIPTIONS[tmpl])
-        if tmpl == "factorial-2level":
+        if tmpl in _TWO_LEVEL_TEMPLATE_NAMES:
             sp.add_argument(
                 "--factor",
                 action="append",
@@ -2627,6 +2828,36 @@ def add_subparser(subparsers) -> None:
                 default=1,
                 help="Whole-design replications (default 1).",
             )
+            if tmpl in ("fractional-factorial", "plackett-burman"):
+                sp.add_argument(
+                    "--runs",
+                    type=int,
+                    default=None,
+                    help=(
+                        "Runs per replicate (before centre points). Plackett-Burman: a "
+                        "multiple of 4 (default: smallest above the factor count). "
+                        "Fractional factorial: a power of 2, searched by MILP."
+                    ),
+                )
+            if tmpl == "fractional-factorial":
+                sp.add_argument(
+                    "--generator",
+                    dest="generators",
+                    action="append",
+                    default=None,
+                    metavar="'D=ABC'",
+                    help=(
+                        "Generator for an added factor, written in the factor names "
+                        "(e.g. 'D=ABC', or 'cat=temp*time' for longer names); "
+                        "repeatable. No solver needed."
+                    ),
+                )
+                sp.add_argument(
+                    "--resolution",
+                    type=int,
+                    default=3,
+                    help="Minimum resolution for the --runs search (default 3).",
+                )
         elif tmpl in COMBINATORIAL_TEMPLATES:
             sp.add_argument(
                 "--levels",
@@ -2675,13 +2906,39 @@ def add_subparser(subparsers) -> None:
         if tmpl in CLASSICAL_TEMPLATES:
             sp.add_argument(
                 "--basis",
-                default="linear" if tmpl == "latin-hypercube" else "quadratic",
+                default=(
+                    "linear" if tmpl in ("latin-hypercube", "definitive-screening") else "quadratic"
+                ),
                 choices=("linear", "quadratic"),
                 help=(
                     "Regression model `discopt doe fit` will estimate from the "
                     "completed runs. Defaults to 'quadratic' for the response-surface "
-                    "designs and 'linear' for a Latin hypercube."
+                    "designs and 'linear' for a Latin hypercube or definitive screening."
                 ),
+            )
+        if tmpl == "latin-hypercube":
+            sp.add_argument(
+                "--optimize",
+                dest="lhs_optimize",
+                default="discrepancy",
+                choices=("discrepancy", "maximin", "none"),
+                help=(
+                    "Space-filling criterion: centered discrepancy (default), maximin "
+                    "distance, or none (a plain random Latin hypercube)."
+                ),
+            )
+        if tmpl == "definitive-screening":
+            sp.add_argument(
+                "--fake-factors",
+                type=int,
+                default=0,
+                help="Extra inert columns, for more runs and a better error estimate.",
+            )
+            sp.add_argument(
+                "--center-points",
+                type=int,
+                default=0,
+                help="Centre runs (default 1).",
             )
         if tmpl in ("central-composite", "box-behnken"):
             sp.add_argument(
@@ -2743,6 +3000,7 @@ def add_subparser(subparsers) -> None:
         if tmpl not in COMBINATORIAL_TEMPLATES and tmpl not in (
             "central-composite",
             "box-behnken",
+            "definitive-screening",
         ):
             _add_run_count_option(
                 sp, default=4 if tmpl == "optimize" else (8 if tmpl == "latin-hypercube" else 1)
