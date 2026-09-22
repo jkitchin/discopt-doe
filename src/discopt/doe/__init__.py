@@ -274,6 +274,7 @@ _SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
         "quasi_random_design",
         "space_filling_metrics",
     ),
+    "_estimation": ("estimate_parameters",),
     "_logging": ("quiet_solver",),
     "selection": (
         "ModelSelectionResult",
@@ -316,6 +317,7 @@ _EXPORTS: dict[str, str] = {
 _ALIASES: dict[str, tuple[str, str]] = {"SURROGATE_PRESETS": ("surrogate", "PRESETS")}
 
 __all__ = [
+    "estimate_parameters",
     "MSESubsetResult",
     "mse_subset_selection",
     "clear_fim_cache",
