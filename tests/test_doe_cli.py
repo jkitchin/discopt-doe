@@ -23,6 +23,7 @@ from discopt.doe.cli import (  # noqa: E402
     ExtendParams,
     NewParams,
     OptimizeParams,
+    do_anova,
     do_extend,
     do_fit,
     do_new,
@@ -875,3 +876,33 @@ def test_cmd_new_catches_runtime_error(tmp_path, monkeypatch):
         ["doe", "new", "linear", "-o", str(tmp_path / "z.xlsx"), "--input", "x:0:1"]
     )
     assert args.doe_func(args) == 1
+
+
+def test_anova_on_factorial_workbook_with_center_points(tmp_path):
+    """`discopt doe anova` on a factorial-2level workbook with centre points must
+    report one df per factor plus a curvature term, not refuse the design."""
+    do_new(
+        NewParams(
+            output=tmp_path / "f.xlsx",
+            n=0,
+            inputs=[],
+            response_name="y",
+            measurement_error=1.0,
+            criterion="anova",
+            seed=0,
+            n_starts=1,
+            template="factorial-2level",
+            factor_pairs={"A": (-1.0, 1.0), "B": (10.0, 20.0)},
+            center_points=3,
+        )
+    )
+    rng = np.random.default_rng(3)
+    _fill_response(
+        tmp_path / "f.xlsx",
+        "y",
+        lambda r: 1.0 + 2.0 * r["A"] + 0.1 * r["B"] + rng.normal(0, 0.1),
+    )
+    out = do_anova({"workbook": str(tmp_path / "f.xlsx")})
+    sources = {row["source"]: row for row in out["rows"]}
+    assert sources["A"]["df"] == 1 and sources["B"]["df"] == 1
+    assert sources["curvature"]["df"] == 1

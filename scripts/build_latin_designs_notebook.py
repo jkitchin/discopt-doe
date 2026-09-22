@@ -307,7 +307,11 @@ md(
 passes agree, so nothing systematic drifted between them.
 
 Now the interaction. Asking for `row × treatment` with `column` still
-in the model is the aliased request described above, and it is refused:"""
+in the model is the aliased request described above, and here it is
+refused. (With a different randomization of the second square the term
+can come out *partly* rather than fully confounded with `column`; the
+report then warns that the terms are not orthogonal and the sums of
+squares depend on their order. Either way, it is not a clean test.)"""
 )
 
 code(

@@ -649,6 +649,7 @@ def batch_optimal_experiment(
     local_refine: bool = True,
     min_distance: float | None = None,
     seed: int = 42,
+    exchange_passes: int = 2,
 ) -> BatchDesignResult:
     """Design a batch of ``N`` experiments to run in parallel.
 
@@ -685,6 +686,11 @@ def batch_optimal_experiment(
         by ``"penalized"``; ignored otherwise.
     seed : int, default 42
         Random seed for reproducibility.
+    exchange_passes : int, default 2
+        ``"greedy"`` only. Greedy selection never revisits an early pick, so
+        the batch is polished by up to this many exchange sweeps: each run in
+        turn is re-optimized given all the others and replaced if that
+        improves the criterion. ``0`` gives pure greedy selection.
 
     Returns
     -------
@@ -710,6 +716,7 @@ def batch_optimal_experiment(
             n_starts=n_starts,
             local_refine=local_refine,
             seed=seed,
+            exchange_passes=exchange_passes,
         )
     elif strategy == BatchStrategy.JOINT:
         return _joint_batch(
@@ -760,8 +767,12 @@ def _greedy_batch(
     n_starts: int,
     local_refine: bool,
     seed: int,
+    exchange_passes: int = 0,
 ) -> BatchDesignResult:
-    """Greedy batch: pick one design at a time, folding each FIM into the prior."""
+    """Greedy batch: pick one design at a time, folding each FIM into the prior.
+
+    Optionally polished by exchange sweeps (see :func:`batch_optimal_experiment`).
+    """
     running_prior = prior_fim.copy() if prior_fim is not None else None
     designs: list[dict[str, float]] = []
     fim_results: list[FIMResult] = []
@@ -788,6 +799,50 @@ def _greedy_batch(
         per_round.append(_criterion_from_fim(running_prior, criterion))
 
     assert running_prior is not None  # n_experiments >= 1
+
+    # Exchange refinement: re-optimize each run given all the others.
+    maximize = criterion in (DesignCriterion.D_OPTIMAL, DesignCriterion.E_OPTIMAL)
+    current = _criterion_from_fim(running_prior, criterion)
+    for sweep in range(max(0, int(exchange_passes)) if np.isfinite(current) else 0):
+        improved = False
+        for i in range(len(designs)):
+            others = running_prior - fim_results[i].fim
+            try:
+                picked = optimal_experiment(
+                    experiment,
+                    param_values,
+                    design_bounds,
+                    criterion=criterion,
+                    prior_fim=others,
+                    equality_constraints=equality_constraints or None,
+                    inequality_constraints=inequality_constraints or None,
+                    feasible_projection=feasible_projection,
+                    n_starts=n_starts,
+                    local_refine=local_refine,
+                    seed=seed + n_experiments + sweep * n_experiments + i,
+                )
+            except Exception:  # noqa: BLE001 - a failed re-search keeps the greedy pick
+                continue
+            per_fim = compute_fim(experiment, param_values, picked.design, prior_fim=None)
+            trial = others + per_fim.fim
+            value = _criterion_from_fim(trial, criterion)
+            gain = (value - current) if maximize else (current - value)
+            if np.isfinite(value) and gain > 1e-10 * max(1.0, abs(current)):
+                designs[i] = picked.design
+                fim_results[i] = per_fim
+                running_prior = trial
+                current = value
+                improved = True
+        if not improved:
+            break
+
+    # Per-round criterion in final run order.
+    per_round = []
+    acc = prior_fim.copy() if prior_fim is not None else None
+    for r in fim_results:
+        acc = r.fim.copy() if acc is None else acc + r.fim
+        per_round.append(_criterion_from_fim(acc, criterion))
+
     return BatchDesignResult(
         designs=designs,
         fim_results=fim_results,

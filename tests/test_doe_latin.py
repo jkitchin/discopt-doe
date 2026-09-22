@@ -238,12 +238,11 @@ def test_anova_unbalanced_warns():
 
 
 def test_anova_aliased_design_raises():
-    """Marginally balanced but perfectly aliased factors -> negative residual.
+    """Marginally balanced but perfectly aliased factors must be refused.
 
-    Regression: A and B are fully confounded, so each marginal main-effect SS
-    equals the total SS and the implied residual is negative. The per-factor
-    balance check passes, so this must be caught by the orthogonality/residual
-    guard rather than printing a nonsensical table.
+    Regression: A and B are fully confounded, so B has no degrees of freedom
+    left once A is fitted. The per-factor balance check passes, so this must be
+    caught by the aliasing guard rather than printing a nonsensical table.
     """
     rows = [
         {"A": 0, "B": 0, "y": 0.0},
@@ -251,7 +250,7 @@ def test_anova_aliased_design_raises():
         {"A": 1, "B": 1, "y": 2.0},
         {"A": 1, "B": 1, "y": 2.0},
     ]
-    with pytest.raises(ValueError, match="negative residual|orthogonal"):
+    with pytest.raises(ValueError, match="aliased"):
         with pytest.warns(UserWarning):
             anova_report(rows, response="y", factors=["A", "B"])
 
@@ -521,3 +520,96 @@ def test_anova_rejects_nonfinite_response():
         ]
         with pytest.raises(ValueError, match="non-finite or extreme"):
             anova_report(rows, response="y", factors=["g"])
+
+
+def test_summary_shows_total_mean_square_as_undefined() -> None:
+    """The Total row has no mean square; printing 0.0000 read as a real value."""
+    design = latin_square_design({"t": ["A", "B", "C"], "r": [1, 2, 3], "c": [1, 2, 3]}, seed=0)
+    rows = [dict(row, y=float(i)) for i, row in enumerate(design.rows)]
+    text = anova_report(rows, "y", factors=["t", "r"]).summary()
+    total = next(line for line in text.splitlines() if line.startswith("Total"))
+    assert "---" in total and "0.0000" not in total.split()[3]
+
+
+def test_anova_partially_aliased_interaction_is_exact_sequential_ss() -> None:
+    """Replicated Latin square with a different randomization per replicate:
+    day x catalyst is partly confounded with the operator block. Every pair of
+    main effects is orthogonal, so the old marginal decomposition silently
+    reported the wrong SS. It must now match a joint least-squares fit."""
+    rng = np.random.default_rng(0)
+    design = latin_square_design(
+        {"cat": ["A", "B", "C", "D"], "day": [1, 2, 3, 4], "op": ["a", "b", "c", "d"]},
+        replicates=2,
+        seed=21,
+    )
+    rows = [dict(r, y=float(rng.normal())) for r in design.rows]
+    with pytest.warns(UserWarning, match="not mutually orthogonal"):
+        table = anova_report(
+            rows,
+            "y",
+            factors=["cat", "day", "op"],
+            interactions=[("cat", "day")],
+            include_replicate=True,
+        )
+    assert table.balanced is False
+
+    # Reference: SS(cat:day | replicate, cat, day, op) by least squares.
+    def dummies(key):
+        levels = sorted({key(r) for r in rows}, key=str)
+        return np.array([[1.0 if key(r) == lv else 0.0 for lv in levels] for r in rows])
+
+    y = np.array([r["y"] for r in rows])
+    base = np.hstack(
+        [np.ones((len(rows), 1))]
+        + [dummies(lambda r, f=f: r[f]) for f in ("cat", "day", "op", "replicate")]
+    )
+    full = np.hstack([base, dummies(lambda r: (r["cat"], r["day"]))])
+
+    def rss(X):
+        coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+        return float(np.sum((y - X @ coef) ** 2))
+
+    ss_ref = rss(base) - rss(full)
+    got = next(r for r in table.rows if r.source == "cat:day")
+    assert got.ss == pytest.approx(ss_ref, rel=1e-9)
+
+
+def _ls_ss(X_base, X_full, y):
+    def rss(X):
+        coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+        return float(np.sum((y - X @ coef) ** 2))
+
+    return rss(X_base) - rss(X_full)
+
+
+@pytest.mark.parametrize("flagged", [True, False])
+def test_anova_factorial_with_center_points(flagged) -> None:
+    """Centre points are not a third level of every factor. Each factor gets one
+    df (coded -1/+1, centre 0); the centres add a one-df curvature term and pure
+    error. Treating the centre as a level aliased every factor with every other."""
+    from discopt.doe import factorial_2level_design
+
+    design = factorial_2level_design(
+        {"T": (80.0, 120.0), "t": (10.0, 30.0)}, center_points=3, seed=1
+    )
+    rng = np.random.default_rng(0)
+    rows = [
+        dict(r, y=5 + 0.1 * r["T"] + 0.2 * r["t"] - 0.004 * (r["T"] - 100) ** 2 + rng.normal())
+        for r in design.rows
+    ]
+    if not flagged:  # e.g. rows read back from a workbook without the flag
+        rows = [{k: v for k, v in r.items() if k != "is_center"} for r in rows]
+    table = anova_report(rows, "y", factors=["T", "t"], interactions=[("T", "t")])
+    by = {r.source: r for r in table.rows}
+    assert [r.source for r in table.rows] == ["T", "t", "T:t", "curvature", "Residual", "Total"]
+    assert by["T"].df == by["t"].df == by["T:t"].df == by["curvature"].df == 1
+    assert by["Residual"].df == 2  # three centre runs -> two df of pure error
+
+    y = np.array([r["y"] for r in rows])
+    center = np.array([r["T"] == 100.0 for r in rows], dtype=float)
+    xT = np.array([0.0 if c else (-1.0 if r["T"] == 80.0 else 1.0) for r, c in zip(rows, center)])
+    xt = np.array([0.0 if c else (-1.0 if r["t"] == 10.0 else 1.0) for r, c in zip(rows, center)])
+    one = np.ones_like(y)
+    base = np.column_stack([one, xT, xt, xT * xt])
+    full = np.column_stack([base, center])
+    assert by["curvature"].ss == pytest.approx(_ls_ss(base, full, y), rel=1e-9)

@@ -434,3 +434,23 @@ class TestSequentialBatch:
                 design_bounds={"t": (0.1, 10.0)},
                 experiments_per_round=0,
             )
+
+
+def test_greedy_exchange_recovers_the_d_optimal_quadratic():
+    """Pure greedy strands its first picks (e.g. 8.13, 3.12 on [0, 10]) where they
+    only helped while the FIM was rank-deficient; the exchange sweeps move them
+    to the known D-optimal support {0, 5, 10}."""
+    from discopt.doe.templates import polynomial_1d_template
+
+    exp = polynomial_1d_template(("x", 0.0, 10.0), 2)
+    theta = {"b0": 1.0, "b1": 2.0, "b2": 0.1}
+    refined = batch_optimal_experiment(exp, theta, {"x": (0.0, 10.0)}, n_experiments=6, seed=0)
+    greedy = batch_optimal_experiment(
+        exp, theta, {"x": (0.0, 10.0)}, n_experiments=6, seed=0, exchange_passes=0
+    )
+    xs = sorted(d["x"] for d in refined.designs)
+    assert xs == pytest.approx([0.0, 0.0, 5.0, 5.0, 10.0, 10.0], abs=1e-2)
+    assert refined.criterion_value >= greedy.criterion_value - 1e-12
+    np.testing.assert_allclose(
+        refined.joint_fim, sum(r.fim for r in refined.fim_results), rtol=1e-10
+    )

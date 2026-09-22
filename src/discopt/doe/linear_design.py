@@ -61,6 +61,17 @@ _MAXIMIZED = frozenset({D_OPTIMAL, E_OPTIMAL})
 # NaN propagate into the optimizer.
 _SINGULAR_SENTINEL = 1e12
 
+# Optimal-design criteria are flat near their optimum, and the default
+# tolerances stop well short of it (a D-optimal quadratic centre point landed at
+# 4.86 instead of 5.0). Tight tolerances cost a few extra iterations per start.
+_LBFGSB_OPTIONS = {"ftol": 1e-13, "gtol": 1e-10, "maxiter": 2000}
+_SLSQP_OPTIONS = {"ftol": 1e-13, "maxiter": 500}
+
+# Relative size of the ridge used while the accumulated FIM is rank-deficient:
+# small enough never to outvote real information, large enough to make the
+# criterion non-degenerate.
+_RANK_RIDGE = 1e-8
+
 # Templates whose response is linear in the parameters, and thus whose
 # Jacobian is the basis row returned by `design_row`.
 LINEAR_TEMPLATES = frozenset(
@@ -469,10 +480,18 @@ def _search_one_point(
     equality_constraints: Sequence[Callable[[dict[str, float]], float]],
     inequality_constraints: Sequence[Callable[[dict[str, float]], float]],
     feasible_projection: Callable[[dict[str, float]], dict[str, float]] | None,
+    regularization: float = 0.0,
 ) -> tuple[np.ndarray, float] | None:
-    """Multi-start search for the point that best improves ``accumulated``."""
+    """Multi-start search for the point that best improves ``accumulated``.
+
+    ``regularization`` adds ``ε·I`` to every trial FIM before it is scored. It is
+    only used while ``accumulated`` is rank-deficient, where the unregularized
+    criterion is degenerate (the same ``-inf`` / ``inf`` for every candidate)
+    and the choice of point would otherwise be arbitrary.
+    """
     maximize = is_maximized(criterion)
     inv_var = 1.0 / (float(sigma) ** 2)
+    ridge = float(regularization) * np.eye(accumulated.shape[0]) if regularization else 0.0
 
     def to_design(x: np.ndarray) -> dict[str, float]:
         return {n: float(v) for n, v in zip(input_names, x)}
@@ -487,7 +506,7 @@ def _search_one_point(
         try:
             f = basis(x)
             # Rank-1 update: one more run adds f fᵀ/σ² to the information.
-            trial = accumulated + np.outer(f, f) * inv_var
+            trial = accumulated + np.outer(f, f) * inv_var + ridge
             value = evaluate_criterion(trial, criterion)
         except Exception:
             return _SINGULAR_SENTINEL
@@ -511,10 +530,17 @@ def _search_one_point(
         try:
             if constraints:
                 res = minimize(
-                    objective, x0, method="SLSQP", bounds=bounds, constraints=constraints
+                    objective,
+                    x0,
+                    method="SLSQP",
+                    bounds=bounds,
+                    constraints=constraints,
+                    options=_SLSQP_OPTIONS,
                 )
             else:
-                res = minimize(objective, x0, method="L-BFGS-B", bounds=bounds)
+                res = minimize(
+                    objective, x0, method="L-BFGS-B", bounds=bounds, options=_LBFGSB_OPTIONS
+                )
         except Exception:
             continue
         x = project(np.clip(np.asarray(res.x, dtype=np.float64), lbs, ubs))
@@ -680,6 +706,7 @@ def linear_batch_design(
     feasible_projection: Callable[[dict[str, float]], dict[str, float]] | None = None,
     n_starts: int = 10,
     seed: int = 42,
+    exchange_passes: int = 2,
 ) -> LinearBatchDesignResult:
     """Design ``n_experiments`` runs greedily, accumulating information.
 
@@ -704,10 +731,18 @@ def linear_batch_design(
 
     Notes
     -----
-    The first pick of a from-scratch D-optimal batch is degenerate — every
-    point gives ``log det = -inf`` — so early rounds fall back to maximizing
-    the smallest non-zero information direction (E-criterion) until the
-    accumulated FIM is full rank, then revert to the requested criterion.
+    The first picks of a from-scratch batch are degenerate: until the
+    accumulated FIM is full rank, every candidate scores ``log det = -inf``
+    (and ``λ_min = 0``), so the requested criterion cannot rank them. Those
+    rounds maximize ``log det(FIM + εI)`` instead, with ``ε`` a tiny multiple of
+    the typical single-run information. That picks the most informative point
+    first and then fills the missing directions, rather than an arbitrary
+    point. Once the FIM is full rank the requested criterion takes over.
+
+    Greedy selection never revisits an early pick, so the batch is then
+    polished by up to ``exchange_passes`` exchange sweeps: each run in turn is
+    removed and replaced by the best point given all the others, if that
+    improves the criterion. Set ``exchange_passes=0`` for pure greedy.
     """
     if n_experiments < 1:
         raise ValueError(f"n_experiments must be >= 1, got {n_experiments}")
@@ -757,6 +792,7 @@ def linear_batch_design(
         feasible_projection=feasible_projection,
         n_starts=n_starts,
         seed=seed,
+        exchange_passes=exchange_passes,
     )
 
 
@@ -775,6 +811,7 @@ def batch_design_from_basis(
     feasible_projection: Callable[[dict[str, float]], dict[str, float]] | None = None,
     n_starts: int = 10,
     seed: int = 42,
+    exchange_passes: int = 2,
 ) -> LinearBatchDesignResult:
     """Greedy batch design driven by an arbitrary Jacobian-row provider.
 
@@ -822,50 +859,109 @@ def batch_design_from_basis(
 
     rng = np.random.default_rng(seed)
     inv_var = 1.0 / (float(measurement_error) ** 2)
+    eq_cons = tuple(equality_constraints or ())
+    ineq_cons = tuple(inequality_constraints or ())
 
-    designs: list[dict[str, float]] = []
-    per_round: list[float] = []
+    # Scale for the rank-deficiency ridge: the typical information in one run.
+    samples = rng.uniform(lbs, ubs, size=(32, len(names)))
+    if feasible_projection is not None:
+        samples = np.array(
+            [
+                [feasible_projection(dict(zip(names, map(float, u))))[n] for n in names]
+                for u in samples
+            ],
+            dtype=np.float64,
+        )
+    typical = float(np.mean([np.dot(basis(u), basis(u)) for u in samples])) * inv_var
+    eps = _RANK_RIDGE * (typical if np.isfinite(typical) and typical > 0 else 1.0)
 
-    for _ in range(int(n_experiments)):
-        # While the accumulated FIM is rank-deficient the requested criterion
-        # is degenerate for every candidate (log det = -inf, trace of a
-        # singular inverse = inf). Grow the weakest direction instead, which
-        # is exactly what fills in the missing rank.
-        rank = int(np.linalg.matrix_rank(accumulated)) if accumulated.any() else 0
-        active = criterion if rank >= n_p else E_OPTIMAL
+    def full_rank(m: np.ndarray) -> bool:
+        return bool(m.any()) and int(np.linalg.matrix_rank(m)) >= n_p
 
-        found = _search_one_point(
+    def pick(base: np.ndarray, round_seed_rng: np.random.Generator):
+        # While ``base`` is rank-deficient every criterion is degenerate; rank
+        # candidates by a lightly regularized log det, which is what fills in
+        # the missing directions fastest.
+        if full_rank(base):
+            active, reg = criterion, 0.0
+        else:
+            active, reg = D_OPTIMAL, eps
+        return _search_one_point(
             basis,
-            accumulated,
+            base,
             measurement_error,
             lbs,
             ubs,
             active,
             n_starts,
-            rng,
+            round_seed_rng,
             names,
-            tuple(equality_constraints or ()),
-            tuple(inequality_constraints or ()),
+            eq_cons,
+            ineq_cons,
             feasible_projection,
+            regularization=reg,
         )
+
+    points: list[np.ndarray] = []
+    for _ in range(int(n_experiments)):
+        found = pick(accumulated, rng)
         if found is None:
             raise RuntimeError(
                 "batch design search failed to find a finite criterion value "
-                f"on round {len(designs) + 1}; check the design bounds and constraints."
+                f"on round {len(points) + 1}; check the design bounds and constraints."
             )
         x, _ = found
         f = basis(x)
         accumulated = accumulated + np.outer(f, f) * inv_var
-        designs.append({n: float(v) for n, v in zip(names, x)})
-        # Report the degenerate value while the FIM is still rank-deficient.
-        # evaluate_criterion would otherwise hand back a finite-looking log-det
-        # (the determinant underflows rather than reaching exactly zero), which
-        # reads as a real score for a design that identifies nothing yet.
-        if int(np.linalg.matrix_rank(accumulated)) >= n_p:
-            per_round.append(evaluate_criterion(accumulated, criterion))
+        points.append(x)
+
+    # Exchange refinement: greedy never revisits an early pick, which leaves
+    # runs stranded where they were only useful before the FIM was full rank.
+    if full_rank(accumulated):
+        maximize = is_maximized(criterion)
+        current = evaluate_criterion(accumulated, criterion)
+        for _ in range(max(0, int(exchange_passes))):
+            improved = False
+            for i in range(len(points)):
+                fi = basis(points[i])
+                others = accumulated - np.outer(fi, fi) * inv_var
+                found = pick(others, rng)
+                if found is None:
+                    continue
+                x_new, _ = found
+                fn = basis(x_new)
+                trial = others + np.outer(fn, fn) * inv_var
+                if not full_rank(trial):
+                    continue
+                value = evaluate_criterion(trial, criterion)
+                gain = (value - current) if maximize else (current - value)
+                if np.isfinite(value) and gain > 1e-10 * max(1.0, abs(current)):
+                    points[i] = x_new
+                    accumulated = trial
+                    current = value
+                    improved = True
+            if not improved:
+                break
+
+    designs: list[dict[str, float]] = [{n: float(v) for n, v in zip(names, x)} for x in points]
+    # Report the criterion as the batch accumulates, in run order. While the FIM
+    # is still rank-deficient report the degenerate value: evaluate_criterion
+    # would otherwise hand back a finite-looking log-det (the determinant
+    # underflows rather than reaching exactly zero), which reads as a real
+    # score for a design that identifies nothing yet.
+    per_round: list[float] = []
+    running = (
+        np.zeros((n_p, n_p), dtype=np.float64)
+        if prior_fim is None
+        else np.asarray(prior_fim, dtype=np.float64).copy()
+    )
+    for x in points:
+        f = basis(x)
+        running = running + np.outer(f, f) * inv_var
+        if full_rank(running):
+            per_round.append(evaluate_criterion(running, criterion))
         else:
             per_round.append(-np.inf if is_maximized(criterion) else np.inf)
-
     return LinearBatchDesignResult(
         designs=designs,
         joint_fim=accumulated,
