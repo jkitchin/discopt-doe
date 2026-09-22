@@ -633,3 +633,30 @@ def test_fit_confidence_level_is_configurable() -> None:
     )
     with pytest.raises(ValueError, match="level"):
         fit_least_squares(model, rows, level=1.5)
+
+
+def test_fit_exact_data_falls_back_to_the_declared_sigma() -> None:
+    """An exact fit leaves no residual to estimate the noise from.
+
+    Reporting ``sigma = 0`` would contradict ``fim`` (which cannot be scaled by
+    a zero sigma) and would zero out any FIM a caller rescales by
+    ``(sigma / declared) ** 2`` -- as the CLI does to keep the workbook prior on
+    the declared scale -- silently losing the design's information.
+    """
+    model = SymbolicModel(
+        source="a*x + b", parameter_names=("a", "b"), input_names=("x",), measurement_error=0.1
+    )
+    rows = [{"x": float(x), "y": 2.0 * x} for x in (1, 2, 3, 4)]
+
+    # Starting at the solution makes the residuals identically zero.
+    out = fit_least_squares(model, rows, initial={"a": 2.0, "b": 0.0})
+    assert out["residual_sum_of_squares"] == 0.0
+    assert out["degrees_of_freedom"] > 0
+    assert out["sigma_source"] == "declared"
+    assert out["sigma"] == pytest.approx(0.1)
+
+    # Rescaling to the declared sigma is now a no-op, and the FIM survives.
+    rescaled = np.asarray(out["fim"]) * (out["sigma"] / 0.1) ** 2
+    np.testing.assert_allclose(rescaled, out["fim"])
+    assert np.isfinite(np.linalg.slogdet(rescaled)[1])
+    assert np.linalg.slogdet(rescaled)[0] > 0

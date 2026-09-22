@@ -406,9 +406,11 @@ def fit_least_squares(
         the solver ``message``.
 
         The noise level ``sigma`` is the residual estimate
-        ``sqrt(RSS / (n - p))`` when there are degrees of freedom left
-        (``sigma_source == "residual"``), and the model's declared
-        ``measurement_error`` otherwise (``"declared"``). ``fim`` is
+        ``sqrt(RSS / (n - p))`` when there are degrees of freedom left and the
+        residuals are non-zero (``sigma_source == "residual"``), and the model's
+        declared ``measurement_error`` otherwise (``"declared"``) -- with no
+        degrees of freedom, or on an exact fit, there is nothing to estimate the
+        noise from. ``sigma`` is therefore always positive. ``fim`` is
         ``JᵀJ / sigma²`` with that same sigma, so ``inv(fim) == covariance``
         and ``sqrt(diag(inv(fim)))`` reproduces ``std_errors``.
     """
@@ -457,13 +459,19 @@ def fit_least_squares(
     # declared sigma is often a guess; fall back to the declared one otherwise.
     J = model.design_matrix(theta, designs)
     dof = n_obs - n_p
-    if dof > 0:
+    if dof > 0 and rss > 0:
         sigma2, sigma_source = rss / dof, "residual"
     else:
+        # No degrees of freedom left, or an exact fit: there is no residual to
+        # estimate the noise from. Reporting sigma = 0 would make `fim` and
+        # `sigma` describe different scales, and a caller rescaling the FIM by
+        # (sigma / declared)**2 -- as the CLI does to keep the workbook prior on
+        # the declared scale -- would zero it out and lose the design's
+        # information entirely.
         sigma2, sigma_source = float(model.measurement_error) ** 2, "declared"
     # One sigma for both, so the information matrix and the reported
     # uncertainty describe the same thing: inv(fim) == cov.
-    fim = J.T @ J / sigma2 if sigma2 > 0 else J.T @ J / float(model.measurement_error) ** 2
+    fim = J.T @ J / sigma2
 
     try:
         cov = np.linalg.inv(J.T @ J) * sigma2
