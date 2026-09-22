@@ -74,6 +74,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of a misleading `0.0000`.
 
 ### Added
+- **Dynamic (ODE) experiments.** `ode_experiment(rhs, states=, parameters=,
+  measured=, sample_times=, design_inputs=)` builds an `ODEExperiment`. Its
+  sampling times, initial conditions and inputs (such as temperature) can be
+  design variables. `compute_fim`, `optimal_experiment`,
+  `batch_optimal_experiment`, the identifiability and estimability
+  diagnostics, `profile_likelihood` and model discrimination all work on it.
+  The ODE is integrated in JAX (RK4, or implicit trapezoid for stiff systems)
+  inside one differentiable node, so the sensitivities are exact. The FIMs
+  match the analytic results for A→B and A→B→C, and the optimal single
+  sampling time for a first-order rate constant comes out at t = 1/k.
+- **I- and G-optimal design, and candidate-set exchange.** `linear_optimal_design`,
+  `linear_batch_design` and `batch_design_from_basis` accept `criterion="I"`
+  (average prediction variance over a region) and `"G"` (maximum prediction
+  variance) with a `region=` or `region_bounds=`. `design_region` builds the
+  region's moment matrix, exactly by Gauss–Legendre quadrature on boxes of up
+  to 4 factors. `candidate_exchange_design` runs a Fedorov exchange over a
+  finite candidate list, for irregular regions, categorical factors, or
+  choosing from the runs that are actually available. `relative_efficiency`,
+  `d_efficiency` and `i_efficiency` compare designs. The textbook letters
+  ("D", "A", "I", "G", ...) are accepted as criterion names.
+- **Bayesian-optimization surrogates you can trust.** `gp_surrogate(noise=,
+  ard=, ...)` is the new `"gp"` preset:
+  - It estimates noise from exact replicates when there are any. Otherwise it
+    fits the noise with a floor of 10% of the response SD and warns when the
+    fit sits on that floor. `noise=` fixes a known noise, and `noise=0` suits a
+    deterministic simulator.
+  - It chooses one length-scale per input (ARD) or a shared one by BIC.
+  - Its length-scale floor is sensible, and `seed` makes it reproducible.
+  - `predict_latent` gives the uncertainty of the mean. EI and UCB use it by
+    default, so EI decays as the optimum is pinned down instead of staying
+    inflated by measurement noise.
+
+  The old preset let the noise collapse to ~0 on unreplicated data. Its 95%
+  intervals then covered ~79% of held-out points; they now cover ~91%.
+- `optimize_round` also gains:
+  - `candidates=` or a `candidate_sampler` callable, for known constraints
+    and mixtures;
+  - `infeasible_runs=`/`feasibility_column=`, where a classifier's
+    P(feasible) steers away from runs that failed;
+  - a `max_variance` (pure exploration) acquisition for active learning.
+- The bootstrap surrogate adapter can include observation noise
+  (`include_noise=True`).
+- `Workbook.record_responses` records measured responses without touching
+  openpyxl.
 - **Screening designs and their diagnostics.**
   - `plackett_burman_design` (4 to 32 runs) and `definitive_screening_design`
     (Jones & Nachtsheim 2011, built from conference matrices).

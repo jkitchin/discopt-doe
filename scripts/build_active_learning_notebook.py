@@ -77,6 +77,7 @@ from openpyxl import load_workbook
 
 from discopt.doe import (
     OptimizationCriterion,
+    gp_surrogate,
     optimize_round,
 )
 from discopt.doe.workbook import InputSpec, Workbook
@@ -161,10 +162,15 @@ code(
     book.save(path)
 
 
+# The "gp" preset estimates the measurement noise from the data. It cannot
+# tell noise below ~10% of the response spread from signal (it floors the
+# noise there, and warns), so when you know your instrument's noise, say so.
+GP_1D = gp_surrogate(noise=0.05)
+
 result = optimize_round(
     workbook=WORKBOOK,
     criterion=OptimizationCriterion.MAXIMIZE,
-    surrogate="gp",                        # string preset
+    surrogate=GP_1D,                       # the preset, with the known noise
     acquisition="expected_improvement",    # the standard BO choice
     batch_size=2,
     seed=0,
@@ -188,7 +194,7 @@ for rnd in range(6):
     result = optimize_round(
         workbook=WORKBOOK,
         criterion=OptimizationCriterion.MAXIMIZE,
-        surrogate="gp",
+        surrogate=GP_1D,
         acquisition="expected_improvement",
         batch_size=2,
         seed=rnd + 1,
@@ -226,7 +232,7 @@ completed = Workbook.open(WORKBOOK).completed_runs()
 X = np.array([[float(r["x"])] for r in completed])
 y = np.array([float(r["y"]) for r in completed])
 
-s = coerce_surrogate("gp")
+s = coerce_surrogate(GP_1D)  # the same GP the rounds used
 s.fit(X, y)
 
 xs = np.linspace(-5, 5, 400).reshape(-1, 1)
@@ -365,7 +371,7 @@ for rnd in range(6):
     result = optimize_round(
         workbook=WORKBOOK3,
         criterion=OptimizationCriterion.MAXIMIZE,
-        surrogate="gp",
+        surrogate=gp_surrogate(noise=0.02),  # the known measurement noise
         acquisition="expected_improvement",
         batch_size=3,
         seed=rnd,
@@ -384,7 +390,7 @@ code(
     """# Visualize: GP posterior mean + sampled points
 from discopt.doe.surrogate import coerce_surrogate
 
-s = coerce_surrogate("gp")
+s = coerce_surrogate(gp_surrogate(noise=0.02))
 s.fit(X, y)
 
 g = np.linspace(-2, 2, 80)

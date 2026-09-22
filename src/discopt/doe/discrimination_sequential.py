@@ -33,7 +33,8 @@ from discopt.doe.discrimination import (
     discriminate_design,
 )
 from discopt.doe.selection import ModelSelectionResult, model_selection
-from discopt.estimate import EstimationResult, Experiment, estimate_parameters
+from discopt.doe._estimation import estimate_parameters
+from discopt.estimate import EstimationResult, Experiment
 
 
 @dataclass

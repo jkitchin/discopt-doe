@@ -37,7 +37,8 @@ from typing import Literal
 import numpy as np
 from scipy.stats import chi2
 
-from discopt.estimate import EstimationResult, Experiment, estimate_parameters
+from discopt.doe._estimation import estimate_parameters
+from discopt.estimate import EstimationResult, Experiment
 
 ProfileShape = Literal["bounded", "one_sided_lower", "one_sided_upper", "flat"]
 

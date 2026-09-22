@@ -339,7 +339,8 @@ def _per_obs_loglik(experiment: Experiment, result: EstimationResult, data: dict
     response, and applies the Gaussian log-pdf ``-0.5 * [log(2πσ²) +
     ((y − ŷ)/σ)²]`` per observation.
     """
-    from discopt.parametric import compile_expression, extract_x_flat, flatten_params
+    from discopt.doe.fim import _compile_response
+    from discopt.parametric import extract_x_flat, flatten_params
 
     em = experiment.create_model(**result.parameters)
     # Pin every parameter at the fitted value so the solve is trivial.
@@ -364,7 +365,7 @@ def _per_obs_loglik(experiment: Experiment, result: EstimationResult, data: dict
     for name in em.response_names:
         if name not in data:
             continue
-        fn = compile_expression(em.responses[name], em.model)
+        fn = _compile_response(em.responses[name], em.model)
         yh = float(np.asarray(fn(x_flat, p_flat)).flat[0])
         sig = float(em.measurement_error[name])
         # A response may carry replicate observations (a 1-D array); each is an
