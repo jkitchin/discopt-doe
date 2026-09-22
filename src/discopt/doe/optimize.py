@@ -94,6 +94,22 @@ Acquisition choice
   response-surface surrogate to reproduce classical Box-Wilson
   behavior. Not recommended with a GP -- without uncertainty you give
   up the main reason to fit a GP in the first place.
+* ``"max_variance"`` (alias ``"uncertainty"``) -- pure exploration for
+  active learning: the run where the surrogate is least certain. Use it to
+  make a surrogate accurate everywhere, not to find an optimum.
+
+Constraints and failed runs
+---------------------------
+
+**Known** constraints (a feasible region you can write down, a mixture
+that must sum to 1) are handled by the candidate pool: pass
+``candidates=`` (an array or run dicts) or a ``candidate_sampler``
+callable, and only those points are scored. **Unknown** constraints --
+runs that simply fail, with no response -- are learned: mark them with
+``infeasible_runs=[run_id, ...]`` or a workbook ``feasibility_column``,
+and a Gaussian-process classifier estimates each candidate's probability
+of feasibility, which weights the acquisition (expected improvement
+times P(feasible); Schonlau, Welch & Jones 1998; Gramacy et al. 2016).
 
 Categorical and mixed-input factors
 -----------------------------------
@@ -133,6 +149,7 @@ References
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -167,6 +184,9 @@ class OptimizationRoundResult:
     n_completed: int
     workbook_path: str
     log: list[str] = field(default_factory=list)
+    feasibility: list[float] | None = None
+    """Estimated probability of feasibility of each recommended run, when
+    failed runs were marked; otherwise None."""
 
 
 def optimize_round(
@@ -177,12 +197,15 @@ def optimize_round(
     acquisition: str | Callable = "expected_improvement",
     batch_size: int = 1,
     n_candidates: int = 2048,
-    candidate_sampler: str = "sobol",
+    candidate_sampler: str | Callable[..., Any] = "sobol",
+    candidates: np.ndarray | Sequence[Sequence[float]] | Sequence[dict[str, float]] | None = None,
     bounds: Sequence[tuple[float, float]] | None = None,
     input_names: Sequence[str] | None = None,
     standardize_inputs: bool = True,
     seed: int | None = None,
     acquisition_kwargs: dict[str, Any] | None = None,
+    infeasible_runs: Sequence[int] | None = None,
+    feasibility_column: str | None = None,
 ) -> OptimizationRoundResult:
     """Propose the next batch of experiments using an active-learning surrogate.
 
@@ -200,8 +223,16 @@ def optimize_round(
         Number of new experiments to recommend.
     n_candidates : int, default 2048
         Size of the candidate pool sampled inside the bounding box.
-    candidate_sampler : ``"sobol"`` or ``"uniform"``
-        Sobol gives better space-filling for the same budget.
+    candidate_sampler : ``"sobol"``, ``"uniform"``, or callable
+        Sobol gives better space-filling for the same budget. A callable
+        ``f(n, rng)`` returns ``n`` candidates (an array ordered like
+        ``input_names``, or run dicts) in natural units -- for a
+        constrained region, e.g. mixtures drawn with
+        :func:`~discopt.doe.sample_simplex`.
+    candidates : array or sequence of run dicts, optional
+        An explicit candidate pool in natural units; replaces sampling
+        (``n_candidates`` and ``candidate_sampler`` are then ignored). Use it
+        for known constraints, discrete settings, or a fixed grid.
     bounds : sequence of (lo, hi), optional
         Per-input box. Defaults to the input_specs stored in the workbook.
     input_names : sequence of str, optional
@@ -217,6 +248,13 @@ def optimize_round(
     acquisition_kwargs : dict, optional
         Extra kwargs forwarded to the acquisition function (e.g.
         ``{"xi": 0.01}`` for EI, ``{"kappa": 2.5}`` for UCB).
+    infeasible_runs : sequence of int, optional
+        run_ids of runs that failed (no usable response). With
+        ``feasibility_column`` they train a classifier whose probability of
+        feasibility weights the acquisition; they never enter the surrogate.
+    feasibility_column : str, optional
+        A workbook column marking each finished run as feasible (1, True,
+        "yes") or not (0, False, "no", "fail", "infeasible").
     """
     crit = OptimizationCriterion(criterion) if isinstance(criterion, str) else criterion
     direction = crit.direction
@@ -235,7 +273,16 @@ def optimize_round(
         raise ValueError(f"bounds shape {bounds_arr.shape} does not match {len(names)} input(s)")
 
     response = wb.response_name()
-    completed = wb.completed_runs()
+    failed_ids = {int(r) for r in (infeasible_runs or [])}
+    all_rows = wb.all_runs()
+    if feasibility_column is not None:
+        if all_rows and feasibility_column not in all_rows[0]:
+            raise ValueError(f"feasibility column {feasibility_column!r} is not in the workbook")
+        for r in all_rows:
+            if _is_infeasible_mark(r.get(feasibility_column)):
+                failed_ids.add(int(r["run_id"]))
+    failed = [r for r in all_rows if int(r["run_id"]) in failed_ids]
+    completed = [r for r in wb.completed_runs() if int(r["run_id"]) not in failed_ids]
     if not completed:
         raise ValueError(
             "no completed runs in workbook -- fill in at least one response "
@@ -255,12 +302,26 @@ def optimize_round(
         sd_x = np.ones(len(names))
         X = X_raw
 
-    s = coerce_surrogate(surrogate)
+    s = coerce_surrogate(surrogate, random_state=seed)
     s.fit(X, y)
 
     rng = np.random.default_rng(seed)
-    candidates_raw = _sample_candidates(bounds_arr, n_candidates, candidate_sampler, rng)
-    candidates = (candidates_raw - mu_x) / sd_x if standardize_inputs else candidates_raw
+    if candidates is not None:
+        candidates_raw = _as_matrix(candidates, names)
+    elif callable(candidate_sampler):
+        candidates_raw = _as_matrix(candidate_sampler(int(n_candidates), rng), names)
+    else:
+        candidates_raw = _sample_candidates(bounds_arr, n_candidates, candidate_sampler, rng)
+    if len(candidates_raw) == 0:
+        raise ValueError("the candidate pool is empty")
+    candidates_std = (candidates_raw - mu_x) / sd_x if standardize_inputs else candidates_raw
+
+    # Unknown constraints: P(feasible) from a classifier on feasible vs failed runs.
+    p_feasible: np.ndarray | None = None
+    if failed:
+        X_fail = np.array([[float(r[n]) for n in names] for r in failed], dtype=float)
+        X_fail = (X_fail - mu_x) / sd_x if standardize_inputs else X_fail
+        p_feasible = _feasibility_probability(X, X_fail, candidates_std, seed)
 
     incumbent_idx = int(np.argmax(direction * y))
     incumbent_y = float(y[incumbent_idx])
@@ -276,12 +337,17 @@ def optimize_round(
         scores = call_acquisition(
             acq_fn,
             s,
-            candidates,
+            candidates_std,
             direction=direction,
             y_best=incumbent_for_acq,
             acq_kwargs=acq_kwargs,
         )
         scores = np.asarray(scores, dtype=float).ravel()
+        if p_feasible is not None:
+            if np.all(scores >= 0.0):  # EI, max_variance: weight by P(feasible)
+                scores = scores * p_feasible
+            else:  # signed scores (UCB, steepest ascent): drop likely failures
+                scores = np.where(p_feasible >= 0.5, scores, -np.inf)
         if chosen_idx:
             scores[chosen_idx] = -np.inf
         pick = int(np.argmax(scores))
@@ -291,13 +357,17 @@ def optimize_round(
         # Mean-imputation: pretend the chosen point's response is the
         # surrogate's mean. Re-fit so the next pick sees lower
         # uncertainty there and diversifies.
-        mu_pick, _ = s.predict(candidates[pick : pick + 1])
-        X_fantasy = np.vstack([X_fantasy, candidates[pick : pick + 1]])
+        mu_pick, _ = s.predict(candidates_std[pick : pick + 1])
+        X_fantasy = np.vstack([X_fantasy, candidates_std[pick : pick + 1]])
         y_fantasy = np.concatenate([y_fantasy, mu_pick])
         if direction * float(mu_pick[0]) > direction * incumbent_for_acq:
             incumbent_for_acq = float(mu_pick[0])
-        s = coerce_surrogate(surrogate)
-        s.fit(X_fantasy, y_fantasy)
+        s = coerce_surrogate(surrogate, random_state=seed)
+        # The fantasy points are noiseless by construction, so a noise estimate
+        # on its floor says nothing here; the real fit above already warned.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="the fitted GP noise sits on its floor")
+            s.fit(X_fantasy, y_fantasy)
 
     next_designs = [
         {n: float(candidates_raw[i, j]) for j, n in enumerate(names)} for i in chosen_idx
@@ -325,6 +395,7 @@ def optimize_round(
         surrogate_mode=getattr(s, "mode", None),
         n_completed=len(completed),
         workbook_path=str(wb.path),
+        feasibility=None if p_feasible is None else [float(p_feasible[i]) for i in chosen_idx],
     )
 
 
@@ -354,6 +425,51 @@ def _sample_candidates(
     else:
         raise ValueError(f"unknown candidate_sampler {sampler!r}")
     return np.asarray(lo + (hi - lo) * u, dtype=float)
+
+
+def _as_matrix(pool: Any, names: Sequence[str]) -> np.ndarray:
+    """Candidates as an ``(n, d)`` array ordered like ``names``."""
+    items = list(pool) if not isinstance(pool, np.ndarray) else pool
+    if len(items) and isinstance(items[0], dict):
+        return np.array([[float(r[n]) for n in names] for r in items], dtype=float)
+    arr = np.atleast_2d(np.asarray(items, dtype=float))
+    if arr.size and arr.shape[1] != len(names):
+        raise ValueError(f"candidates have {arr.shape[1]} columns; expected {len(names)}")
+    return arr
+
+
+_INFEASIBLE_MARKS = {"0", "false", "no", "n", "fail", "failed", "infeasible"}
+
+
+def _is_infeasible_mark(value: Any) -> bool:
+    if value is None or value == "":
+        return False  # not yet marked
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, (int, float)):
+        return float(value) == 0.0
+    return str(value).strip().lower() in _INFEASIBLE_MARKS
+
+
+def _feasibility_probability(
+    X_ok: np.ndarray, X_fail: np.ndarray, candidates: np.ndarray, seed: int | None
+) -> np.ndarray:
+    """P(feasible) at the candidates from a GP classifier on feasible vs failed runs."""
+    try:
+        from sklearn.gaussian_process import GaussianProcessClassifier
+        from sklearn.gaussian_process.kernels import ConstantKernel, Matern
+    except ImportError as e:  # pragma: no cover - the GP preset already needs sklearn
+        raise ImportError(
+            'learning unknown constraints needs scikit-learn: pip install "discopt-doe[ml]"'
+        ) from e
+    X_all = np.vstack([X_ok, X_fail])
+    labels = np.concatenate([np.ones(len(X_ok)), np.zeros(len(X_fail))])
+    kernel = ConstantKernel(1.0, (1e-2, 1e2)) * Matern(
+        length_scale=1.0, length_scale_bounds=(0.05, 1e2), nu=2.5
+    )
+    clf = GaussianProcessClassifier(kernel=kernel, random_state=0 if seed is None else int(seed))
+    clf.fit(X_all, labels)
+    return np.asarray(clf.predict_proba(candidates)[:, 1], dtype=float)
 
 
 _ = Surrogate  # ensure protocol import is exported for downstream users

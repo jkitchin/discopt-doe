@@ -26,6 +26,21 @@ Implementations
 * :func:`steepest_ascent` -- Box-Wilson style: score points by the
   predicted improvement only (ignores uncertainty). Useful with a
   response-surface surrogate when you want classical RSM behaviour.
+* :func:`max_variance` -- pure exploration: the candidate the surrogate
+  is least sure about. For *active learning* (making the surrogate
+  accurate everywhere) rather than optimization.
+
+Latent versus predictive uncertainty
+------------------------------------
+
+EI, the confidence bounds and ``max_variance`` use the uncertainty of the
+*mean response* (the surrogate's ``predict_latent``, when it has one), not
+the predictive uncertainty of a new noisy observation. The question they
+answer is "how much could the true response here improve on the incumbent?",
+and noise does not make the true response better. With the predictive σ,
+which never falls below the noise level, EI stays large at points that are
+already well known and never decays to signal convergence. Pass
+``latent=False`` to score on the predictive σ instead.
 """
 
 from __future__ import annotations
@@ -52,6 +67,14 @@ def _norm_pdf(x: np.ndarray) -> np.ndarray:
     return np.asarray(np.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi), dtype=float)
 
 
+def _mean_std(surrogate: Surrogate, X: np.ndarray, latent: bool) -> tuple[np.ndarray, np.ndarray]:
+    """``(mean, std)`` from the surrogate; the latent std when asked and available."""
+    X = np.asarray(X, dtype=float)
+    fn = getattr(surrogate, "predict_latent", None) if latent else None
+    mu, sigma = fn(X) if callable(fn) else surrogate.predict(X)
+    return np.asarray(mu, dtype=float).ravel(), np.asarray(sigma, dtype=float).ravel()
+
+
 def expected_improvement(
     surrogate: Surrogate,
     X_candidates: np.ndarray,
@@ -59,6 +82,7 @@ def expected_improvement(
     y_best: float,
     direction: Direction,
     xi: float = 0.0,
+    latent: bool = True,
 ) -> np.ndarray:
     """Expected improvement over the incumbent ``y_best``.
 
@@ -74,9 +98,7 @@ def expected_improvement(
     (e.g. ``0.01``) demands a slightly stronger improvement and
     encourages exploration.
     """
-    mu, sigma = surrogate.predict(np.asarray(X_candidates, dtype=float))
-    mu = np.asarray(mu, dtype=float).ravel()
-    sigma = np.asarray(sigma, dtype=float).ravel()
+    mu, sigma = _mean_std(surrogate, X_candidates, latent)
     dir_sign = int(direction)
     if dir_sign not in (1, -1):
         raise ValueError(f"direction must be +1 or -1, got {dir_sign}")
@@ -94,10 +116,11 @@ def upper_confidence_bound(
     X_candidates: np.ndarray,
     *,
     kappa: float = 2.0,
+    latent: bool = True,
 ) -> np.ndarray:
     """``μ + κ σ`` -- maximize when ``direction = +1``."""
-    mu, sigma = surrogate.predict(np.asarray(X_candidates, dtype=float))
-    return np.asarray(mu).ravel() + float(kappa) * np.asarray(sigma).ravel()
+    mu, sigma = _mean_std(surrogate, X_candidates, latent)
+    return mu + float(kappa) * sigma
 
 
 def lower_confidence_bound(
@@ -105,10 +128,11 @@ def lower_confidence_bound(
     X_candidates: np.ndarray,
     *,
     kappa: float = 2.0,
+    latent: bool = True,
 ) -> np.ndarray:
     """``-(μ - κ σ)`` -- larger is *better* under minimization."""
-    mu, sigma = surrogate.predict(np.asarray(X_candidates, dtype=float))
-    return -(np.asarray(mu).ravel() - float(kappa) * np.asarray(sigma).ravel())
+    mu, sigma = _mean_std(surrogate, X_candidates, latent)
+    return -(mu - float(kappa) * sigma)
 
 
 def confidence_bound(
@@ -117,13 +141,33 @@ def confidence_bound(
     *,
     direction: Direction,
     kappa: float = 2.0,
+    latent: bool = True,
 ) -> np.ndarray:
     """Direction-aware UCB/LCB. Higher score = better candidate."""
     if direction == 1:
-        return upper_confidence_bound(surrogate, X_candidates, kappa=kappa)
+        return upper_confidence_bound(surrogate, X_candidates, kappa=kappa, latent=latent)
     if direction == -1:
-        return lower_confidence_bound(surrogate, X_candidates, kappa=kappa)
+        return lower_confidence_bound(surrogate, X_candidates, kappa=kappa, latent=latent)
     raise ValueError(f"direction must be +1 or -1, got {direction}")
+
+
+def max_variance(
+    surrogate: Surrogate,
+    X_candidates: np.ndarray,
+    *,
+    latent: bool = True,
+) -> np.ndarray:
+    """Pure exploration: score each candidate by the surrogate's uncertainty.
+
+    The next run goes where the surrogate knows least, which is the classic
+    uncertainty-sampling rule for active learning (Cohn, Ghahramani &
+    Jordan 1996): it makes the surrogate accurate everywhere rather than
+    finding an optimum, and ignores the response values entirely. With a
+    batch, the fantasy refits in :func:`~discopt.doe.optimize_round` spread
+    the picks out.
+    """
+    _mu, sigma = _mean_std(surrogate, X_candidates, latent)
+    return sigma
 
 
 def steepest_ascent(
@@ -160,6 +204,8 @@ ACQUISITIONS: dict[str, Callable[..., np.ndarray]] = {
     "lcb": confidence_bound,
     "confidence_bound": confidence_bound,
     "steepest_ascent": steepest_ascent,
+    "max_variance": max_variance,
+    "uncertainty": max_variance,
 }
 
 
@@ -215,6 +261,7 @@ __all__ = [
     "confidence_bound",
     "expected_improvement",
     "lower_confidence_bound",
+    "max_variance",
     "resolve_acquisition",
     "steepest_ascent",
     "upper_confidence_bound",

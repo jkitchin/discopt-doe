@@ -62,11 +62,45 @@ Conventions
   ``n_samples``. ``std`` is non-negative; surrogates with no native
   UQ should not silently return zeros -- use the bootstrap adapter
   or raise.
+* Optionally, ``predict_latent(X)`` returns ``(mean, std)`` where ``std``
+  is the uncertainty of the *mean response* only, without the
+  observation noise that ``predict`` includes. Acquisition functions use
+  it when available: the chance that a new run *improves on the mean* is
+  what matters for optimization, and a σ that includes noise never shrinks
+  below the noise level, so expected improvement never decays.
+
+Why the GP preset looks the way it does
+---------------------------------------
+
+The ``"gp"`` preset (:func:`gp_surrogate`) is tuned to give honest error
+bars on small, noisy, unreplicated designs, where a plain maximum-likelihood
+GP fails silently. With 20 runs the likelihood cannot tell noise from a
+slightly wigglier surface; it drives the noise to ~0, interpolates the data,
+and its 95% intervals cover the truth only ~79% of the time. The preset
+therefore
+
+* estimates the noise from **replicated runs** when the design has them
+  (pure error, the classical answer), and otherwise fits it with a floor of
+  10% of the response standard deviation (coverage ~0.92 in the same study);
+  ``noise=0`` interpolates for deterministic simulators, and a float fixes
+  the noise SD;
+* chooses between one shared length-scale and one per input (ARD) by a
+  BIC-penalized marginal likelihood (``ard="auto"``): ARD is dramatically
+  better when some inputs are inert (prediction error 2.8 -> 0.5 in a 6-factor
+  test with 2 active), and overfits when all inputs matter and runs are few,
+  where the shared length-scale wins -- "auto" picked the better of the two
+  in every scenario tested;
+* floors the length-scales at 0.05 (in the standardized inputs
+  :func:`~discopt.doe.optimize_round` uses) so 8 runs cannot fit an
+  arbitrarily wiggly surface;
+* is deterministic for a given ``random_state``.
 """
 
 from __future__ import annotations
 
-from typing import Callable, Protocol, cast, runtime_checkable
+import inspect
+import warnings
+from typing import Any, Callable, Protocol, cast, runtime_checkable
 
 import numpy as np
 
@@ -100,7 +134,14 @@ class _SklearnUQAdapter:
     is cheap.
     """
 
-    def __init__(self, estimator, *, n_bootstrap: int = 32, random_state: int = 0):
+    def __init__(
+        self,
+        estimator,
+        *,
+        n_bootstrap: int = 32,
+        random_state: int = 0,
+        include_noise: bool = False,
+    ):
         # Clone so fitting never mutates the caller's estimator (optimize_round
         # refits the surrogate each pick; a user-supplied instance would
         # otherwise end up trained on the last fantasy dataset). Fall back to the
@@ -114,6 +155,11 @@ class _SklearnUQAdapter:
             self._estimator = estimator
         self._n_bootstrap = int(n_bootstrap)
         self._random_state = int(random_state)
+        # Bootstrap spread is uncertainty about the fitted *mean*; a new
+        # observation also carries the measurement noise. include_noise adds
+        # the residual variance so predict() gives predictive intervals.
+        self._include_noise = bool(include_noise)
+        self._resid_var = 0.0
         self._mode: str | None = None
         self._bootstrap_models: list | None = None
         self._X_train: np.ndarray | None = None
@@ -137,6 +183,8 @@ class _SklearnUQAdapter:
         self._mode = self._probe_mode(X)
         if self._mode == "bootstrap":
             self._bootstrap_models = self._fit_bootstrap(X, y)
+            resid = y - np.asarray(self._estimator.predict(X), dtype=float).ravel()
+            self._resid_var = float(np.sum(resid**2) / max(len(y) - 1, 1))
         else:
             self._bootstrap_models = None
         return self
@@ -157,7 +205,29 @@ class _SklearnUQAdapter:
             hi = interval[..., 1].ravel()
             std = np.maximum(hi - lo, 0.0) / (2.0 * 1.959963984540054)
             return mean, std
-        # bootstrap
+        mean, std = self._bootstrap_predict(X)
+        if self._include_noise:
+            std = np.sqrt(std**2 + self._resid_var)
+        return mean, std
+
+    def predict_latent(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Mean and the standard error of the mean response (no observation noise).
+
+        For a scikit-learn GP whose kernel contains a ``WhiteKernel`` the fitted
+        white-noise variance is removed from ``predict``'s std; the bootstrap
+        spread is already a latent quantity. Estimators whose std has no known
+        noise component are returned unchanged.
+        """
+        X = np.asarray(X, dtype=float)
+        if self._mode == "bootstrap":
+            return self._bootstrap_predict(X)
+        mean, std = self.predict(X)
+        noise_var = _white_noise_variance(self._estimator)
+        if noise_var > 0.0:
+            std = np.sqrt(np.clip(std**2 - noise_var, 0.0, None))
+        return mean, std
+
+    def _bootstrap_predict(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         assert self._bootstrap_models is not None
         preds = np.stack([m.predict(X) for m in self._bootstrap_models], axis=0)
         mean = preds.mean(axis=0).ravel()
@@ -214,19 +284,272 @@ def _require_sklearn() -> None:
         ) from e
 
 
-def _gp_preset() -> Surrogate:
-    """Default GP: Matern(5/2) + WhiteKernel, normalized output."""
-    _require_sklearn()
-    from sklearn.gaussian_process import GaussianProcessRegressor
-    from sklearn.gaussian_process.kernels import ConstantKernel, Matern, WhiteKernel
+def _white_noise_variance(estimator: Any) -> float:
+    """Fitted ``WhiteKernel`` variance of a scikit-learn GP, in response units (0 if none)."""
+    kernel = getattr(estimator, "kernel_", None)
+    if kernel is None:
+        return 0.0
+    try:
+        from sklearn.gaussian_process.kernels import WhiteKernel
+    except ImportError:  # pragma: no cover - sklearn is present if kernel_ exists
+        return 0.0
+    total = 0.0
+    stack = [kernel]
+    while stack:
+        k = stack.pop()
+        if isinstance(k, WhiteKernel):
+            total += float(k.noise_level)
+        for attr in ("k1", "k2"):
+            child = getattr(k, attr, None)
+            if child is not None and type(k).__name__ == "Sum":
+                stack.append(child)
+    if total and getattr(estimator, "normalize_y", False):
+        y_std = np.asarray(getattr(estimator, "_y_train_std", 1.0), dtype=float)
+        total *= float(np.mean(y_std**2))
+    return total
 
-    kernel = ConstantKernel(1.0, (1e-3, 1e3)) * Matern(
-        length_scale=1.0, length_scale_bounds=(1e-2, 1e2), nu=2.5
-    ) + WhiteKernel(noise_level=1e-3, noise_level_bounds=(1e-8, 1e1))
-    gp = GaussianProcessRegressor(
-        kernel=kernel, normalize_y=True, n_restarts_optimizer=4, alpha=0.0
+
+def _pure_error_variance(X: np.ndarray, y: np.ndarray) -> tuple[float, int] | None:
+    """Pooled within-group variance over exactly replicated rows, and its df."""
+    keys = np.round(np.asarray(X, dtype=float), 12)
+    _, inverse, counts = np.unique(keys, axis=0, return_inverse=True, return_counts=True)
+    inverse = np.asarray(inverse).ravel()
+    df = int(np.sum(counts - 1))
+    if df <= 0:
+        return None
+    means = np.bincount(inverse, weights=y) / counts
+    ss = float(np.sum((y - means[inverse]) ** 2))
+    return ss / df, df
+
+
+class GPSurrogate:
+    """Gaussian-process surrogate with calibrated defaults (the ``"gp"`` preset).
+
+    A Matérn kernel times a constant, plus a white-noise term, fitted by
+    scikit-learn with the response normalized. See the module docstring for
+    why each default is what it is; build one with :func:`gp_surrogate`.
+
+    Attributes (after ``fit``)
+    --------------------------
+    estimator : sklearn.gaussian_process.GaussianProcessRegressor
+        The fitted regressor.
+    ard_ : bool
+        Whether the chosen model has one length-scale per input.
+    length_scales_ : numpy.ndarray
+        Fitted length-scale(s), in the units of the ``X`` passed to ``fit``.
+    noise_sd_ : float
+        Observation-noise standard deviation, in response units.
+    noise_source_ : str
+        ``"replicates"`` (pure error from replicated runs), ``"fitted"``,
+        ``"fixed"`` (the ``noise`` argument) or ``"none"`` (interpolating).
+    noise_at_floor_ : bool
+        True when a fitted noise sits on its floor: the data could not tell
+        noise from signal, and the floor is doing the work.
+    signal_sd_ : float
+        Prior standard deviation of the latent function, in response units.
+    """
+
+    _is_discopt_surrogate = True
+    # The UQ comes from GaussianProcessRegressor.predict(return_std=True);
+    # kept for continuity with the sklearn adapter's reporting.
+    mode = "return_std"
+
+    def __init__(
+        self,
+        *,
+        noise: str | float = "auto",
+        ard: bool | str = "auto",
+        nu: float = 2.5,
+        length_scale_bounds: tuple[float, float] = (0.05, 1e2),
+        noise_floor: float = 1e-2,
+        n_restarts: int = 4,
+        random_state: int | None = 0,
+    ):
+        if isinstance(noise, str):
+            if noise != "auto":
+                raise ValueError(f"noise must be 'auto' or a non-negative SD, got {noise!r}")
+        elif float(noise) < 0.0:
+            raise ValueError(f"noise SD must be >= 0, got {noise!r}")
+        if ard not in ("auto", True, False):
+            raise ValueError(f"ard must be 'auto', True or False, got {ard!r}")
+        if not 0.0 < float(noise_floor) < 1.0:
+            raise ValueError("noise_floor is a fraction of the response variance, in (0, 1)")
+        self.noise = noise
+        self.ard = ard
+        self.nu = float(nu)
+        self.length_scale_bounds = (float(length_scale_bounds[0]), float(length_scale_bounds[1]))
+        self.noise_floor = float(noise_floor)
+        self.n_restarts = int(n_restarts)
+        self.random_state = random_state
+        self.estimator: Any = None
+        self.ard_: bool | None = None
+        self.length_scales_: np.ndarray | None = None
+        self.noise_sd_: float | None = None
+        self.noise_source_: str | None = None
+        self.noise_at_floor_: bool = False
+        self.signal_sd_: float | None = None
+
+    # ------------------------------------------------------------------
+
+    def _build(self, d: int, ard: bool, fixed_noise: float | None, y_var: float):
+        from sklearn.gaussian_process import GaussianProcessRegressor
+        from sklearn.gaussian_process.kernels import ConstantKernel, Matern, WhiteKernel
+
+        ls = np.ones(d) if ard else 1.0
+        kernel = ConstantKernel(1.0, (1e-3, 1e3)) * Matern(
+            length_scale=ls, length_scale_bounds=self.length_scale_bounds, nu=self.nu
+        )
+        # normalize_y=True works in units of the response variance.
+        if fixed_noise is None:
+            start = max(0.1, 2.0 * self.noise_floor)
+            kernel = kernel + WhiteKernel(start, (self.noise_floor, 1.0))
+        elif fixed_noise > 0.0:
+            kernel = kernel + WhiteKernel(max(fixed_noise / y_var, 1e-12), "fixed")
+        return GaussianProcessRegressor(
+            kernel=kernel,
+            normalize_y=True,
+            n_restarts_optimizer=self.n_restarts,
+            alpha=1e-10,
+            random_state=self.random_state,
+        )
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "GPSurrogate":
+        X = np.atleast_2d(np.asarray(X, dtype=float))
+        y = np.asarray(y, dtype=float).ravel()
+        n, d = X.shape
+        y_var = float(np.var(y)) if n > 1 and np.var(y) > 0 else 1.0
+
+        fixed_noise: float | None
+        if isinstance(self.noise, str):  # "auto"
+            pe = _pure_error_variance(X, y)
+            if pe is not None:
+                fixed_noise, self.noise_source_ = pe[0], "replicates"
+            else:
+                fixed_noise, self.noise_source_ = None, "fitted"
+        elif float(self.noise) == 0.0:
+            fixed_noise, self.noise_source_ = 0.0, "none"
+        else:
+            fixed_noise, self.noise_source_ = float(self.noise) ** 2, "fixed"
+
+        options = [False, True] if (self.ard == "auto" and d > 1) else [self.ard is True]
+        best = None
+        with warnings.catch_warnings():
+            # Hyperparameters on their bounds are expected here (that is what
+            # the floors are for); report the one that matters below instead.
+            warnings.simplefilter("ignore", category=UserWarning)
+            try:
+                from sklearn.exceptions import ConvergenceWarning
+
+                warnings.simplefilter("ignore", category=ConvergenceWarning)
+            except ImportError:  # pragma: no cover
+                pass
+            for ard in options:
+                gp = self._build(d, ard, fixed_noise, y_var).fit(X, y)
+                score = gp.log_marginal_likelihood_value_
+                if len(options) > 1:  # BIC penalty for the extra length-scales
+                    score -= 0.5 * len(gp.kernel_.theta) * np.log(max(n, 2))
+                if best is None or score > best[0]:
+                    best = (score, gp, ard)
+        assert best is not None
+        _, gp, ard = best
+        self.estimator, self.ard_ = gp, bool(ard)
+
+        y_scale = float(np.mean(np.asarray(gp._y_train_std, dtype=float) ** 2))
+        kern = gp.kernel_
+        prod = kern.k1 if type(kern).__name__ == "Sum" else kern
+        self.signal_sd_ = float(np.sqrt(prod.k1.constant_value * y_scale))
+        self.length_scales_ = np.atleast_1d(np.asarray(prod.k2.length_scale, dtype=float))
+        self.noise_sd_ = float(np.sqrt(_white_noise_variance(gp)))
+        self.noise_at_floor_ = bool(
+            self.noise_source_ == "fitted"
+            and kern.k2.noise_level <= self.noise_floor * (1.0 + 1e-6)
+        )
+        if self.noise_at_floor_:
+            warnings.warn(
+                "the fitted GP noise sits on its floor (noise SD = "
+                f"{np.sqrt(self.noise_floor):.0%} of the response SD): the data cannot tell "
+                "noise from signal. Replicate a few runs so the noise can be estimated, "
+                "pass noise=<known SD>, or noise=0 for a deterministic simulator.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return self
+
+    def predict(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Mean and predictive standard deviation (includes observation noise)."""
+        if self.estimator is None:
+            raise RuntimeError("call fit() before predict()")
+        mean, std = self.estimator.predict(
+            np.atleast_2d(np.asarray(X, dtype=float)), return_std=True
+        )
+        return np.asarray(mean, dtype=float).ravel(), np.asarray(std, dtype=float).ravel()
+
+    def predict_latent(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Mean and the standard error of the mean response (no observation noise)."""
+        mean, std = self.predict(X)
+        noise_var = (self.noise_sd_ or 0.0) ** 2
+        return mean, np.sqrt(np.clip(std**2 - noise_var, 0.0, None))
+
+    def describe(self) -> dict[str, Any]:
+        """The fitted hyperparameters in plain terms."""
+        if self.estimator is None:
+            raise RuntimeError("call fit() before describe()")
+        return {
+            "ard": self.ard_,
+            "length_scales": None if self.length_scales_ is None else self.length_scales_.tolist(),
+            "signal_sd": self.signal_sd_,
+            "noise_sd": self.noise_sd_,
+            "noise_source": self.noise_source_,
+            "noise_at_floor": self.noise_at_floor_,
+            "log_marginal_likelihood": float(self.estimator.log_marginal_likelihood_value_),
+        }
+
+
+def gp_surrogate(
+    *,
+    noise: str | float = "auto",
+    ard: bool | str = "auto",
+    nu: float = 2.5,
+    length_scale_bounds: tuple[float, float] = (0.05, 1e2),
+    noise_floor: float = 1e-2,
+    n_restarts: int = 4,
+    random_state: int | None = 0,
+) -> GPSurrogate:
+    """The ``"gp"`` preset: a Gaussian-process surrogate with calibrated defaults.
+
+    Parameters
+    ----------
+    noise : "auto" or float, default "auto"
+        ``"auto"`` estimates the noise from exactly replicated runs when there
+        are any (pure error) and otherwise fits it, no lower than
+        ``noise_floor``. A float fixes the noise standard deviation in response
+        units; ``0`` interpolates the data (deterministic simulators).
+    ard : "auto", True or False, default "auto"
+        One length-scale per input (True), one shared (False), or choose by a
+        BIC-penalized marginal likelihood ("auto").
+    nu : float, default 2.5
+        Matérn smoothness.
+    length_scale_bounds : (float, float), default (0.05, 100)
+        Bounds on the length-scales, in the units of the inputs passed to
+        ``fit`` (standardized, inside :func:`~discopt.doe.optimize_round`).
+    noise_floor : float, default 0.01
+        Smallest fitted noise variance, as a fraction of the response
+        variance (0.01 = a noise SD of 10% of the response SD).
+    n_restarts : int, default 4
+        Optimizer restarts for the hyperparameters.
+    random_state : int or None, default 0
+        Seed for the optimizer restarts, so fits are reproducible.
+    """
+    _require_sklearn()
+    return GPSurrogate(
+        noise=noise,
+        ard=ard,
+        nu=nu,
+        length_scale_bounds=length_scale_bounds,
+        noise_floor=noise_floor,
+        n_restarts=n_restarts,
+        random_state=random_state,
     )
-    return _SklearnUQAdapter(gp)
 
 
 def _response_surface_preset() -> Surrogate:
@@ -244,13 +567,15 @@ def _response_surface_preset() -> Surrogate:
     return _SklearnUQAdapter(pipe)
 
 
-PRESETS: dict[str, Callable[[], Surrogate]] = {
-    "gp": _gp_preset,
+PRESETS: dict[str, Callable[..., Surrogate]] = {
+    "gp": gp_surrogate,
     "response-surface": _response_surface_preset,
 }
 
 
-def coerce_surrogate(obj: object) -> Surrogate:
+def coerce_surrogate(
+    obj: object, *, random_state: int | None = None, include_noise: bool = False
+) -> Surrogate:
     """Normalize a user-supplied surrogate spec to the Surrogate protocol.
 
     Accepts:
@@ -259,6 +584,16 @@ def coerce_surrogate(obj: object) -> Surrogate:
     * any object with ``fit`` and ``predict`` (sklearn-style) -- wrapped
       in :class:`_SklearnUQAdapter`;
     * an object that already implements :class:`Surrogate`.
+
+    Parameters
+    ----------
+    random_state : int, optional
+        Seed forwarded to presets that accept one and to the bootstrap
+        adapter, so a seeded optimization round is reproducible.
+    include_noise : bool, default False
+        For estimators wrapped with the bootstrap fallback: add the residual
+        variance to ``predict``'s std, so it describes a new observation
+        rather than the fitted mean (``predict_latent`` never includes it).
 
     Returns the surrogate ready for ``fit()``. Raises ``TypeError`` for
     anything else.
@@ -270,11 +605,17 @@ def coerce_surrogate(obj: object) -> Surrogate:
             raise ValueError(
                 f"unknown surrogate preset {obj!r}; available: {sorted(PRESETS)}"
             ) from e
+        if random_state is not None and "random_state" in inspect.signature(factory).parameters:
+            return factory(random_state=int(random_state))
         return factory()
     if _matches_surrogate_protocol(obj):
         return cast(Surrogate, obj)  # already returns (mean, std)
     if hasattr(obj, "fit") and hasattr(obj, "predict"):
-        return _SklearnUQAdapter(obj)
+        return _SklearnUQAdapter(
+            obj,
+            random_state=0 if random_state is None else int(random_state),
+            include_noise=include_noise,
+        )
     raise TypeError(
         f"surrogate {obj!r} must be a string preset, a sklearn-style estimator "
         "(with fit/predict), or implement the Surrogate protocol"
@@ -293,7 +634,9 @@ def _matches_surrogate_protocol(obj: object) -> bool:
 
 
 __all__ = [
+    "GPSurrogate",
     "PRESETS",
     "Surrogate",
     "coerce_surrogate",
+    "gp_surrogate",
 ]

@@ -23,10 +23,10 @@ from discopt.doe.design import (
     batch_optimal_experiment,
     optimal_experiment,
 )
+from discopt.doe._estimation import estimate_parameters
 from discopt.estimate import (
     EstimationResult,
     Experiment,
-    estimate_parameters,
 )
 
 

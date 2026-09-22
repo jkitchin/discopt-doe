@@ -521,6 +521,73 @@ class Workbook:
             out.append(dict(zip(headers, row)))
         return out
 
+    def record_responses(
+        self,
+        responses: Mapping[int, float | None] | Sequence[tuple[int, float | None]],
+        *,
+        extra: Mapping[int, Mapping[str, Any]] | None = None,
+        timestamp: bool = True,
+    ) -> None:
+        """Write measured responses into the runs sheet.
+
+        Parameters
+        ----------
+        responses : mapping run_id -> value, or sequence of (run_id, value)
+            The response for each run. ``None`` clears a cell, returning the
+            run to pending.
+        extra : mapping run_id -> {column: value}, optional
+            Other columns to fill for the same runs, e.g. a feasibility flag
+            created with ``extra_columns``. Only existing columns may be set.
+        timestamp : bool, default True
+            Stamp ``measured_at`` with the current local time for each run
+            given a value.
+
+        Call :meth:`save` afterwards to write the file.
+        """
+        from datetime import datetime
+
+        pairs = list(responses.items()) if isinstance(responses, Mapping) else list(responses)
+        sheet = self._wb[SHEET_RUNS]
+        headers = self._runs_headers()
+        response = self.response_name()
+        col = {h: i + 1 for i, h in enumerate(headers)}
+        rows_by_id: dict[int, int] = {}
+        for r_i, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
+            if row and row[0] is not None:
+                try:
+                    rows_by_id[int(row[0])] = r_i
+                except (TypeError, ValueError):
+                    continue
+        extra = dict(extra or {})
+        unknown = [rid for rid, _ in pairs if int(rid) not in rows_by_id] + [
+            rid for rid in extra if int(rid) not in rows_by_id
+        ]
+        if unknown:
+            raise ValueError(f"no run(s) with run_id {sorted(set(unknown))} in {self.path}")
+        protected = {"run_id", "batch", response, "measured_at"}
+        for fields in extra.values():
+            bad = [c for c in fields if c not in col or c in protected]
+            if bad:
+                raise ValueError(
+                    f"cannot set column(s) {bad}; settable columns are "
+                    f"{[h for h in headers if h not in protected]}"
+                )
+        stamp = datetime.now().isoformat(timespec="seconds")
+        for rid, value in pairs:
+            r_i = rows_by_id[int(rid)]
+            if value is None:
+                sheet.cell(row=r_i, column=col[response]).value = None
+                continue
+            v = float(value)
+            if not np.isfinite(v):
+                raise ValueError(f"run {rid}: response must be finite, got {value!r}")
+            sheet.cell(row=r_i, column=col[response]).value = v
+            if timestamp and "measured_at" in col:
+                sheet.cell(row=r_i, column=col["measured_at"]).value = stamp
+        for rid, fields in extra.items():
+            for c, v in fields.items():
+                sheet.cell(row=rows_by_id[int(rid)], column=col[c]).value = v
+
     def pending_runs(self) -> list[dict[str, Any]]:
         response = self.response_name()
         return [r for r in self.all_runs() if _coerce_float(r.get(response)) is None]

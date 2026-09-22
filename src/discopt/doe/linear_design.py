@@ -53,6 +53,27 @@ ME_OPTIMAL = "condition_number"
 
 CRITERIA = (D_OPTIMAL, A_OPTIMAL, E_OPTIMAL, ME_OPTIMAL)
 
+# Prediction-oriented criteria. Unlike the four above they are not functions of
+# the FIM alone: they also need the region over which predictions matter (a
+# :class:`DesignRegion`). I (also called V or IV) is the average variance of the
+# fitted response over the region, G its maximum; both are minimized.
+I_OPTIMAL = "average_prediction_variance"
+G_OPTIMAL = "max_prediction_variance"
+REGION_CRITERIA = (I_OPTIMAL, G_OPTIMAL)
+ALL_CRITERIA = CRITERIA + REGION_CRITERIA
+
+# Short names accepted wherever a criterion is: the textbook letters.
+CRITERION_ALIASES = {
+    "D": D_OPTIMAL,
+    "A": A_OPTIMAL,
+    "E": E_OPTIMAL,
+    "ME": ME_OPTIMAL,
+    "I": I_OPTIMAL,
+    "V": I_OPTIMAL,
+    "IV": I_OPTIMAL,
+    "G": G_OPTIMAL,
+}
+
 # Criteria where a larger value is a better design.
 _MAXIMIZED = frozenset({D_OPTIMAL, E_OPTIMAL})
 
@@ -329,14 +350,38 @@ def linear_fim(X: np.ndarray, sigma: float) -> np.ndarray:
     return Xa.T @ Xa / (s * s)
 
 
-def evaluate_criterion(fim: np.ndarray, criterion: str) -> float:
+def normalize_criterion(criterion: str) -> str:
+    """Map a criterion name or textbook letter (``"D"``, ``"I"``, ...) to its canonical name.
+
+    Raises ``ValueError`` for an unknown name.
+    """
+    name = str(criterion)
+    name = CRITERION_ALIASES.get(name, CRITERION_ALIASES.get(name.upper(), name))
+    if name not in ALL_CRITERIA:
+        raise ValueError(
+            f"unknown criterion {criterion!r}; expected one of {list(ALL_CRITERIA)} "
+            f"or {sorted(CRITERION_ALIASES)}"
+        )
+    return name
+
+
+def evaluate_criterion(
+    fim: np.ndarray, criterion: str, *, region: DesignRegion | None = None
+) -> float:
     """Evaluate a design criterion on a FIM.
 
     Matches :func:`discopt.doe.design._evaluate_criterion` term for term:
     D is ``log det`` (via ``slogdet``, which stays finite for badly scaled
     FIMs where ``det`` would overflow), A is ``trace(FIM⁻¹)``, E is the
     minimum eigenvalue, and ME is the condition number.
+
+    The prediction criteria need ``region``: I is the average of
+    ``f(x)ᵀ FIM⁻¹ f(x)`` over the region, ``trace(FIM⁻¹ W)`` with ``W`` the
+    region's moment matrix, and G is its maximum over the region's grid.
+    Because the FIM carries ``1/σ²``, both are variances of the fitted
+    response in the response's own units. A singular FIM scores ``inf``.
     """
+    criterion = normalize_criterion(criterion)
     if criterion == D_OPTIMAL:
         sign, logdet = np.linalg.slogdet(fim)
         if sign <= 0 or not np.isfinite(logdet):
@@ -351,14 +396,226 @@ def evaluate_criterion(fim: np.ndarray, criterion: str) -> float:
         return float(np.min(np.linalg.eigvalsh(fim)))
     if criterion == ME_OPTIMAL:
         return float(np.linalg.cond(fim))
-    raise ValueError(f"unknown criterion {criterion!r}; expected one of {list(CRITERIA)}")
+    if region is None:
+        raise ValueError(
+            f"criterion {criterion!r} is about prediction over a region; pass region= "
+            "(see DesignRegion / design_region)"
+        )
+    if criterion == I_OPTIMAL:
+        return region.average_variance(fim)
+    return region.max_variance(fim)
 
 
 def is_maximized(criterion: str) -> bool:
     """Return True when a larger criterion value means a better design."""
-    if criterion not in CRITERIA:
-        raise ValueError(f"unknown criterion {criterion!r}; expected one of {list(CRITERIA)}")
-    return criterion in _MAXIMIZED
+    return normalize_criterion(criterion) in _MAXIMIZED
+
+
+# --------------------------------------------------------------------------
+# Regions for the prediction criteria (I and G)
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class DesignRegion:
+    """Where predictions matter, reduced to what the I and G criteria need.
+
+    Attributes
+    ----------
+    moment_rows : numpy.ndarray
+        ``(m, p)`` model rows ``f(x)`` at the integration points.
+    weights : numpy.ndarray
+        ``(m,)`` integration weights, summing to 1.
+    grid_rows : numpy.ndarray
+        ``(g, p)`` model rows on the grid over which G takes its maximum.
+    points, grid_points : numpy.ndarray
+        The corresponding input points, ``(m, k)`` and ``(g, k)``.
+    method : str
+        How the region was discretized, e.g. ``"gauss-legendre"``, ``"sobol"``,
+        ``"points"``.
+    """
+
+    moment_rows: np.ndarray
+    weights: np.ndarray
+    grid_rows: np.ndarray
+    points: np.ndarray
+    grid_points: np.ndarray
+    method: str
+
+    @property
+    def moment_matrix(self) -> np.ndarray:
+        """``W = ∫ f(x) f(x)ᵀ dx / vol``: the region's average outer product."""
+        F = self.moment_rows
+        return F.T @ (F * self.weights[:, None])
+
+    def average_variance(self, fim: np.ndarray) -> float:
+        """I-criterion: average of ``f(x)ᵀ FIM⁻¹ f(x)`` over the region."""
+        try:
+            val = float(np.trace(np.linalg.solve(fim, self.moment_matrix)))
+        except np.linalg.LinAlgError:
+            return np.inf
+        return val if np.isfinite(val) and val >= 0 else np.inf
+
+    def soft_max_variance(self, fim: np.ndarray, q: float = 32.0) -> float:
+        """Smooth upper-envelope of the variances, ``(mean v^q)^(1/q)``.
+
+        A differentiable stand-in for :meth:`max_variance` that the local
+        optimizer can follow (the exact maximum is piecewise, and a gradient
+        search stalls on its kinks). It approaches the maximum as ``q`` grows.
+        """
+        try:
+            sol = np.linalg.solve(fim, self.grid_rows.T)
+        except np.linalg.LinAlgError:
+            return np.inf
+        v = np.einsum("ij,ji->i", self.grid_rows, sol)
+        if not np.all(np.isfinite(v)) or np.min(v) < 0:
+            return np.inf
+        vmax = float(np.max(v))
+        if vmax <= 0:
+            return 0.0
+        return vmax * float(np.mean((v / vmax) ** q)) ** (1.0 / q)
+
+    def max_variance(self, fim: np.ndarray) -> float:
+        """G-criterion: maximum of ``f(x)ᵀ FIM⁻¹ f(x)`` over the region's grid."""
+        try:
+            sol = np.linalg.solve(fim, self.grid_rows.T)
+        except np.linalg.LinAlgError:
+            return np.inf
+        v = np.einsum("ij,ji->i", self.grid_rows, sol)
+        val = float(np.max(v))
+        return val if np.isfinite(val) and np.min(v) > -1e-12 * max(1.0, val) else np.inf
+
+
+# Gauss-Legendre nodes per dimension (tensor rule) and uniform grid points per
+# dimension (for G), chosen to keep the total near a few thousand points.
+_GL_NODES = {1: 24, 2: 16, 3: 10, 4: 7}
+_GRID_POINTS = {1: 201, 2: 41, 3: 13, 4: 7}
+
+
+def design_region(
+    basis: Callable[[np.ndarray], np.ndarray],
+    input_names: Sequence[str],
+    *,
+    bounds: Mapping[str, tuple[float, float]] | None = None,
+    points: Sequence[Mapping[str, float]] | np.ndarray | None = None,
+    weights: Sequence[float] | None = None,
+    inequality_constraints: Sequence[Callable[[dict[str, float]], float]] | None = None,
+    feasible_projection: Callable[[dict[str, float]], dict[str, float]] | None = None,
+    n_points: int = 4096,
+    seed: int = 0,
+) -> DesignRegion:
+    """Discretize a region for the I and G criteria.
+
+    * **Explicit points** (``points``, e.g. from
+      :func:`discopt.doe.prediction.region_points` for a mixture simplex): used
+      as-is, for both the average (equal ``weights`` unless given) and the
+      maximum.
+    * **A box** (``bounds``, no constraints) with up to 4 factors: the average
+      uses a tensor Gauss-Legendre rule, exact for polynomial models of degree
+      up to 13 per factor or more; the maximum is taken on a uniform tensor grid
+      that includes the faces and corners, where polynomial prediction variance
+      peaks. With 5 or more factors both use ``n_points`` scrambled Sobol points
+      plus the corners.
+    * **A constrained box** (``inequality_constraints`` or a
+      ``feasible_projection``): ``n_points`` Sobol points in the box, kept if
+      they satisfy every ``h(x) >= 0`` and mapped by the projection. A
+      projection does not generally give a *uniform* sample of the feasible set,
+      so for mixtures prefer explicit ``points``.
+
+    G is a maximum over finitely many points, so it can only under-estimate the
+    true maximum; the dense grids above keep the error small for low-order
+    polynomial models, and an explicit fine grid gives full control.
+
+    Parameters
+    ----------
+    basis : callable
+        ``f(x_vector) -> model row``, ``x_vector`` ordered by ``input_names``.
+    input_names : sequence of str
+        Factor names.
+    bounds : mapping name -> (lb, ub), optional
+        The box. Required unless ``points`` is given.
+    points, weights : optional
+        Explicit region points (mappings or an ``(m, k)`` array) and weights.
+    inequality_constraints, feasible_projection : optional
+        Restrict the box, as in :func:`linear_batch_design`.
+    n_points : int, default 4096
+        Sample size for sampled regions.
+    seed : int, default 0
+        Seed for the Sobol scrambling.
+    """
+    names = list(input_names)
+    k = len(names)
+
+    def rows_of(X: np.ndarray) -> np.ndarray:
+        return np.array([np.asarray(basis(x), dtype=np.float64) for x in X], dtype=np.float64)
+
+    if points is not None:
+        if isinstance(points, np.ndarray):
+            X = np.atleast_2d(np.asarray(points, dtype=np.float64))
+        else:
+            X = np.array([[float(pt[n]) for n in names] for pt in points], dtype=np.float64)
+        if X.shape[0] < 1 or X.shape[1] != k:
+            raise ValueError(f"points must have shape (m, {k})")
+        w = (
+            np.full(X.shape[0], 1.0 / X.shape[0])
+            if weights is None
+            else np.asarray(weights, dtype=np.float64)
+        )
+        if w.shape != (X.shape[0],) or np.any(w < 0) or w.sum() <= 0:
+            raise ValueError("weights must be non-negative, one per point, not all zero")
+        F = rows_of(X)
+        return DesignRegion(F, w / w.sum(), F, X, X, "points")
+
+    if bounds is None:
+        raise ValueError("design_region needs bounds= (a box) or points=")
+    missing = [n for n in names if n not in bounds]
+    if missing:
+        raise ValueError(f"bounds missing entries for {missing}")
+    lo = np.array([float(bounds[n][0]) for n in names])
+    hi = np.array([float(bounds[n][1]) for n in names])
+    if np.any(hi <= lo):
+        raise ValueError("bounds must satisfy ub > lb")
+
+    from itertools import product
+
+    corners = np.array(list(product(*zip(lo, hi))), dtype=np.float64)
+    constrained = bool(inequality_constraints) or feasible_projection is not None
+    if not constrained and k in _GL_NODES:
+        nodes, gw = np.polynomial.legendre.leggauss(_GL_NODES[k])
+        grids = [lo[j] + (nodes + 1.0) * (hi[j] - lo[j]) / 2.0 for j in range(k)]
+        X = np.array(list(product(*grids)), dtype=np.float64)
+        w = np.array([np.prod(c) for c in product(*([gw] * k))], dtype=np.float64)
+        G = np.array(
+            list(product(*[np.linspace(lo[j], hi[j], _GRID_POINTS[k]) for j in range(k)])),
+            dtype=np.float64,
+        )
+        F, FG = rows_of(X), rows_of(G)
+        return DesignRegion(F, w / w.sum(), FG, X, G, "gauss-legendre")
+
+    from scipy.stats import qmc
+
+    m = 1 << max(4, int(np.ceil(np.log2(max(16, int(n_points))))))
+    U = qmc.Sobol(d=k, scramble=True, seed=seed).random(m)
+    X = lo + U * (hi - lo)
+    if not constrained:
+        X = np.vstack([X, corners])
+    else:
+        keep = []
+        for x in X:
+            d = dict(zip(names, map(float, x)))
+            if feasible_projection is not None:
+                d = feasible_projection(d)
+            if all(float(h(d)) >= -1e-12 for h in (inequality_constraints or ())):
+                keep.append([d[n] for n in names])
+        if len(keep) < 2 * k + 2:
+            raise ValueError(
+                "too few sampled points satisfy the constraints to represent the region; "
+                "pass explicit points="
+            )
+        X = np.array(keep, dtype=np.float64)
+    F = rows_of(X)
+    w = np.full(X.shape[0], 1.0 / X.shape[0])
+    return DesignRegion(F, w, F, X, X, "sobol")
 
 
 def _metrics(fim: np.ndarray) -> dict[str, float]:
@@ -484,8 +741,15 @@ def _search_one_point(
     inequality_constraints: Sequence[Callable[[dict[str, float]], float]],
     feasible_projection: Callable[[dict[str, float]], dict[str, float]] | None,
     regularization: float | np.ndarray = 0.0,
+    region: DesignRegion | None = None,
+    start: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float] | None:
     """Multi-start search for the point that best improves ``accumulated``.
+
+    ``region`` is required for the I and G criteria. ``start``, when given, is
+    tried as the first starting point (the exchange pass seeds it with the run
+    being replaced, so a run already at the optimum is not lost to the random
+    restarts).
 
     ``regularization`` adds a diagonal ridge (a scalar ``ε·I`` or a per-parameter
     vector) to every trial FIM before it is scored. It is only used while
@@ -515,7 +779,11 @@ def _search_one_point(
             f = basis(x)
             # Rank-1 update: one more run adds f fᵀ/σ² to the information.
             trial = accumulated + np.outer(f, f) * inv_var + ridge
-            value = evaluate_criterion(trial, criterion)
+            if criterion == G_OPTIMAL and region is not None:
+                # Follow a smooth envelope of the maximum; callers re-score exactly.
+                value = region.soft_max_variance(trial)
+            else:
+                value = evaluate_criterion(trial, criterion, region=region)
         except Exception:
             return _SINGULAR_SENTINEL
         if not np.isfinite(value):
@@ -533,8 +801,12 @@ def _search_one_point(
     best_x: np.ndarray | None = None
     best_obj = np.inf
 
-    for _ in range(max(1, int(n_starts))):
-        x0 = project(rng.uniform(lbs, ubs))
+    starts = max(1, int(n_starts))
+    for i_start in range(starts + (start is not None)):
+        if start is not None and i_start == 0:
+            x0 = project(np.clip(np.asarray(start, dtype=np.float64), lbs, ubs))
+        else:
+            x0 = project(rng.uniform(lbs, ubs))
         try:
             if constraints:
                 res = minimize(
@@ -562,6 +834,99 @@ def _search_one_point(
     return best_x, (-best_obj if maximize else best_obj)
 
 
+def _resolve_region(
+    region: DesignRegion | Sequence[Mapping[str, float]] | np.ndarray | None,
+    criterion: str,
+    basis: Callable[[np.ndarray], np.ndarray],
+    names: Sequence[str],
+    region_bounds: Mapping[str, tuple[float, float]] | None,
+    design_bounds: Mapping[str, tuple[float, float]],
+    inequality_constraints: Sequence[Callable[[dict[str, float]], float]] | None,
+    feasible_projection: Callable[[dict[str, float]], dict[str, float]] | None,
+    seed: int,
+) -> DesignRegion | None:
+    """Build the region the I/G criteria need; ``None`` for the FIM criteria."""
+    if criterion not in REGION_CRITERIA:
+        return None
+    if isinstance(region, DesignRegion):
+        return region
+    if region is not None:
+        return design_region(basis, names, points=region)
+    return design_region(
+        basis,
+        names,
+        bounds=region_bounds if region_bounds is not None else design_bounds,
+        inequality_constraints=inequality_constraints,
+        feasible_projection=feasible_projection,
+        seed=seed,
+    )
+
+
+def _joint_polish(
+    points: list[np.ndarray],
+    accumulated: np.ndarray,
+    basis: Callable[[np.ndarray], np.ndarray],
+    prior_fim: np.ndarray | None,
+    n_p: int,
+    inv_var: float,
+    criterion: str,
+    region: DesignRegion | None,
+    lbs: np.ndarray,
+    ubs: np.ndarray,
+) -> tuple[list[np.ndarray], np.ndarray]:
+    """Optimize every run's coordinates at once; keep the result only if it is better."""
+    k = len(lbs)
+    n = len(points)
+    base = (
+        np.zeros((n_p, n_p), dtype=np.float64)
+        if prior_fim is None
+        else np.asarray(prior_fim, dtype=np.float64)
+    )
+
+    def fim_of(z: np.ndarray) -> np.ndarray:
+        F = np.array([basis(z[i * k : (i + 1) * k]) for i in range(n)], dtype=np.float64)
+        return base + F.T @ F * inv_var
+
+    def exact(z: np.ndarray) -> float:
+        return evaluate_criterion(fim_of(z), criterion, region=region)
+
+    z = np.concatenate(points)
+    best_val = exact(z)
+    bounds = [(lo, hi) for _ in range(n) for lo, hi in zip(lbs, ubs)]
+    lo_all, hi_all = np.tile(lbs, n), np.tile(ubs, n)
+    qs = (64.0, 512.0) if criterion == G_OPTIMAL else (None,)
+    # Symmetric designs are often saddle points of I and G (the gradient
+    # vanishes by symmetry), so also start from a few small random jitters.
+    jitter_rng = np.random.default_rng(12345)
+    starts = [z] + [
+        np.clip(z + 0.05 * (hi_all - lo_all) * jitter_rng.standard_normal(z.size), lo_all, hi_all)
+        for _ in range(1 if criterion == G_OPTIMAL else 4)
+    ]
+    for z_start, q in [(zs, q) for zs in starts for q in qs]:
+
+        def smooth(zz: np.ndarray, q=q) -> float:
+            M = fim_of(zz)
+            if q is None:
+                v = evaluate_criterion(M, criterion, region=region)
+            else:
+                assert region is not None
+                v = region.soft_max_variance(M, q=q)
+            return v if np.isfinite(v) else _SINGULAR_SENTINEL
+
+        try:
+            res = minimize(
+                smooth, z_start, method="L-BFGS-B", bounds=bounds, options=_LBFGSB_OPTIONS
+            )
+        except Exception:  # noqa: BLE001 - a failed polish keeps the exchange result
+            continue
+        z_new = np.clip(np.asarray(res.x, dtype=np.float64), lo_all, hi_all)
+        val = exact(z_new)
+        if np.isfinite(val) and val < best_val - 1e-12 * max(1.0, abs(best_val)):
+            z, best_val = z_new, val
+    new_points = [z[i * k : (i + 1) * k].copy() for i in range(n)]
+    return new_points, fim_of(z)
+
+
 def linear_optimal_design(
     template: str,
     *,
@@ -577,6 +942,8 @@ def linear_optimal_design(
     feasible_projection: Callable[[dict[str, float]], dict[str, float]] | None = None,
     n_starts: int = 10,
     seed: int = 42,
+    region: DesignRegion | Sequence[Mapping[str, float]] | np.ndarray | None = None,
+    region_bounds: Mapping[str, tuple[float, float]] | None = None,
 ) -> LinearDesignResult:
     """Find the single most informative next experiment.
 
@@ -594,7 +961,9 @@ def linear_optimal_design(
     measurement_error : float, default 1.0
         Response standard deviation σ.
     criterion : str, default ``"determinant"``
-        One of :data:`CRITERIA`.
+        One of :data:`ALL_CRITERIA`, or a textbook letter (``"D"``, ``"A"``,
+        ``"E"``, ``"ME"``, ``"I"``, ``"G"``). I and G are about the variance of
+        predictions over a region rather than about the coefficients.
     prior_fim : numpy.ndarray, optional
         Information already in hand, from completed runs. **Usually
         required**: a single run contributes a rank-1 matrix, so with more
@@ -612,6 +981,14 @@ def linear_optimal_design(
         buy robustness at linear cost.
     seed : int, default 42
         Seed for the restart points.
+    region : DesignRegion, points, or None
+        For the I and G criteria: the region over which prediction variance is
+        averaged / maximized. A :class:`DesignRegion`, explicit points
+        (mappings or an array), or ``None`` to use ``region_bounds`` (default:
+        ``design_bounds``, restricted by any constraints). See
+        :func:`design_region`.
+    region_bounds : mapping, optional
+        The box for the default region, when it differs from ``design_bounds``.
 
     Returns
     -------
@@ -624,8 +1001,7 @@ def linear_optimal_design(
             "discopt.doe.design.optimal_experiment (which needs jax) instead. "
             f"Linear templates: {sorted(LINEAR_TEMPLATES)}"
         )
-    if criterion not in CRITERIA:
-        raise ValueError(f"unknown criterion {criterion!r}; expected one of {list(CRITERIA)}")
+    criterion = normalize_criterion(criterion)
 
     names = list(input_names)
     missing = [n for n in names if n not in design_bounds]
@@ -666,6 +1042,17 @@ def linear_optimal_design(
         )
 
     basis = _basis_evaluator(template, template_args or {}, parameter_names, names)
+    region_obj = _resolve_region(
+        region,
+        criterion,
+        basis,
+        names,
+        region_bounds,
+        design_bounds,
+        inequality_constraints,
+        feasible_projection,
+        seed,
+    )
     found = _search_one_point(
         basis,
         accumulated,
@@ -679,6 +1066,7 @@ def linear_optimal_design(
         tuple(equality_constraints or ()),
         tuple(inequality_constraints or ()),
         feasible_projection,
+        region=region_obj,
     )
     if found is None:
         raise RuntimeError(
@@ -715,6 +1103,8 @@ def linear_batch_design(
     n_starts: int = 10,
     seed: int = 42,
     exchange_passes: int = 2,
+    region: DesignRegion | Sequence[Mapping[str, float]] | np.ndarray | None = None,
+    region_bounds: Mapping[str, tuple[float, float]] | None = None,
 ) -> LinearBatchDesignResult:
     """Design ``n_experiments`` runs greedily, accumulating information.
 
@@ -723,7 +1113,8 @@ def linear_batch_design(
     that most improves the criterion given everything chosen so far, which is
     what makes a batch escape the rank-1 degeneracy of a single run.
 
-    Parameters are as :func:`linear_optimal_design`, plus:
+    Parameters are as :func:`linear_optimal_design` (including ``region`` and
+    ``region_bounds`` for the I and G criteria), plus:
 
     Parameters
     ----------
@@ -760,8 +1151,7 @@ def linear_batch_design(
             "discopt.doe.design.batch_optimal_experiment (which needs jax) instead. "
             f"Linear templates: {sorted(LINEAR_TEMPLATES)}"
         )
-    if criterion not in CRITERIA:
-        raise ValueError(f"unknown criterion {criterion!r}; expected one of {list(CRITERIA)}")
+    criterion = normalize_criterion(criterion)
 
     names = list(input_names)
     missing = [n for n in names if n not in design_bounds]
@@ -801,6 +1191,8 @@ def linear_batch_design(
         n_starts=n_starts,
         seed=seed,
         exchange_passes=exchange_passes,
+        region=region,
+        region_bounds=region_bounds,
     )
 
 
@@ -820,6 +1212,8 @@ def batch_design_from_basis(
     n_starts: int = 10,
     seed: int = 42,
     exchange_passes: int = 2,
+    region: DesignRegion | Sequence[Mapping[str, float]] | np.ndarray | None = None,
+    region_bounds: Mapping[str, tuple[float, float]] | None = None,
 ) -> LinearBatchDesignResult:
     """Greedy batch design driven by an arbitrary Jacobian-row provider.
 
@@ -836,12 +1230,12 @@ def batch_design_from_basis(
         ``f(x_vector) -> ndarray`` of length ``len(parameter_names)``, where
         ``x_vector`` is ordered by ``input_names``.
 
-    Other parameters are as :func:`linear_batch_design`.
+    Other parameters are as :func:`linear_batch_design`; ``region`` and
+    ``region_bounds`` (for the I and G criteria) as :func:`linear_optimal_design`.
     """
     if n_experiments < 1:
         raise ValueError(f"n_experiments must be >= 1, got {n_experiments}")
-    if criterion not in CRITERIA:
-        raise ValueError(f"unknown criterion {criterion!r}; expected one of {list(CRITERIA)}")
+    criterion = normalize_criterion(criterion)
 
     names = list(input_names)
     missing = [n for n in names if n not in design_bounds]
@@ -865,6 +1259,17 @@ def batch_design_from_basis(
             f"{n_p} parameters {list(parameter_names)}"
         )
 
+    region_obj = _resolve_region(
+        region,
+        criterion,
+        basis,
+        names,
+        region_bounds,
+        design_bounds,
+        inequality_constraints,
+        feasible_projection,
+        seed,
+    )
     rng = np.random.default_rng(seed)
     inv_var = 1.0 / (float(measurement_error) ** 2)
     eq_cons = tuple(equality_constraints or ())
@@ -901,12 +1306,24 @@ def batch_design_from_basis(
             return False
         return int(np.linalg.matrix_rank(m / np.outer(d, d))) >= n_p
 
-    def pick(base: np.ndarray, round_seed_rng: np.random.Generator):
+    # G-optimal designs are built from the D-optimal one: in the approximate
+    # (large-N) limit the two coincide (the Kiefer-Wolfowitz equivalence
+    # theorem), and the maximum-variance surface is too kinked for a greedy build
+    # from scratch. The G exchange passes that follow can then only improve on it.
+    stages = [D_OPTIMAL, G_OPTIMAL] if criterion == G_OPTIMAL else [criterion]
+    build = stages[0]
+
+    def pick(
+        base: np.ndarray,
+        round_seed_rng: np.random.Generator,
+        start: np.ndarray | None = None,
+        target: str | None = None,
+    ):
         # While ``base`` is rank-deficient every criterion is degenerate; rank
         # candidates by a lightly regularized log det, which is what fills in
         # the missing directions fastest.
         if full_rank(base):
-            active, reg = criterion, 0.0
+            active, reg = (target or build), 0.0
         else:
             active, reg = D_OPTIMAL, eps
         return _search_one_point(
@@ -923,6 +1340,8 @@ def batch_design_from_basis(
             ineq_cons,
             feasible_projection,
             regularization=reg,
+            region=region_obj,
+            start=start,
         )
 
     points: list[np.ndarray] = []
@@ -941,30 +1360,49 @@ def batch_design_from_basis(
     # Exchange refinement: greedy never revisits an early pick, which leaves
     # runs stranded where they were only useful before the FIM was full rank.
     if full_rank(accumulated):
-        maximize = is_maximized(criterion)
-        current = evaluate_criterion(accumulated, criterion)
-        for _ in range(max(0, int(exchange_passes))):
-            improved = False
-            for i in range(len(points)):
-                fi = basis(points[i])
-                others = accumulated - np.outer(fi, fi) * inv_var
-                found = pick(others, rng)
-                if found is None:
-                    continue
-                x_new, _ = found
-                fn = basis(x_new)
-                trial = others + np.outer(fn, fn) * inv_var
-                if not full_rank(trial):
-                    continue
-                value = evaluate_criterion(trial, criterion)
-                gain = (value - current) if maximize else (current - value)
-                if np.isfinite(value) and gain > 1e-10 * max(1.0, abs(current)):
-                    points[i] = x_new
-                    accumulated = trial
-                    current = value
-                    improved = True
-            if not improved:
-                break
+        for stage in stages:
+            maximize = is_maximized(stage)
+            current = evaluate_criterion(accumulated, stage, region=region_obj)
+            passes = max(0, int(exchange_passes))
+            if stage != stages[0]:
+                passes = max(passes, 2)
+            for _ in range(passes):
+                improved = False
+                for i in range(len(points)):
+                    fi = basis(points[i])
+                    others = accumulated - np.outer(fi, fi) * inv_var
+                    found = pick(others, rng, start=points[i], target=stage)
+                    if found is None:
+                        continue
+                    x_new, _ = found
+                    fn = basis(x_new)
+                    trial = others + np.outer(fn, fn) * inv_var
+                    if not full_rank(trial):
+                        continue
+                    value = evaluate_criterion(trial, stage, region=region_obj)
+                    gain = (value - current) if maximize else (current - value)
+                    if np.isfinite(value) and gain > 1e-10 * max(1.0, abs(current)):
+                        points[i] = x_new
+                        accumulated = trial
+                        current = value
+                        improved = True
+                if not improved:
+                    break
+
+    # Joint polish for the prediction criteria on a plain box. Exchange moves one
+    # run at a time, which stalls on the I/G surfaces where runs must move
+    # together (a symmetric pair drifting outward); a local search over every
+    # coordinate at once, accepted only if the exact criterion improves, fixes it.
+    if (
+        criterion in REGION_CRITERIA
+        and full_rank(accumulated)
+        and not eq_cons
+        and not ineq_cons
+        and feasible_projection is None
+    ):
+        points, accumulated = _joint_polish(
+            points, accumulated, basis, prior_fim, n_p, inv_var, criterion, region_obj, lbs, ubs
+        )
 
     designs: list[dict[str, float]] = [{n: float(v) for n, v in zip(names, x)} for x in points]
     # Report the criterion as the batch accumulates, in run order. While the FIM
@@ -982,7 +1420,7 @@ def batch_design_from_basis(
         f = basis(x)
         running = running + np.outer(f, f) * inv_var
         if full_rank(running):
-            per_round.append(evaluate_criterion(running, criterion))
+            per_round.append(evaluate_criterion(running, criterion, region=region_obj))
         else:
             per_round.append(-np.inf if is_maximized(criterion) else np.inf)
     return LinearBatchDesignResult(
@@ -996,10 +1434,16 @@ def batch_design_from_basis(
 
 
 __all__ = [
+    "ALL_CRITERIA",
     "A_OPTIMAL",
     "CRITERIA",
+    "CRITERION_ALIASES",
+    "DesignRegion",
     "D_OPTIMAL",
     "E_OPTIMAL",
+    "G_OPTIMAL",
+    "I_OPTIMAL",
+    "REGION_CRITERIA",
     "LINEAR_TEMPLATES",
     "LinearBatchDesignResult",
     "LinearDesignResult",
@@ -1008,10 +1452,12 @@ __all__ = [
     "basis_terms",
     "batch_design_from_basis",
     "design_matrix",
+    "design_region",
     "design_row",
     "evaluate_criterion",
     "is_maximized",
     "linear_batch_design",
     "linear_fim",
     "linear_optimal_design",
+    "normalize_criterion",
 ]

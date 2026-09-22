@@ -128,6 +128,35 @@ class FIMResult:
         }
 
 
+def _compile_response(expr, model):
+    """Compile a response expression into ``f(x_flat, p_flat)``.
+
+    ``discopt.parametric.compile_expression`` threads model Parameters through
+    ``p_flat`` but has no rule for an opaque :func:`discopt.modeling.custom`
+    node (a ``CustomCall``), which is how an ODE integrator enters a model (see
+    :mod:`discopt.doe.dynamic`). For those expressions fall back to the solver's
+    own DAG compiler, which traces the callable through JAX (so every autodiff
+    mode works) and evaluates shared nodes once; its Parameter values are
+    snapshotted at compile time, which is equivalent here because the FIM
+    differentiates with respect to variables, not Parameters.
+    """
+    from discopt.parametric import compile_expression
+
+    try:
+        return compile_expression(expr, model)
+    except TypeError as exc:
+        if "CustomCall" not in str(exc):
+            raise
+    from discopt._relax.dag_compiler import compile_expression as _dag_compile
+
+    fn = _dag_compile(expr, model)
+
+    def wrapped(x_flat, p_flat=None, _fn=fn):
+        return _fn(x_flat)
+
+    return wrapped
+
+
 def _measurement_sigma(em: ExperimentModel) -> np.ndarray:
     """Validated per-response measurement std-devs (sigma > 0).
 
@@ -292,7 +321,7 @@ def compute_fim(
         FIM, Jacobian, and optimality metrics.
     """
 
-    from discopt.parametric import compile_expression, extract_x_flat, flatten_params
+    from discopt.parametric import extract_x_flat, flatten_params
 
     # Build the model at nominal parameter values
     em = experiment.create_model(**param_values)
@@ -341,7 +370,7 @@ def compute_fim(
     # Compile response functions
     response_fns = []
     for name in em.response_names:
-        fn = compile_expression(em.responses[name], em.model)
+        fn = _compile_response(em.responses[name], em.model)
         response_fns.append(fn)
 
     # Find indices of unknown parameter variables in x_flat
@@ -398,7 +427,7 @@ def compute_fim_batch(
     a non-autodiff ``method``, so the result is always identical to calling
     :func:`compute_fim` on each point.
     """
-    from discopt.parametric import compile_expression, flatten_params
+    from discopt.parametric import flatten_params
 
     if not design_points:
         return []
@@ -418,7 +447,7 @@ def compute_fim_batch(
 
     jax, jnp = _require_jax()
 
-    response_fns = [compile_expression(em.responses[n], em.model) for n in em.response_names]
+    response_fns = [_compile_response(em.responses[n], em.model) for n in em.response_names]
     param_indices = _get_param_indices(em)
     p_flat = flatten_params(em.model)
 
@@ -474,13 +503,13 @@ def _make_direct_fim_evaluator(
     """
     jax, jnp = _require_jax()
 
-    from discopt.parametric import compile_expression, flatten_params
+    from discopt.parametric import flatten_params
 
     em = experiment.create_model(**param_values)
     if _design_source_map(em) is None:
         return None
 
-    response_fns = [compile_expression(em.responses[n], em.model) for n in em.response_names]
+    response_fns = [_compile_response(em.responses[n], em.model) for n in em.response_names]
     param_indices = _get_param_indices(em)
     p_flat = flatten_params(em.model)
 

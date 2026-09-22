@@ -442,7 +442,8 @@ def _predict_with_covariance(
         _compute_jacobian_autodiff,
         _get_param_indices,
     )
-    from discopt.parametric import compile_expression, extract_x_flat, flatten_params
+    from discopt.doe.fim import _compile_response
+    from discopt.parametric import extract_x_flat, flatten_params
 
     em = experiment.create_model(**param_values)
 
@@ -479,7 +480,7 @@ def _predict_with_covariance(
         x_flat = extract_x_flat(result, em.model)
 
     # Compile response functions and compute predicted means.
-    response_fns = [compile_expression(em.responses[n], em.model) for n in em.response_names]
+    response_fns = [_compile_response(em.responses[n], em.model) for n in em.response_names]
     p_flat = flatten_params(em.model)
     y_hat = np.array([float(np.asarray(fn(x_flat, p_flat)).flat[0]) for fn in response_fns])
 

@@ -206,7 +206,8 @@ class ParametricSurrogate:
 
         jax, jnp = _require_jax()
 
-        from discopt.parametric import compile_expression, flatten_params, variable_slices
+        from discopt.doe.fim import _compile_response
+        from discopt.parametric import flatten_params, variable_slices
 
         em = self.experiment.create_model(**self.initial_guess)
         if self.response_name not in em.responses:
@@ -242,7 +243,7 @@ class ParametricSurrogate:
         # p_flat for any model Parameters (distinct from unknown parameters).
         p_flat_const = flatten_params(em.model)
 
-        response_fn = compile_expression(em.responses[self.response_name], em.model)
+        response_fn = _compile_response(em.responses[self.response_name], em.model)
         d_idx = jnp.asarray(design_idx, dtype=jnp.int32)
         p_idx = jnp.asarray(param_idx, dtype=jnp.int32)
 
@@ -354,6 +355,17 @@ class ParametricSurrogate:
         var_total = var_param + self.measurement_noise_var
         std = np.sqrt(np.clip(var_total, 0.0, None))
         return mu, std
+
+    def predict_latent(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Mean and the standard error of the mean response: parameter uncertainty only.
+
+        ``predict`` adds the measurement noise, which describes a new
+        observation; acquisition functions score the mean response instead
+        (see :mod:`discopt.doe.acquisition`).
+        """
+        mu, std = self.predict(X)
+        var_param = np.clip(std**2 - self.measurement_noise_var, 0.0, None)
+        return mu, np.sqrt(var_param)
 
 
 def model_based_optimize_round(
