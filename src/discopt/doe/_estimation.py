@@ -357,12 +357,72 @@ class DevianceFunction:
 
         self._value = value
         self.path = "predict"
+        self._setup_predict_gradient(predict, sig)
+
+    def _setup_predict_gradient(self, predict: Callable, sig: Mapping[str, float]) -> None:
+        """Analytic ``dD/dtheta`` from the experiment's sensitivity matrix, if it has one.
+
+        ``jacobian(theta, design)`` has one row per response name and one column
+        per parameter in the experiment's own order, so the columns are mapped
+        onto :attr:`names` here. Without it the caller falls back to finite
+        differences, which is correct but much slower.
+        """
+        jacobian = getattr(self.experiment, "jacobian", None)
+        rows = list(getattr(self.experiment, "response_names", []))
+        cols = list(getattr(self.experiment, "parameter_names", []))
+        if not callable(jacobian) or set(self.names) - set(cols) or not rows:
+            return
+        take = [cols.index(n) for n in self.names]
+        keys = [k for k in self.data if k in rows]
+        if len(keys) != len(self.data):  # a response the Jacobian does not cover
+            return
+        ridx = [rows.index(k) for k in keys]
+
+        def gradient(theta: np.ndarray) -> np.ndarray:
+            th = dict(zip(self.names, map(float, theta)))
+            y = predict(th, self.design)
+            J = np.asarray(jacobian(th, self.design), dtype=float)[np.ix_(ridx, take)]
+            resid = np.array(
+                [np.sum(self.data[k] - float(y[k])) / sig[k] ** 2 for k in keys], dtype=float
+            )
+            return -2.0 * (resid @ J)
+
+        self._grad = gradient
 
     def _sigmas_from_experiment(self) -> dict[str, float]:
-        me = getattr(self.experiment, "measurement_error", 1.0)
-        if isinstance(me, Mapping):
-            return {k: float(me[k]) for k in self.data}
-        return {k: float(me) for k in self.data}
+        """Measurement ``sigma`` for every response in the data.
+
+        The deviance is compared against a chi-square threshold, so its scale
+        decides every interval built from it: a sigma that is wrong by a factor
+        of 100 makes the deviance wrong by 10,000 and the profile look flat.
+        Experiments spell the errors differently -- a ``measurement_error``
+        mapping or scalar, or (dynamic experiments) a ``sigma`` mapping keyed by
+        the measured state behind a ``state@time`` response name -- so all of
+        those are tried before falling back to 1.0, which is announced.
+        """
+        for source in (
+            getattr(self.experiment, "measurement_error", None),
+            getattr(self.experiment, "sigma", None),
+        ):
+            if source is None:
+                continue
+            if not isinstance(source, Mapping):
+                return {k: float(source) for k in self.data}
+            try:
+                return {
+                    k: float(source[k] if k in source else source[k.split("@")[0]])
+                    for k in self.data
+                }
+            except (KeyError, TypeError, ValueError):
+                continue
+        warnings.warn(
+            f"{type(self.experiment).__name__} reports no measurement error; using sigma = 1 "
+            "for every response. Deviance-based intervals (profile likelihood) are only "
+            "meaningful if that is the true measurement scale.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return {k: 1.0 for k in self.data}
 
     def _setup_compiled(self) -> bool:
         try:

@@ -294,12 +294,22 @@ def _assemble_x_flat_batch_direct(em, param_values, design_points):
 # nominal parameters for many design points, so the model and a jitted
 # Jacobian are kept per experiment and reused.
 #
-# The key is the nominal parameter values (create_model may use them) plus a
-# fingerprint of the experiment's own state, so an experiment edited after a
-# first call (say, more integration steps) is recompiled rather than served a
-# stale function. Only pure explicit response models are cached: those are the
-# models whose x* is assembled directly, so nothing on the cached model is ever
-# mutated. Call :func:`clear_fim_cache` to drop everything explicitly.
+# A compiled Jacobian does not depend on the nominal parameters at all: it maps
+# the flat vector x* (which carries the parameter values) to the responses. Only
+# the *model* could depend on them, since create_model receives them. So a
+# kernel is reused for new nominal values whenever the model those values build
+# is structurally identical -- same variables, bounds, response expressions and
+# measurement errors, and the same underlying callables behind any custom node
+# (see _model_signature). That is what makes a sweep over parameter draws -- a
+# robust design, a profile, a Monte Carlo over the posterior -- pay for one
+# trace instead of one per draw.
+#
+# The key also carries a fingerprint of the experiment's own state, so an
+# experiment edited after a first call (say, more integration steps) is
+# recompiled rather than served a stale function. Only pure explicit response
+# models are cached: those are the models whose x* is assembled directly, so
+# nothing on the cached model is ever mutated. Call :func:`clear_fim_cache` to
+# drop everything explicitly.
 
 _FIM_CACHE_ATTR = "_discopt_doe_fim_cache"
 _FIM_CACHE_SIZE = 8
@@ -317,6 +327,7 @@ class _FIMKernel:
     sigma_inv: np.ndarray
     jac: Callable
     batch_jac: Callable
+    signature: Any = None
 
     def x_flat(self, param_values, design_values):
         """``x*`` for one design, or ``None`` on a shape mismatch / missing value."""
@@ -356,6 +367,66 @@ def _experiment_fingerprint(experiment: Experiment) -> Any:
         return None
 
 
+def _callable_identities(node: Any, depth: int = 0, seen: set[int] | None = None) -> list:
+    """Identities of the callables reachable from an expression.
+
+    A custom node holds a Python function that the expression's ``repr`` cannot
+    see, so two models whose responses print identically may still compute
+    different things. Any dependence on the nominal parameters must be created
+    inside ``create_model`` -- it is handed the values -- which makes a fresh
+    function object, so comparing identities is enough to tell the two apart. A
+    bound method is compared by its underlying function and instance, since
+    attribute access builds a new wrapper every time.
+    """
+    seen = set() if seen is None else seen
+    out: list = []
+    if node is None or depth > 8 or id(node) in seen:
+        return out
+    seen.add(id(node))
+    fn = getattr(node, "fn", None)
+    if callable(fn):
+        f = getattr(fn, "__func__", fn)
+        out.append((getattr(f, "__qualname__", ""), id(f), id(getattr(fn, "__self__", None))))
+    for value in getattr(node, "__dict__", {}).values():
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                out.extend(_callable_identities(item, depth + 1, seen))
+        elif hasattr(value, "__dict__"):
+            out.extend(_callable_identities(value, depth + 1, seen))
+    return out
+
+
+def _model_signature(em: ExperimentModel) -> Any:
+    """What a built model computes, as a comparable value (or ``None``).
+
+    Two models with the same signature differ at most in the nominal parameter
+    values that built them -- values that enter the FIM through ``x*``, not
+    through the compiled Jacobian -- so one traced kernel serves both.
+    """
+    from discopt.parametric import variable_slices
+
+    def var_sig(var: Any) -> tuple:
+        return (
+            getattr(var, "name", None),
+            int(getattr(var, "size", 1) or 1),
+            np.asarray(var.lb, dtype=float).ravel().tolist(),
+            np.asarray(var.ub, dtype=float).ravel().tolist(),
+        )
+
+    try:
+        return (
+            tuple(variable_slices(em.model)),
+            tuple((n, var_sig(v)) for n, v in sorted(em.unknown_parameters.items())),
+            tuple((n, var_sig(v)) for n, v in sorted(em.design_inputs.items())),
+            tuple(em.response_names),
+            tuple(repr(em.responses[n]) for n in em.response_names),
+            tuple(_measurement_sigma(em).ravel().tolist()),
+            tuple(tuple(_callable_identities(em.responses[n])) for n in em.response_names),
+        )
+    except Exception:  # noqa: BLE001 - an unsummarizable model is simply not reused
+        return None
+
+
 def _param_key(param_values: dict[str, Any]) -> tuple:
     return tuple(
         (k, tuple(np.asarray(v, dtype=np.float64).ravel().tolist()))
@@ -380,8 +451,9 @@ def clear_fim_cache(experiment: Experiment | None = None) -> None:
     """Drop the compiled FIM Jacobians kept for ``experiment`` (or for all).
 
     :func:`compute_fim` and the design searches keep, per experiment, the built
-    model and a jitted Jacobian for each set of nominal parameter values, and
-    recompile automatically when the experiment's attributes change. Clear the
+    model and a jitted Jacobian, reused across designs and across nominal
+    parameter values that build the same model, and recompiled automatically
+    when the experiment's attributes or its model change. Clear the
     cache after changing something the fingerprint cannot see, such as the body
     of a function the experiment calls, or to release memory.
     """
@@ -406,7 +478,28 @@ def _fim_kernel(experiment: Experiment, param_values: dict[str, float]) -> _FIMK
         cache.move_to_end(key)
         return cache[key]
 
-    kernel = _build_fim_kernel(experiment, param_values)
+    em = None
+    kernel = None
+    if cache is not None:
+        # New nominal values: build the model (cheap) and reuse the compiled
+        # Jacobian of any cached kernel the same model structure produced.
+        try:
+            em = experiment.create_model(**param_values)
+        except Exception:  # noqa: BLE001 - let the normal build path raise
+            em = None
+        signature = _model_signature(em) if em is not None else None
+        if signature is not None:
+            # Only entries under the current fingerprint: an experiment edited
+            # after a first call (more integration steps, say) builds the same
+            # model from the same callables, so the signature alone cannot tell
+            # the stale kernel from a live one.
+            for cached_key, cached in cache.items():
+                if cached_key[1] == fingerprint and cached is not None:
+                    if cached.signature == signature:
+                        kernel = cached
+                        break
+    if kernel is None:
+        kernel = _build_fim_kernel(experiment, param_values, em=em)
     if cache is not None:
         cache[key] = kernel
         while len(cache) > _FIM_CACHE_SIZE:
@@ -414,11 +507,12 @@ def _fim_kernel(experiment: Experiment, param_values: dict[str, float]) -> _FIMK
     return kernel
 
 
-def _build_fim_kernel(experiment: Experiment, param_values: dict[str, float]):
+def _build_fim_kernel(experiment: Experiment, param_values: dict[str, float], *, em=None):
     from discopt.parametric import flatten_params, variable_slices
 
     jax, jnp = _require_jax()
-    em = experiment.create_model(**param_values)
+    if em is None:
+        em = experiment.create_model(**param_values)
     src = _design_source_map(em)
     if src is None:
         return None
@@ -438,6 +532,7 @@ def _build_fim_kernel(experiment: Experiment, param_values: dict[str, float]):
         sigma_inv=np.diag(1.0 / sigma**2),
         jac=jax.jit(jacobian),
         batch_jac=jax.jit(jax.vmap(jacobian)),
+        signature=_model_signature(em),
     )
 
 
