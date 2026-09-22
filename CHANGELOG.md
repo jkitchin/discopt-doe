@@ -115,6 +115,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of a misleading `0.0000`.
 
 ### Added
+- **A fitted model is a file now: `ModelCard`.** A model is only reusable if
+  everything a prediction needs travels with it — the model form, the estimates,
+  their covariance, and the noise estimate behind that covariance. `ModelCard`
+  is that bundle as JSON:
+  - `ModelCard.from_fit(model, fit, design_region=..., rows=...)` builds one from
+    a `fit_least_squares` result; `save`/`load` and `to_json`/`from_json` move it
+    between sessions. The expression is *parsed* on the way back in, never
+    executed, so opening a card someone sent you runs none of their code.
+  - `predict`, `standard_error` (the delta method) and `interval(kind="mean" |
+    "prediction")` come with it, so a reloaded model answers *how well* and not
+    only *what*. The critical value is t with the fit's degrees of freedom when
+    sigma was estimated, normal when it was declared.
+  - The card records the `design_region` it was fitted over, because that is the
+    only thing that lets a later reader tell interpolation from extrapolation
+    (`inside_design_region`), plus a digest of the runs, a timestamp and the
+    package version. It deliberately does not carry the data.
+  - `SymbolicModel.to_json`/`from_json` (and `to_dict`/`from_dict`) serialize a
+    model on its own, carrying the response name and measurement error that
+    `to_metadata` leaves to the workbook.
+- **A workbook records the sigma behind its standard errors.** The stored
+  information matrix is on the *declared*-sigma scale, which is what `extend`
+  needs, so turning it back into the covariance the standard errors came from
+  meant recovering the scale by hand from a stored standard error. `fit` now
+  writes `sigma_hat`/`sigma_source` as well, `Workbook.fitted_sigma()` reads them
+  back, and `Workbook.read_covariance()` does the rescaling. `do_fit` reports
+  `sigma`, `sigma_source` and `degrees_of_freedom` in its result, on both the
+  linear and the user-defined-model paths. Workbooks written before this return
+  `(None, None)` and `None`.
 - **Campaigns: runs with conditions.**
   - `campaign_experiment(model, runs)` turns a per-run model (a `SymbolicModel`,
     an `ODEExperiment` or an `Experiment` with design inputs) plus a list of run
