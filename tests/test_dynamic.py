@@ -219,6 +219,53 @@ def test_profile_likelihood_on_an_ode_model() -> None:
     assert prof.ci_lower < 0.3 < prof.ci_upper
 
 
+def test_deviance_uses_the_experiments_measurement_error() -> None:
+    """A dynamic experiment spells its errors ``sigma``, not ``measurement_error``.
+
+    Reading the missing attribute defaulted to sigma = 1, which scaled the
+    deviance by 1/SIGMA**2 = 10,000 and made every profile built from it look
+    flat. The deviance must match the estimator's own objective.
+    """
+    from discopt.doe._estimation import DevianceFunction
+
+    exp = _consecutive()
+    theta = {"k1": 0.8, "k2": 0.3}
+    rng = np.random.default_rng(3)
+    data = {rn: v + rng.normal(0.0, SIGMA) for rn, v in exp.predict(theta).items()}
+    fit = exp.estimate(data)
+    dev = DevianceFunction(exp, data, fit.parameters)
+    assert dev.path == "predict"
+    theta_hat = [float(fit.parameters[n]) for n in dev.names]
+    assert dev(np.asarray(theta_hat)) == pytest.approx(float(fit.objective), rel=1e-6)
+    # ... and the analytic gradient agrees with finite differences.
+    grad = dev.gradient(np.asarray(theta_hat))
+    assert grad is not None
+    for i in range(len(theta_hat)):
+        step = 1e-6 * abs(theta_hat[i])
+        up, down = list(theta_hat), list(theta_hat)
+        up[i] += step
+        down[i] -= step
+        fd = (dev(np.asarray(up)) - dev(np.asarray(down))) / (2 * step)
+        assert grad[i] == pytest.approx(fd, rel=1e-4, abs=1e-6)
+
+
+@pytest.mark.slow
+def test_profile_of_a_combination_matches_the_parameter_profile() -> None:
+    """``expression="k2"`` profiles the same thing as ``parameter_name="k2"``."""
+    exp = _consecutive()
+    rng = np.random.default_rng(1)
+    data = {rn: v + rng.normal(0.0, SIGMA) for rn, v in exp.predict({"k1": 0.8, "k2": 0.3}).items()}
+    direct = profile_likelihood(exp, data, "k2")
+    combo = profile_likelihood(exp, data, expression="k2")
+    assert combo.shape == "bounded"
+    assert combo.ci_lower == pytest.approx(direct.ci_lower, rel=1e-3)
+    assert combo.ci_upper == pytest.approx(direct.ci_upper, rel=1e-3)
+
+    ratio = profile_likelihood(exp, data, expression="k2/k1")
+    assert ratio.shape == "bounded"
+    assert ratio.ci_lower < 0.3 / 0.8 < ratio.ci_upper
+
+
 @pytest.mark.slow
 def test_discrimination_between_first_and_second_order_odes() -> None:
     kw = dict(

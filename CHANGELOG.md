@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`profile_likelihood` no longer reports a flat profile for a dynamic model.**
+  Asking for a combination (`expression=` or `function=`) on an `ODEExperiment`
+  returned `shape="flat"` and no interval, where the same quantity asked for as
+  `parameter_name=` came back bounded. The deviance read the experiment's
+  measurement error from a `measurement_error` attribute; a dynamic experiment
+  spells it `sigma`, keyed by the measured state behind a `state@time` response
+  name, so the lookup silently fell back to sigma = 1. With a true sigma of 0.01
+  the deviance came out 10,000x too small and never crossed its chi-square
+  threshold. All the spellings are now resolved, and an experiment that reports
+  no measurement error says so instead of assuming 1. A profile of a combination
+  also uses the experiment's own sensitivity matrix for the deviance gradient
+  where it has one, which made the ODE case above about 5x faster.
+- **A sweep over parameter values no longer recompiles the FIM.** The compiled
+  Jacobian was cached per set of nominal parameter values, so anything that moves
+  the parameters -- a robust design over draws, a profile, a Monte Carlo over the
+  posterior -- paid a full trace per draw (0.15 s against 0.0002 s cached). The
+  Jacobian does not depend on the nominal values (they enter through `x*`), so it
+  is now reused whenever the model those values build is structurally identical,
+  down to the callables behind a custom node; a model that really does fold its
+  nominal values in, and an experiment edited after a first call, still recompile.
 - **Model-based design is fast.** `compute_fim` rebuilt and recompiled the model on
   every call, about a second for an ODE model. It now caches a compiled Jacobian per
   experiment, and `clear_fim_cache` resets it. A three-batch joint design for a

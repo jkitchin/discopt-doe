@@ -109,6 +109,14 @@ def test_editing_the_experiment_recompiles() -> None:
     fresh = compute_fim(_reactor(n_steps=60), TRUTH, {"T": 360.0}).fim
     assert not np.allclose(coarse, edited, rtol=1e-6)
     np.testing.assert_allclose(edited, fresh, rtol=1e-10)
+    # Nominal values the edited experiment has not been asked about yet must
+    # not pick up the kernel compiled before the edit either.
+    other = dict(TRUTH, k1=0.9)
+    np.testing.assert_allclose(
+        compute_fim(exp, other, {"T": 360.0}).fim,
+        compute_fim(_reactor(n_steps=60), other, {"T": 360.0}).fim,
+        rtol=1e-10,
+    )
 
 
 def test_new_nominal_values_get_their_own_entry() -> None:
@@ -120,6 +128,64 @@ def test_new_nominal_values_get_their_own_entry() -> None:
     assert not np.allclose(a, b)
     clear_fim_cache(exp)
     np.testing.assert_allclose(compute_fim(exp, TRUTH, {"T": 340.0}).fim, a, rtol=1e-12)
+
+
+def test_new_nominal_values_reuse_the_compiled_jacobian() -> None:
+    """A sweep over parameter draws must not retrace the Jacobian.
+
+    The compiled Jacobian maps x* (which carries the parameter values) to the
+    responses, so it does not depend on the nominal values; only the model
+    could, and this one does not. Keying the cache on the values made robust
+    designs and posterior sweeps pay a full trace per draw.
+    """
+    exp = _reactor()
+    compute_fim(exp, TRUTH, {"T": 330.0})  # builds and compiles
+    rng = np.random.default_rng(0)
+    draws = [{k: float(v * rng.uniform(0.7, 1.4)) for k, v in TRUTH.items()} for _ in range(10)]
+    t0 = time.perf_counter()
+    fims = [compute_fim(exp, d, {"T": 340.0}).fim for d in draws]
+    per_call = (time.perf_counter() - t0) / len(draws)
+    assert per_call < 0.05  # a fresh trace costs ~1 s for this model
+    for d, fim in zip(draws, fims):  # and the reused kernel is still right
+        np.testing.assert_allclose(fim, _uncached_fim(exp, d, {"T": 340.0}), rtol=1e-10)
+
+
+def test_a_model_that_depends_on_its_nominal_values_is_not_reused() -> None:
+    """Reuse is by model structure, so a folded-in nominal must force a rebuild.
+
+    Two variants: one where the value lands in the response expression, and one
+    where it hides inside a custom node, which no ``repr`` can see.
+    """
+    import discopt.modeling as dm
+    from discopt.estimate import Experiment, ExperimentModel
+
+    class Folded(Experiment):
+        def __init__(self, hide: bool) -> None:
+            self.hide = hide
+
+        def create_model(self, **kwargs):
+            m = dm.Model("folded")
+            a = m.continuous("a", lb=0.1, ub=10.0)
+            x = m.continuous("x", lb=0.0, ub=1.0)
+            gain = float(kwargs["a"])
+            if self.hide:
+                response = dm.custom(lambda av, xv: gain * av * xv, name="f")(a, x)
+            else:
+                response = gain * a * x
+            return ExperimentModel(
+                model=m,
+                unknown_parameters={"a": a},
+                design_inputs={"x": x},
+                responses={"y": response},
+                measurement_error={"y": 1.0},
+            )
+
+    for hide in (False, True):
+        exp = Folded(hide)
+        for value in (1.0, 2.0, 3.0):
+            cached = compute_fim(exp, {"a": value}, {"x": 1.0}).jacobian
+            # dy/da = gain = the nominal value itself, so a stale kernel shows.
+            np.testing.assert_allclose(np.ravel(cached), [value], rtol=1e-10)
 
 
 def test_unknown_design_name_still_rejected() -> None:
