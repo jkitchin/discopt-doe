@@ -36,6 +36,7 @@ computing the wrong Jacobian.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
@@ -442,9 +443,14 @@ class DesignRegion:
     grid_points: np.ndarray
     method: str
 
-    @property
+    @cached_property
     def moment_matrix(self) -> np.ndarray:
-        """``W = ∫ f(x) f(x)ᵀ dx / vol``: the region's average outer product."""
+        """``W = ∫ f(x) f(x)ᵀ dx / vol``: the region's average outer product.
+
+        Cached: a region is built once and never mutated, while the I criterion
+        reads this on every candidate evaluation inside the design search, so
+        recomputing the product each time is pure overhead.
+        """
         F = self.moment_rows
         return F.T @ (F * self.weights[:, None])
 

@@ -71,6 +71,29 @@ def test_gauss_legendre_moment_matrix_is_exact() -> None:
     np.testing.assert_allclose(reg.moment_matrix, expected, atol=1e-12)
 
 
+def test_moment_matrix_is_cached_per_region() -> None:
+    """W is built once per region and reused.
+
+    A region is constructed once and never mutated, but the I criterion reads
+    W on every candidate evaluation inside the design search, so recomputing
+    the (m, p) product each time is pure overhead -- it grew to ~10x the cost
+    of the criterion itself for a 4-factor quadratic region.
+    """
+    reg = design_region(_basis(), ["x"], bounds={"x": (-1.0, 1.0)})
+
+    # Same array object on repeat access, so nothing is rebuilt.
+    assert reg.moment_matrix is reg.moment_matrix
+
+    # Caching must not change the value.
+    expected = reg.moment_rows.T @ (reg.moment_rows * reg.weights[:, None])
+    np.testing.assert_allclose(reg.moment_matrix, expected, atol=0, rtol=0)
+
+    # Each region keeps its own W; the cache is not shared across instances.
+    other = design_region(_basis(), ["x"], bounds={"x": (0.0, 2.0)})
+    assert other.moment_matrix is not reg.moment_matrix
+    assert not np.allclose(other.moment_matrix, reg.moment_matrix)
+
+
 def test_i_criterion_matches_prediction_module() -> None:
     """The closed-form trace(M⁻¹W) agrees with averaging v(x) over sampled points."""
     reg = design_region(_basis(), ["x"], bounds={"x": (-1.0, 1.0)})

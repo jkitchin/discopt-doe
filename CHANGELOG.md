@@ -184,6 +184,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   intervals. `initial` is now optional; a model linear in its parameters
   converges from the default start.
 
+### Changed
+- **I-optimal design search is faster.** `DesignRegion.moment_matrix` was a
+  plain property, so the region's moment matrix `W` was rebuilt on every
+  candidate evaluation inside the search even though a region is constructed
+  once and never mutated. It is now cached per region. Measured on quadratic
+  regions over a box: 1.8x fewer seconds per criterion evaluation with 2
+  factors, 4x with 3, and 10x with 4, since the discarded work grows with the
+  number of integration points. Results are unchanged.
+
 ### Docs
 - `choosing-a-design.md`: replicating a Latin square is not enough to test an
   interaction. You must also drop a block, and the text now says so.
