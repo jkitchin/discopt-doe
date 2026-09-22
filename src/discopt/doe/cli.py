@@ -903,7 +903,13 @@ def _do_fit_symbolic(wb: Workbook, completed: list[dict[str, Any]]) -> dict[str,
         out["std_errors"],
         {n: (out["ci_lower"][n], out["ci_upper"][n]) for n in names},
     )
-    wb.write_fim(out["fim"], names)
+    # `extend` adds each new run's information at the declared measurement
+    # error, so the stored prior must be on that same scale. fit_least_squares
+    # reports the FIM at the sigma behind its standard errors (often the
+    # residual estimate); rescale it to the declared one.
+    declared = float(model.measurement_error)
+    design_fim = np.asarray(out["fim"]) * (float(out["sigma"]) / declared) ** 2
+    wb.write_fim(design_fim, names)
 
     # The same regression statistics the linear path reports, so a user-defined
     # model is not the one kind of fit that cannot tell you whether its
@@ -933,7 +939,7 @@ def _do_fit_symbolic(wb: Workbook, completed: list[dict[str, Any]]) -> dict[str,
     )
     wb.save()
 
-    log_det = float(np.linalg.slogdet(out["fim"])[1])
+    log_det = float(np.linalg.slogdet(design_fim)[1])
     return {
         "workbook_path": str(wb.path),
         "parameters": [

@@ -368,10 +368,11 @@ class SymbolicModel:
 def fit_least_squares(
     model: SymbolicModel,
     rows: Sequence[Mapping[str, Any]],
-    initial: Mapping[str, float],
+    initial: Mapping[str, float] | None = None,
     *,
     bounds: Mapping[str, tuple[float, float]] | None = None,
     max_nfev: int | None = None,
+    level: float = 0.95,
 ) -> dict[str, Any]:
     """Fit a user-defined model to completed runs by nonlinear least squares.
 
@@ -383,21 +384,39 @@ def fit_least_squares(
     model : SymbolicModel
     rows : sequence of mapping
         Completed runs; each must carry every input name and the response.
-    initial : mapping
-        Starting parameter values. A nonlinear fit needs them, and a poor guess
-        can converge to a different local optimum.
+    initial : mapping, optional
+        Starting parameter values; missing entries (or ``None``) start at 1.0.
+        A model that is linear in its parameters converges from anywhere, but a
+        nonlinear fit needs sensible values, and a poor guess can converge to a
+        different local optimum.
     bounds : mapping name -> (lo, hi), optional
         Per-parameter bounds.
     max_nfev : int, optional
         Cap on residual evaluations.
+    level : float, default 0.95
+        Confidence level of ``ci_lower``/``ci_upper``.
 
     Returns
     -------
     dict
-        ``estimates``, ``std_errors``, ``ci_lower``/``ci_upper`` (95%),
-        ``residual_sum_of_squares``, ``n_observations``, ``fim``, ``success``,
-        and the solver ``message``.
+        ``estimates``, ``std_errors``, ``ci_lower``/``ci_upper`` (at ``level``),
+        ``covariance`` (the parameter covariance behind the standard errors),
+        ``fim``, ``sigma`` and ``sigma_source``, ``residual_sum_of_squares``,
+        ``n_observations``, ``degrees_of_freedom``, ``level``, ``success``, and
+        the solver ``message``.
+
+        The noise level ``sigma`` is the residual estimate
+        ``sqrt(RSS / (n - p))`` when there are degrees of freedom left and the
+        residuals are non-zero (``sigma_source == "residual"``), and the model's
+        declared ``measurement_error`` otherwise (``"declared"``) -- with no
+        degrees of freedom, or on an exact fit, there is nothing to estimate the
+        noise from. ``sigma`` is therefore always positive. ``fim`` is
+        ``JᵀJ / sigma²`` with that same sigma, so ``inv(fim) == covariance``
+        and ``sqrt(diag(inv(fim)))`` reproduces ``std_errors``.
     """
+    if not 0.0 < float(level) < 1.0:
+        raise ValueError(f"level must be in (0, 1), got {level!r}")
+    initial = {} if initial is None else initial
     from scipy.optimize import least_squares
 
     names = list(model.parameter_names)
@@ -440,8 +459,19 @@ def fit_least_squares(
     # declared sigma is often a guess; fall back to the declared one otherwise.
     J = model.design_matrix(theta, designs)
     dof = n_obs - n_p
-    sigma2 = rss / dof if dof > 0 else float(model.measurement_error) ** 2
-    fim = J.T @ J / (float(model.measurement_error) ** 2)
+    if dof > 0 and rss > 0:
+        sigma2, sigma_source = rss / dof, "residual"
+    else:
+        # No degrees of freedom left, or an exact fit: there is no residual to
+        # estimate the noise from. Reporting sigma = 0 would make `fim` and
+        # `sigma` describe different scales, and a caller rescaling the FIM by
+        # (sigma / declared)**2 -- as the CLI does to keep the workbook prior on
+        # the declared scale -- would zero it out and lose the design's
+        # information entirely.
+        sigma2, sigma_source = float(model.measurement_error) ** 2, "declared"
+    # One sigma for both, so the information matrix and the reported
+    # uncertainty describe the same thing: inv(fim) == cov.
+    fim = J.T @ J / sigma2
 
     try:
         cov = np.linalg.inv(J.T @ J) * sigma2
@@ -454,7 +484,7 @@ def fit_least_squares(
     if dof > 0:
         from scipy.stats import t as t_dist
 
-        crit = float(t_dist.ppf(0.975, dof))
+        crit = float(t_dist.ppf(0.5 + float(level) / 2.0, dof))
     else:
         crit = float("nan")
 
@@ -468,7 +498,11 @@ def fit_least_squares(
         "residual_sum_of_squares": rss,
         "n_observations": n_obs,
         "degrees_of_freedom": dof,
+        "covariance": cov,
         "fim": fim,
+        "sigma": float(np.sqrt(sigma2)),
+        "sigma_source": sigma_source,
+        "level": float(level),
         "success": bool(result.success),
         "message": str(result.message),
     }

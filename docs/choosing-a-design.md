@@ -77,9 +77,13 @@ A single Latin square cannot test an interaction. Row and treatment together
 determine column, so the row×treatment subspace already contains the column
 main effect — the terms are aliased, and `anova_report` refuses the fit rather
 than reporting an F-ratio for a term that is partly some other term. Getting an
-interaction means giving something up: replicate the square and block on
-`replicate`, or drop one block from the model and spend its degrees of freedom
-on the interaction. Both are shown in {doc}`notebooks/latin-designs`.
+interaction means giving something up: replicate the square *and* drop one
+block from the model, spending its degrees of freedom on the interaction.
+Replicating alone is not enough: with every block still in the model the
+interaction stays confounded (fully or partly, depending on how the second
+square was randomized) with a block, and `anova_report` either refuses it or
+warns that the sums of squares depend on term order. Shown in
+{doc}`notebooks/latin-designs`.
 ```
 
 ## Where is the optimum? — response surfaces
@@ -256,7 +260,7 @@ line the same steps are `discopt doe fit` and `discopt doe anova`, plus
 ## Four ways this goes wrong
 
 1. **Reading an interaction out of a single Latin square.** It is aliased with a
-   block; the guard refuses it. Replicate, or give up a block.
+   block; the guard refuses it. Replicate *and* give up a block.
 2. **Trusting a locally-optimal design far from the truth.** For a nonlinear
    model the design is optimal around your nominal parameters and nowhere else.
    Design, fit, re-centre — do not run a hundred points off one guess.

@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`anova_report` no longer reports wrong sums of squares when an
+  interaction is partly confounded with a block.** The decomposition used
+  marginal (cell-mean) sums of squares, which are exact only for orthogonal
+  terms, and the orthogonality check compared main effects pairwise. A day ×
+  catalyst interaction in a Latin square replicated with a fresh randomization
+  passes that check but is partly confounded with the operator block, so the
+  table was silently wrong (SS 8.26 where a joint least-squares fit gives
+  6.68), still marked `balanced`. Sums of squares are now computed by
+  sequential least squares (Type I, factors then interactions in the order
+  given). That is identical for orthogonal designs and correct for the rest.
+  A term with fewer estimable degrees of freedom than its nominal count is
+  refused as aliased, with a message that says what to do. A term that is
+  estimable but not orthogonal is reported with a warning and `balanced=False`.
+  The data-dependent "negative residual" guard is gone: it caught this case only
+  when the data happened to push the residual below zero.
+- **Batch designs no longer waste their first runs.** `linear_batch_design`,
+  `batch_design_from_basis`, and the greedy strategy of `batch_optimal_experiment`
+  picked the first run arbitrarily: until the accumulated FIM is full rank every
+  candidate scores `log det = -inf`, and the E-criterion fallback is flat too,
+  since `λ_min = 0`. Greedy never revisited those picks, so a 6-run straight-line
+  design put one run at x = 6.97 instead of at an end. Rank-deficient rounds now
+  maximize `log det(FIM + εI)`, with ε a tiny multiple of the typical single-run
+  information, and the batch is polished by exchange sweeps (new
+  `exchange_passes`, default 2; 0 restores pure greedy). The results match the
+  known D-optimal designs: 3 + 3 at the ends for a line, 2 + 2 + 2 at the ends
+  and midpoint for a quadratic, and the 3² factorial for a 9-run two-factor
+  quadratic.
+  The ridge is scaled per parameter, and the rank test runs on the
+  correlation-scaled FIM, so parameters on wildly different scales (an
+  Arrhenius k0 ~ 1e9 next to Ea ~ 6e4) get the same design as a well-scaled
+  model instead of collapsing every run onto one point.
+- **Flat optimal-design criteria converge.** The linear-design search now uses
+  tight L-BFGS-B/SLSQP tolerances. The default ones stopped a quadratic's center
+  points at 4.86 and 5.05 instead of 5.0.
+- **`fit_least_squares` reports a FIM consistent with its standard errors.**
+  `fim` was `JᵀJ/σ²` with the *declared* measurement error, while the standard
+  errors used the residual estimate, so `inv(fim)` disagreed with the reported
+  covariance by `σ̂/σ` (0.092 vs 0.020 in a simple line fit). `fim` now uses
+  the same σ. The result also carries `covariance`, `sigma` and `sigma_source`
+  (`"residual"` or `"declared"`). The CLI rescales before writing the
+  workbook's FIM, so `discopt doe extend` still adds new runs on the declared-σ
+  scale and behaves as before.
+- **`anova_report` analyzes 2-level factorials with centre points
+  correctly.** Centre runs were treated as a third level of every factor. That
+  gave each factor two df, aliased every factor's "centre" contrast with every
+  other's, and made `discopt doe anova` fail on any `factorial-2level` workbook
+  with `--center-points` once an interaction was requested. Now each factor is
+  coded -1/+1 with the centres at 0 (one df each), and the centre runs add a
+  one-df `curvature` term, the classical test for curvature, plus pure error.
+  The results match an equivalent least-squares fit exactly. Centre rows are
+  recognized by the `is_center` flag or, for data read back from a workbook, as
+  the runs where every numeric factor sits at the midpoint of its two levels.
+- **`AnovaTable.summary()`** prints `---` for the Total row's mean square
+  instead of a misleading `0.0000`.
+
+### Added
+- `fit_least_squares(..., level=0.95)`: the confidence level of the reported
+  intervals. `initial` is now optional; a model linear in its parameters
+  converges from the default start.
+
+### Docs
+- `choosing-a-design.md`: replicating a Latin square is not enough to test an
+  interaction. You must also drop a block, and the text now says so.
+- `references.bib`: corrected the DOI of `atkinson1998-dt`
+  (`10.1016/S0169-7439(98)00046-X`).
+
 ## [0.3.0] - 2026-08-16
 
 ### Added

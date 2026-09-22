@@ -20,12 +20,23 @@ with degrees of freedom
 F-statistics and p-values are computed against the residual mean square
 via the F-distribution survival function.
 
-For non-orthogonal data (aliased or correlated columns) the marginal SS do
-not add up: the function emits a warning, and if the implied residual SS is
-negative it raises rather than print a nonsensical table. Marginal balance
-of each factor alone does *not* guarantee orthogonality -- fully aliased
-columns pass a per-factor balance check -- so pairwise cross-tabulation is
-also verified. Fit a joint linear model for genuinely non-orthogonal data.
+The sums of squares are computed by sequential least squares (Type I, in
+the order: factors as listed, then interactions), which equals the classical
+marginal decomposition above whenever the terms are orthogonal and stays
+correct when they are not. Two failure modes are handled explicitly:
+
+* **Aliasing.** If a term has fewer estimable degrees of freedom than its
+  nominal count once the earlier terms are fitted (two fully confounded
+  factors; an interaction in a Latin square, which is confounded with a
+  block), no analysis can separate it from those terms, so the function
+  raises rather than report an F-ratio for a term that is partly another.
+* **Non-orthogonality.** If an interaction is only *partly* confounded with
+  another term (e.g. day x catalyst in a Latin square replicated with a
+  different randomization, with the operator block still in the model), the
+  terms are estimable but not orthogonal. The table is then reported with a
+  warning and ``balanced=False``: the SS are sequential and depend on term
+  order. Per-factor balance and pairwise main-effect orthogonality do *not*
+  detect this case, which is why the decomposition is not taken on trust.
 """
 
 from __future__ import annotations
@@ -33,7 +44,6 @@ from __future__ import annotations
 import warnings
 from collections import defaultdict
 from dataclasses import dataclass
-from itertools import product
 from typing import Iterable, Mapping, Sequence, cast
 
 import numpy as np
@@ -87,7 +97,8 @@ class AnovaTable:
         for r in self.rows:
             f_str = "      ---" if r.f is None else f"{r.f:9.3f}"
             p_str = "       ---" if r.p is None else f"{r.p:10.4g}"
-            ms_str = "     ---   " if r.df == 0 else f"{r.ms:12.4f}"
+            undefined = r.df == 0 or r.source == "Total"
+            ms_str = "         ---" if undefined else f"{r.ms:12.4f}"
             lines.append(f"{r.source:<20s} {r.ss:12.4f} {r.df:5d} {ms_str} {f_str} {p_str}")
         if not self.balanced:
             lines.append("")
@@ -193,10 +204,20 @@ def anova_report(
     grand_mean = sum(y) / n
     ss_total = sum((yi - grand_mean) ** 2 for yi in y)
 
+    # Centre points of a 2-level design are not a third level of every factor:
+    # they share one mid value on all numeric factors at once, so as a level
+    # they would alias every factor's "centre" contrast with every other's.
+    # The standard analysis codes each factor -1/+1 (centre = 0, one df) and
+    # spends the centre runs on a one-df curvature term plus pure error.
+    center = _center_rows(rows, factors)
+    coded = _coded_columns(rows, factors, center) if center else {}
+    check_rows = [r for i, r in enumerate(rows) if i not in center] if center else rows
+    n_check = len(check_rows)
+
     level_lists: dict[str, list[object]] = {}
     for f in factors:
         seen: list[object] = []
-        for r in rows:
+        for r in check_rows:
             v = r[f]
             if v not in seen:
                 seen.append(v)
@@ -204,7 +225,7 @@ def anova_report(
 
     # Balance check.
     counts: dict[str, dict[object, int]] = {f: defaultdict(int) for f in factors}
-    for r in rows:
+    for r in check_rows:
         for f in factors:
             counts[f][r[f]] += 1
     balanced = True
@@ -233,11 +254,11 @@ def anova_report(
         for j in range(i + 1, len(factor_seq)):
             fi, fj = factor_seq[i], factor_seq[j]
             cross: dict[tuple[object, object], int] = defaultdict(int)
-            for r in rows:
+            for r in check_rows:
                 cross[(r[fi], r[fj])] += 1
             for a in level_lists[fi]:
                 for b in level_lists[fj]:
-                    expected = counts[fi][a] * counts[fj][b] / n
+                    expected = counts[fi][a] * counts[fj][b] / n_check
                     if abs(cross.get((a, b), 0) - expected) > 1e-9:
                         orthogonal = False
                         break
@@ -254,75 +275,91 @@ def anova_report(
             stacklevel=2,
         )
 
+    # Sums of squares by sequential least squares (Type I, in the order
+    # factors, then interactions). For an orthogonal design this equals the
+    # classical marginal decomposition exactly. It stays correct when the terms
+    # are not orthogonal -- e.g. a day x catalyst interaction in a replicated
+    # Latin square is partly confounded with the operator block even though
+    # every pair of *main* effects is orthogonal, which the pairwise check
+    # above cannot see and which made the marginal decomposition silently wrong.
+    terms: list[tuple[str, ...]] = [(f,) for f in factors]
+    for inter in interactions or ():
+        inter = tuple(inter)
+        for fname in inter:
+            if fname not in factors:
+                raise ValueError(f"interaction {inter}: factor {fname!r} not in factors")
+        terms.append(inter)
+    if center:
+        terms.append(("curvature",))
+
+    y_vec = np.asarray(y, dtype=float)
+    X = np.ones((n, 1))
+    rss_prev = ss_total
+    rank_prev = 1
     effect_rows: list[AnovaEffect] = []
-
-    def _cell_mean(filters: dict[str, object]) -> tuple[float, int]:
-        total = 0.0
-        count = 0
-        for yi, r in zip(y, rows):
-            if all(r[k] == v for k, v in filters.items()):
-                total += yi
-                count += 1
-        if count == 0:
-            return 0.0, 0
-        return total / count, count
-
-    # Main effects.
     df_used = 0
     ss_explained = 0.0
-    main_means: dict[str, dict[object, float]] = {}
-    for f in factors:
-        means_f: dict[object, float] = {}
-        ss_f = 0.0
-        for level in level_lists[f]:
-            mean_lvl, cnt = _cell_mean({f: level})
-            means_f[level] = mean_lvl
-            ss_f += cnt * (mean_lvl - grand_mean) ** 2
-        main_means[f] = means_f
-        df_f = len(level_lists[f]) - 1
-        df_used += df_f
-        ss_explained += ss_f
-        ms_f = ss_f / df_f if df_f > 0 else 0.0
-        effect_rows.append(AnovaEffect(f, ss_f, df_f, ms_f, None, None))
-
-    # Interactions (Type-I, sequential).
-    if interactions:
-        for inter in interactions:
-            inter = tuple(inter)
-            for fname in inter:
-                if fname not in factors:
-                    raise ValueError(f"interaction {inter}: factor {fname!r} not in factors")
-            lvl_axes = [level_lists[f] for f in inter]
-            ss_cells = 0.0
-            for combo in product(*lvl_axes):
-                filt = dict(zip(inter, combo))
-                mean_cell, cnt = _cell_mean(filt)
-                if cnt == 0:
-                    continue
-                ss_cells += cnt * (mean_cell - grand_mean) ** 2
-            # Subtract lower-order main effects that already account for
-            # within-this-set variation.
-            ss_inter = ss_cells - sum(
-                _ss_for_subset(rows, y, grand_mean, sub, level_lists, main_means)
-                for sub in _proper_subsets(inter)
+    exact_orthogonal = True
+    for term in terms:
+        if term == ("curvature",) and center:
+            nominal_df = 1
+            block = np.array([[1.0 if i in center else 0.0] for i in range(n)])
+        elif coded and all(f in coded for f in term):
+            nominal_df = 1
+            block = np.prod([coded[f] for f in term], axis=0).reshape(-1, 1)
+        else:
+            nominal_df = 1
+            for f in term:
+                nominal_df *= len(level_lists[f]) - 1
+            cells: dict[tuple[object, ...], int] = {}
+            keys = [tuple(r[f] for f in term) for r in rows]
+            for k in keys:
+                cells.setdefault(k, len(cells))
+            block = np.zeros((n, len(cells)))
+            for i, k in enumerate(keys):
+                block[i, cells[k]] = 1.0
+        X_new = np.hstack([X, block])
+        rank_new = int(np.linalg.matrix_rank(X_new))
+        df_term = rank_new - rank_prev
+        if df_term < nominal_df:
+            name = ":".join(term)
+            raise ValueError(
+                f"term {name!r} is aliased: it has {nominal_df} degrees of freedom but "
+                f"only {df_term} are not already explained by the terms before it. If "
+                "a requested term is aliased with others (for example an interaction "
+                "in a Latin square, which is confounded with a block), no analysis can "
+                "separate them: drop the term, or replicate the design and leave one "
+                "block out of the model."
             )
-            df_i = 1
-            for f in inter:
-                df_i *= len(level_lists[f]) - 1
-            df_used += df_i
-            ss_explained += ss_inter
-            ms_i = ss_inter / df_i if df_i > 0 else 0.0
-            effect_rows.append(AnovaEffect(":".join(inter), ss_inter, df_i, ms_i, None, None))
+        coef, *_ = np.linalg.lstsq(X_new, y_vec, rcond=None)
+        rss_new = float(np.sum((y_vec - X_new @ coef) ** 2))
+        ss_term = max(rss_prev - rss_new, 0.0)
+        if len(term) > 1 and exact_orthogonal and not center:
+            # Compare with the marginal (cell-mean) decomposition an orthogonal
+            # design would give; a mismatch means the order of terms matters.
+            marginal = _marginal_ss(rows, y, grand_mean, term, level_lists)
+            if abs(marginal - ss_term) > 1e-9 * max(1.0, ss_total):
+                exact_orthogonal = False
+        # A factor that is constant in the collected data contributes no
+        # degrees of freedom; report the 0-df row (which __str__ renders as
+        # "---") rather than dividing by zero.
+        ms_term = ss_term / df_term if df_term > 0 else 0.0
+        effect_rows.append(AnovaEffect(":".join(term), ss_term, df_term, ms_term, None, None))
+        df_used += df_term
+        ss_explained += ss_term
+        X, rss_prev, rank_prev = X_new, rss_new, rank_new
+
+    if not exact_orthogonal:
+        balanced = False
+        warnings.warn(
+            "ANOVA terms are not mutually orthogonal (an interaction is partly "
+            "confounded with another term); sums of squares are sequential "
+            "(Type I) and depend on the order of the terms",
+            stacklevel=2,
+        )
 
     df_residual = n - 1 - df_used
     ss_residual = ss_total - ss_explained
-    if ss_residual < -1e-9 * max(1.0, ss_total):
-        raise ValueError(
-            f"negative residual sum of squares ({ss_residual:.6g}): the factor "
-            "columns are not orthogonal, so the marginal SS decomposition is "
-            "invalid (the explained SS exceed the total). This indicates an "
-            "aliased or non-orthogonal design; fit a joint linear model instead."
-        )
     ss_residual = max(ss_residual, 0.0)
     if df_residual < 1:
         raise ValueError(
@@ -352,53 +389,94 @@ def anova_report(
     )
 
 
+def _center_rows(rows: Sequence[Mapping[str, object]], factors: Sequence[str]) -> set[int]:
+    """Indices of centre-point runs of a 2-level design, or an empty set.
+
+    A row is a centre point when it is flagged ``is_center`` (as
+    :func:`factorial_2level_design` does), or -- for data without the flag --
+    when every numeric design factor sits at the midpoint of its only two other
+    values. Only designs whose non-centre runs are 2-level in every numeric
+    factor qualify; anything else is analyzed with ordinary levels.
+    """
+    design = [f for f in factors if f != "replicate"]
+    if not design:
+        return set()
+    flagged = {i for i, r in enumerate(rows) if bool(r.get("is_center"))}
+    if flagged:
+        candidates = flagged
+    else:
+        mids: dict[str, float] = {}
+        for f in design:
+            try:
+                values = sorted({float(cast(float, r[f])) for r in rows})
+            except (TypeError, ValueError):
+                return set()
+            if len(values) != 3 or abs(values[1] - (values[0] + values[2]) / 2) > 1e-9 * max(
+                1.0, abs(values[2] - values[0])
+            ):
+                return set()
+            mids[f] = values[1]
+        candidates = {
+            i
+            for i, r in enumerate(rows)
+            if all(abs(float(cast(float, r[f])) - mids[f]) <= 1e-12 for f in design)
+        }
+    rest = [r for i, r in enumerate(rows) if i not in candidates]
+    if not candidates or not rest:
+        return set()
+    for f in design:
+        if len({r[f] for r in rest}) != 2:
+            return set()
+        try:
+            [float(cast(float, r[f])) for r in rows]
+        except (TypeError, ValueError):
+            return set()
+    return candidates
+
+
+def _coded_columns(
+    rows: Sequence[Mapping[str, object]], factors: Sequence[str], center: set[int]
+) -> dict[str, np.ndarray]:
+    """-1/+1 coding of each 2-level numeric factor, with centre runs at 0."""
+    out: dict[str, np.ndarray] = {}
+    for f in factors:
+        if f == "replicate":
+            continue
+        lo, hi = sorted({float(cast(float, r[f])) for i, r in enumerate(rows) if i not in center})
+        out[f] = np.array(
+            [
+                0.0 if i in center else (-1.0 if float(cast(float, r[f])) == lo else 1.0)
+                for i, r in enumerate(rows)
+            ]
+        )
+    return out
+
+
+def _marginal_ss(
+    rows: Sequence[Mapping[str, object]],
+    y: list[float],
+    grand_mean: float,
+    term: tuple[str, ...],
+    level_lists: dict[str, list[object]],
+) -> float:
+    """Classical (orthogonal-design) SS for ``term``: cell SS minus lower orders."""
+    sums: dict[tuple[object, ...], list[float]] = defaultdict(lambda: [0.0, 0])
+    for yi, r in zip(y, rows):
+        acc = sums[tuple(r[f] for f in term)]
+        acc[0] += yi
+        acc[1] += 1
+    ss_cells = sum(c * (t / c - grand_mean) ** 2 for t, c in sums.values())
+    if len(term) == 1:
+        return ss_cells
+    return ss_cells - sum(
+        _marginal_ss(rows, y, grand_mean, sub, level_lists) for sub in _proper_subsets(term)
+    )
+
+
 def _proper_subsets(inter: tuple[str, ...]) -> Iterable[tuple[str, ...]]:
     n = len(inter)
     for mask in range(1, 2**n - 1):
         yield tuple(inter[i] for i in range(n) if mask & (1 << i))
-
-
-def _ss_for_subset(
-    rows: Sequence[Mapping[str, object]],
-    y: list[float],
-    grand_mean: float,
-    subset: tuple[str, ...],
-    level_lists: dict[str, list[object]],
-    main_means: dict[str, dict[object, float]],
-) -> float:
-    """SS attributable to a subset of factors -- used to subtract lower-order
-    terms from a higher-order interaction (Type-I sequential decomposition).
-
-    For a single factor this returns the main-effect SS already computed.
-    For higher orders we recursively re-decompose.
-    """
-    if len(subset) == 1:
-        f = subset[0]
-        ss = 0.0
-        means = main_means[f]
-        for level, mean_lvl in means.items():
-            cnt = sum(1 for r in rows if r[f] == level)
-            ss += cnt * (mean_lvl - grand_mean) ** 2
-        return ss
-    # Higher-order subsets: cell SS minus lower-order subsets.
-    lvl_axes = [level_lists[f] for f in subset]
-    ss_cells = 0.0
-    for combo in product(*lvl_axes):
-        filt = dict(zip(subset, combo))
-        total = 0.0
-        count = 0
-        for yi, r in zip(y, rows):
-            if all(r[k] == v for k, v in filt.items()):
-                total += yi
-                count += 1
-        if count == 0:
-            continue
-        mean_cell = total / count
-        ss_cells += count * (mean_cell - grand_mean) ** 2
-    return ss_cells - sum(
-        _ss_for_subset(rows, y, grand_mean, sub, level_lists, main_means)
-        for sub in _proper_subsets(subset)
-    )
 
 
 __all__ = ["AnovaEffect", "AnovaTable", "anova_report"]

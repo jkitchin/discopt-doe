@@ -603,3 +603,60 @@ class TestSymbolicCampaigns:
 
         with pytest.raises(DoEError, match=match):
             self._new(tmp_path, **kw)
+
+
+def test_fit_fim_is_consistent_with_the_reported_uncertainty() -> None:
+    """inv(fim) must reproduce the covariance behind std_errors. The FIM used to
+    be scaled by the declared measurement error while the standard errors used
+    the residual estimate, so the two disagreed by sigma_hat / sigma_declared."""
+    model = SymbolicModel(source="b0 + b1*x", parameter_names=("b0", "b1"), input_names=("x",))
+    rng = np.random.default_rng(0)
+    rows = [{"x": x, "y": 1.0 + 2.0 * x + rng.normal(0.0, 0.3)} for x in np.linspace(0, 10, 12)]
+
+    out = fit_least_squares(model, rows)  # linear model: no starting values needed
+    assert out["sigma_source"] == "residual"
+    assert out["sigma"] == pytest.approx(np.sqrt(out["residual_sum_of_squares"] / 10))
+    np.testing.assert_allclose(np.linalg.inv(out["fim"]), out["covariance"], rtol=1e-8)
+    se = np.sqrt(np.diag(out["covariance"]))
+    assert [out["std_errors"][n] for n in ("b0", "b1")] == pytest.approx(se)
+
+
+def test_fit_confidence_level_is_configurable() -> None:
+    model = SymbolicModel(source="b0 + b1*x", parameter_names=("b0", "b1"), input_names=("x",))
+    rng = np.random.default_rng(1)
+    rows = [{"x": x, "y": 1.0 + 2.0 * x + rng.normal(0.0, 0.3)} for x in np.linspace(0, 10, 12)]
+    wide = fit_least_squares(model, rows, level=0.99)
+    narrow = fit_least_squares(model, rows, level=0.90)
+    assert narrow["level"] == 0.90
+    assert (narrow["ci_upper"]["b1"] - narrow["ci_lower"]["b1"]) < (
+        wide["ci_upper"]["b1"] - wide["ci_lower"]["b1"]
+    )
+    with pytest.raises(ValueError, match="level"):
+        fit_least_squares(model, rows, level=1.5)
+
+
+def test_fit_exact_data_falls_back_to_the_declared_sigma() -> None:
+    """An exact fit leaves no residual to estimate the noise from.
+
+    Reporting ``sigma = 0`` would contradict ``fim`` (which cannot be scaled by
+    a zero sigma) and would zero out any FIM a caller rescales by
+    ``(sigma / declared) ** 2`` -- as the CLI does to keep the workbook prior on
+    the declared scale -- silently losing the design's information.
+    """
+    model = SymbolicModel(
+        source="a*x + b", parameter_names=("a", "b"), input_names=("x",), measurement_error=0.1
+    )
+    rows = [{"x": float(x), "y": 2.0 * x} for x in (1, 2, 3, 4)]
+
+    # Starting at the solution makes the residuals identically zero.
+    out = fit_least_squares(model, rows, initial={"a": 2.0, "b": 0.0})
+    assert out["residual_sum_of_squares"] == 0.0
+    assert out["degrees_of_freedom"] > 0
+    assert out["sigma_source"] == "declared"
+    assert out["sigma"] == pytest.approx(0.1)
+
+    # Rescaling to the declared sigma is now a no-op, and the FIM survives.
+    rescaled = np.asarray(out["fim"]) * (out["sigma"] / 0.1) ** 2
+    np.testing.assert_allclose(rescaled, out["fim"])
+    assert np.isfinite(np.linalg.slogdet(rescaled)[1])
+    assert np.linalg.slogdet(rescaled)[0] > 0
