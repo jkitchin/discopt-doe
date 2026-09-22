@@ -346,9 +346,11 @@ def anova_report(
             marginal = _marginal_ss(rows, y, grand_mean, term, level_lists)
             if abs(marginal - ss_term) > 1e-9 * max(1.0, ss_total):
                 exact_orthogonal = False
-        effect_rows.append(
-            AnovaEffect(":".join(term), ss_term, df_term, ss_term / df_term, None, None)
-        )
+        # A factor that is constant in the collected data contributes no
+        # degrees of freedom; report the 0-df row (which __str__ renders as
+        # "---") rather than dividing by zero.
+        ms_term = ss_term / df_term if df_term > 0 else 0.0
+        effect_rows.append(AnovaEffect(":".join(term), ss_term, df_term, ms_term, None, None))
         df_used += df_term
         ss_explained += ss_term
         X, rss_prev, rank_prev = X_new, rss_new, rank_new

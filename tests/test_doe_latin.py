@@ -613,3 +613,25 @@ def test_anova_factorial_with_center_points(flagged) -> None:
     base = np.column_stack([one, xT, xt, xT * xt])
     full = np.column_stack([base, center])
     assert by["curvature"].ss == pytest.approx(_ls_ss(base, full, y), rel=1e-9)
+
+
+def test_anova_tolerates_a_factor_with_a_single_level() -> None:
+    """A factor held constant in the collected data contributes 0 df.
+
+    It used to divide the (zero) sum of squares by those zero degrees of
+    freedom and die with a bare ZeroDivisionError, even though the table
+    formatter already renders a 0-df row as ``---``.
+    """
+    rows = [
+        {"A": "a1", "B": b, "y": val}
+        for b, val in (("b1", 1.0), ("b2", 2.0), ("b1", 1.1), ("b2", 2.2), ("b1", 0.9), ("b2", 1.8))
+    ]
+    table = anova_report(rows, response="y", factors=["A", "B"])
+
+    by_source = {r.source: r for r in table.rows}
+    assert by_source["A"].df == 0
+    assert by_source["A"].ss == pytest.approx(0.0)
+    assert by_source["A"].f is None
+    assert by_source["B"].df == 1
+    assert by_source["B"].f is not None
+    assert "---" in str(table)

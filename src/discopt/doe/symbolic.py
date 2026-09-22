@@ -418,9 +418,11 @@ def fit_least_squares(
         the solver ``message``.
 
         The noise level ``sigma`` is the residual estimate
-        ``sqrt(RSS / (n - p))`` when there are degrees of freedom left
-        (``sigma_source == "residual"``), and the model's declared
-        ``measurement_error`` otherwise (``"declared"``). ``fim`` is
+        ``sqrt(RSS / (n - p))`` when there are degrees of freedom left and the
+        residuals are non-zero (``sigma_source == "residual"``), and the model's
+        declared ``measurement_error`` otherwise (``"declared"``) -- with no
+        degrees of freedom, or on an exact fit, there is nothing to estimate the
+        noise from. ``sigma`` is therefore always positive. ``fim`` is
         ``JᵀJ / sigma²`` with that same sigma, so ``inv(fim) == covariance``
         and ``sqrt(diag(inv(fim)))`` reproduces ``std_errors``.
     """
@@ -471,7 +473,13 @@ def fit_least_squares(
     dof = n_obs - n_p
     known = False
     if sigma is None:
-        sigma = "residual" if dof > 0 else "declared"
+        # No residual to estimate the noise from (no degrees of freedom, or an
+        # exact fit) means falling back to the declared sigma. Reporting
+        # sigma = 0 would make `fim` and `sigma` describe different scales, and
+        # a caller rescaling the FIM by (sigma / declared)**2 -- as the CLI does
+        # to keep the workbook prior on the declared scale -- would zero it out
+        # and lose the design's information entirely.
+        sigma = "residual" if (dof > 0 and rss > 0) else "declared"
     if isinstance(sigma, str):
         if sigma == "residual":
             if dof <= 0:
@@ -488,7 +496,7 @@ def fit_least_squares(
     check_jacobian_rank(J, names)
     # One sigma for both, so the information matrix and the reported
     # uncertainty describe the same thing: inv(fim) == cov.
-    fim = J.T @ J / sigma2 if sigma2 > 0 else J.T @ J / float(model.measurement_error) ** 2
+    fim = J.T @ J / sigma2
 
     try:
         cov = np.linalg.inv(J.T @ J) * sigma2
