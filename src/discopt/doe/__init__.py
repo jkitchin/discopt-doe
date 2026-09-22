@@ -153,6 +153,8 @@ _SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
     ),
     "estimability": (
         "EstimabilityResult",
+        "MSESubsetResult",
+        "mse_subset_selection",
         "collinearity_index",
         "d_optimal_subset",
         "estimability_rank",
@@ -160,6 +162,7 @@ _SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
     "exploration": ("ExplorationResult", "explore_design_space"),
     "fim": (
         "FIMResult",
+        "clear_fim_cache",
         "IdentifiabilityDiagnostics",
         "IdentifiabilityResult",
         "check_identifiability",
@@ -191,6 +194,7 @@ _SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
     ),
     "symbolic": (
         "ModelSyntaxError",
+        "check_jacobian_rank",
         "SymbolicModel",
         "fit_least_squares",
         "parse_expression",
@@ -243,6 +247,8 @@ _SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
         "split_plot_anova",
         "split_plot_design",
     ),
+    "robust": ("RobustDesignResult", "design_efficiencies", "robust_optimal_experiment"),
+    "runs": ("CampaignExperiment", "campaign_experiment", "fit_campaign", "symbolic_experiment"),
     "rsm": (
         "CanonicalAnalysis",
         "RidgeAnalysis",
@@ -268,6 +274,8 @@ _SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
         "quasi_random_design",
         "space_filling_metrics",
     ),
+    "_estimation": ("estimate_parameters",),
+    "_logging": ("quiet_solver",),
     "selection": (
         "ModelSelectionResult",
         "likelihood_ratio_test",
@@ -309,6 +317,19 @@ _EXPORTS: dict[str, str] = {
 _ALIASES: dict[str, tuple[str, str]] = {"SURROGATE_PRESETS": ("surrogate", "PRESETS")}
 
 __all__ = [
+    "estimate_parameters",
+    "MSESubsetResult",
+    "mse_subset_selection",
+    "clear_fim_cache",
+    "RobustDesignResult",
+    "design_efficiencies",
+    "robust_optimal_experiment",
+    "CampaignExperiment",
+    "campaign_experiment",
+    "fit_campaign",
+    "symbolic_experiment",
+    "check_jacobian_rank",
+    "quiet_solver",
     "max_variance",
     "GPSurrogate",
     "gp_surrogate",

@@ -77,10 +77,15 @@ class ODEExperiment(Experiment):
     """An ODE model measured at sampling times, usable anywhere an Experiment is.
 
     Build one with :func:`ode_experiment`. Besides :meth:`create_model` (the
-    :class:`~discopt.estimate.Experiment` interface) it offers
-    :meth:`predict` and :meth:`simulate` for evaluating the model directly, and
-    :meth:`estimate`, a least-squares fit with the exact autodiff Jacobian that
-    the discopt-doe loops use in place of the NLP-based estimator.
+    :class:`~discopt.estimate.Experiment` interface) it offers:
+
+    * :meth:`predict` and :meth:`simulate` for evaluating the model directly;
+    * :meth:`jacobian` and :meth:`fim`, the sensitivity matrix and Fisher
+      information from a compiled Jacobian (a fraction of a millisecond per
+      call after the first), for custom design searches;
+    * :meth:`check_accuracy`, which compares ``n_steps`` against twice as many;
+    * :meth:`estimate`, a least-squares fit with the exact autodiff Jacobian
+      that the discopt-doe loops use in place of the NLP-based estimator.
 
     Attributes
     ----------
@@ -240,16 +245,134 @@ class ODEExperiment(Experiment):
         missing = [n for n in self.design_names if n not in design]
         if missing:
             raise ValueError(f"design values missing for {missing}")
+        unknown = [n for n in design if n not in self.design_bounds]
+        if unknown:
+            raise ValueError(
+                f"unknown design input(s) {unknown}; design inputs are {self.design_names}"
+            )
+        missing_p = [n for n in self.parameter_names if n not in theta]
+        if missing_p:
+            raise ValueError(f"parameter values missing for {missing_p}")
         return [float(theta[n]) for n in self.parameter_names] + [
             float(design[n]) for n in self.design_names
         ]
+
+    def _compiled(self):
+        """``(responses, jacobian)`` jitted over ``(theta_vector, design_vector)``.
+
+        Compiled once per experiment state and reused; editing the experiment
+        (e.g. ``n_steps``) triggers a recompile.
+        """
+        from discopt.doe.fim import _experiment_fingerprint
+
+        jax, jnp = _jax()
+        key = _experiment_fingerprint(self)
+        store = self.__dict__.setdefault("_ode_compiled", {})
+        if key not in store:
+            store.clear()
+
+            def resp(theta_vec, u_vec):
+                return self._response_fn(*theta_vec, *u_vec)
+
+            store[key] = (jax.jit(resp), jax.jit(jax.jacfwd(resp, argnums=0)))
+        return store[key]
+
+    def _vectors(self, theta, design):
+        _, jnp = _jax()
+        args = self._args(theta, design)
+        k = len(self.parameter_specs)
+        return jnp.asarray(args[:k], dtype=float), jnp.asarray(args[k:], dtype=float)
+
+    @property
+    def response_function(self):
+        """The traceable response map ``f(θ_1, ..., θ_k, u_1, ..., u_m) -> y``.
+
+        Pure ``jax.numpy``, so it can be composed, jitted or differentiated
+        inside other JAX code (for example a campaign of several runs). Arguments
+        are scalars in :attr:`parameter_names` then :attr:`design_names` order;
+        the result is ordered as :attr:`response_names`. For one-off evaluations
+        use :meth:`predict`, :meth:`jacobian` or :meth:`fim`, which are compiled.
+        """
+        return self._response_fn
 
     def predict(
         self, theta: Mapping[str, float], design: Mapping[str, float] | None = None
     ) -> dict[str, float]:
         """Model responses at parameters ``theta`` and design ``design``."""
-        y = np.asarray(self._response_fn(*self._args(theta, design)))
+        resp, _ = self._compiled()
+        y = np.asarray(resp(*self._vectors(theta, design)))
         return dict(zip(self.response_names, map(float, y)))
+
+    def jacobian(
+        self, theta: Mapping[str, float], design: Mapping[str, float] | None = None
+    ) -> np.ndarray:
+        """Sensitivity matrix ``∂y/∂θ``: rows :attr:`response_names`, columns parameters.
+
+        Uses a Jacobian compiled once per experiment, so repeated calls at new
+        parameter values or designs cost a compiled evaluation. Every design
+        input must be given.
+        """
+        _, jac = self._compiled()
+        return np.asarray(jac(*self._vectors(theta, design)))
+
+    def fim(
+        self,
+        theta: Mapping[str, float],
+        design: Mapping[str, float] | None = None,
+        *,
+        prior_fim: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Fisher information ``Jᵀ Σ⁻¹ J`` (plus ``prior_fim``), parameters in order.
+
+        Identical to ``compute_fim(self, theta, design).fim``, from the same
+        compiled Jacobian as :meth:`jacobian`. Sum it over independent runs for
+        a batch, which makes custom design searches (robust criteria, joint
+        searches over many runs) fast.
+        """
+        J = self.jacobian(theta, design)
+        w = np.array([1.0 / self.sigma[rn.split("@")[0]] ** 2 for rn in self.response_names])
+        F = J.T @ (w[:, None] * J)
+        return F + prior_fim if prior_fim is not None else F
+
+    def check_accuracy(
+        self,
+        theta: Mapping[str, float],
+        design: Mapping[str, float] | None = None,
+        *,
+        rtol: float = 1e-3,
+        warn: bool = True,
+    ) -> float:
+        """Largest change in the responses and sensitivities when ``n_steps`` doubles.
+
+        A fixed-step integrator is only as accurate as its step. This recomputes
+        the responses and the Jacobian with ``2 * n_steps`` and returns the
+        largest change relative to the largest magnitude of each. When it
+        exceeds ``rtol`` (and ``warn``), a warning suggests more steps; a fast
+        mode (a large rate constant, a stiff system) is the usual cause.
+        """
+        import dataclasses
+        import warnings
+
+        fine = dataclasses.replace(self, n_steps=2 * int(self.n_steps))
+        change = 0.0
+        for coarse_val, fine_val in (
+            (
+                np.array(list(self.predict(theta, design).values())),
+                np.array(list(fine.predict(theta, design).values())),
+            ),
+            (self.jacobian(theta, design), fine.jacobian(theta, design)),
+        ):
+            scale = max(float(np.max(np.abs(fine_val))), 1e-300)
+            change = max(change, float(np.max(np.abs(coarse_val - fine_val))) / scale)
+        if warn and change > rtol:
+            warnings.warn(
+                f"n_steps={self.n_steps} is not converged: doubling it changes the responses "
+                f"or sensitivities by {change:.2g} (relative), above rtol={rtol:g}. Increase "
+                "n_steps, or use method='trapezoid' for a stiff system.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return change
 
     def simulate(
         self,
@@ -257,13 +380,32 @@ class ODEExperiment(Experiment):
         design: Mapping[str, float] | None = None,
         times: Sequence[float] | None = None,
     ) -> dict[str, np.ndarray]:
-        """State trajectories on a time grid (for plotting): ``{"t": ..., state: ...}``."""
-        jax, jnp = _jax()
-        args = self._args(theta, design)
-        k = len(self.parameter_specs)
-        p = self._as_dict(self.parameter_names, args[:k])
-        u = self._as_dict(self.design_names, args[k:])
+        """State trajectories on a time grid (for plotting): ``{"t": ..., state: ...}``.
+
+        Only the design inputs the trajectory actually uses must be given: a
+        designed initial state, an input the ``rhs`` reads, and (when ``times``
+        is omitted, so the grid runs to the last sampling time) the sampling-time
+        inputs. A missing one raises a clear error naming it.
+        """
+        _, jnp = _jax()
+        missing_p = [n for n in self.parameter_names if n not in theta]
+        if missing_p:
+            raise ValueError(f"parameter values missing for {missing_p}")
+        given = dict(design or {})
+        unknown = [n for n in given if n not in self.design_bounds]
+        if unknown:
+            raise ValueError(
+                f"unknown design input(s) {unknown}; design inputs are {self.design_names}"
+            )
+        p = {n: float(theta[n]) for n in self.parameter_names}
+        u = _NeededInputs({n: float(v) for n, v in given.items()})
         if times is None:
+            needed = [t for t in self.sample_times if isinstance(t, str) and t not in u]
+            if needed:
+                raise ValueError(
+                    f"pass times=..., or values for the sampling-time input(s) {needed} "
+                    "(the default grid runs to the last sampling time)"
+                )
             t_max = max(float(u[t]) if isinstance(t, str) else float(t) for t in self.sample_times)
             times = np.linspace(self.t0, t_max, 101)
         x0 = jnp.asarray(
@@ -390,6 +532,16 @@ class ODEExperiment(Experiment):
             solve_result=_FitStatus(success=success, message=message),
             parameter_names=list(self.parameter_names),
             n_observations=len(idx),
+        )
+
+
+class _NeededInputs(dict):
+    """Design-input values that name the missing input when one is read."""
+
+    def __missing__(self, key):
+        raise ValueError(
+            f"design input {key!r} is needed for this simulation (an initial state or "
+            "the rhs uses it); pass it in design=..."
         )
 
 

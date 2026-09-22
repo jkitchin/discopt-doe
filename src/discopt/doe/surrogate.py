@@ -80,19 +80,41 @@ and its 95% intervals cover the truth only ~79% of the time. The preset
 therefore
 
 * estimates the noise from **replicated runs** when the design has them
-  (pure error, the classical answer), and otherwise fits it with a floor of
-  10% of the response standard deviation (coverage ~0.92 in the same study);
-  ``noise=0`` interpolates for deterministic simulators, and a float fixes
-  the noise SD;
-* chooses between one shared length-scale and one per input (ARD) by a
-  BIC-penalized marginal likelihood (``ard="auto"``): ARD is dramatically
-  better when some inputs are inert (prediction error 2.8 -> 0.5 in a 6-factor
-  test with 2 active), and overfits when all inputs matter and runs are few,
-  where the shared length-scale wins -- "auto" picked the better of the two
-  in every scenario tested;
+  (pure error, the classical answer), and otherwise fits it, never below
+  10% of the response standard deviation; ``noise=0`` interpolates for
+  deterministic simulators, and a float fixes the noise SD;
+* fits the hyperparameters by **maximum a posteriori** with weak log-normal
+  priors (``priors=True``). Maximum likelihood alone is fragile on small
+  designs in two opposite ways. It collapses the noise to ~0 (the coverage
+  failure above), and it can also do the reverse: with 8 runs spread
+  between narrow features, "everything is noise" (noise SD = response SD, no
+  signal) is the exact likelihood optimum, the surrogate goes flat, and
+  Bayesian optimization degrades to random search. The priors, in the style of
+  Hvarfner, Hellsten & Nardi (2024), are
+  - on each length-scale, log-normal with median ``4.1 sqrt(d)`` times that
+    input's span in the data and log-SD ``sqrt(3)`` (a preference for smooth
+    surfaces that the data can override, scaled with the dimension so it
+    stays weak in many dimensions);
+  - on the noise variance, log-normal with median ``exp(-3) = 5%`` of the
+    response variance and log-SD 1 (noise is expected to be a minority of the
+    variation, as it is in a well-chosen experimental region).
+
+  In the book's studies (Chapters 14-16) the priors keep held-out coverage
+  of the 95% bands at ~0.97 on a 20-run unreplicated design, remove the
+  all-noise fits, and cut Bayesian-optimization regret with 3 active factors
+  among 12 from 0.74 to 0.18 over 30-run campaigns. The cost is
+  overconfidence when the response really is mostly noise: coverage ~0.77
+  when noise is two-thirds of the variation, ~0.70 for a response that is
+  pure noise (maximum likelihood gets 0.82 and 0.76 there). Replicate a few
+  runs in that situation; the noise is then taken from pure error;
+* chooses between one shared length-scale and one per input (ARD) by the log
+  posterior (``ard="auto"``). With the length-scale prior, ARD rarely
+  overfits: it predicted better than a shared length-scale both with all six
+  factors active and with inert ones, and "auto" mostly picks it. Without the
+  priors (``priors=False``) the choice falls back to a BIC-penalized
+  likelihood;
 * floors the length-scales at 0.05 (in the standardized inputs
-  :func:`~discopt.doe.optimize_round` uses) so 8 runs cannot fit an
-  arbitrarily wiggly surface;
+  :func:`~discopt.doe.optimize_round` uses) as a hard bound;
 * is deterministic for a given ``random_state``.
 """
 
@@ -343,8 +365,9 @@ class GPSurrogate:
         ``"replicates"`` (pure error from replicated runs), ``"fitted"``,
         ``"fixed"`` (the ``noise`` argument) or ``"none"`` (interpolating).
     noise_at_floor_ : bool
-        True when a fitted noise sits on its floor: the data could not tell
-        noise from signal, and the floor is doing the work.
+        True when a fitted noise is not identified by the data: the likelihood
+        alone would put it on its floor, so the data cannot tell noise from
+        signal and the prior (or, with ``priors=False``, the floor) sets it.
     signal_sd_ : float
         Prior standard deviation of the latent function, in response units.
     """
@@ -364,6 +387,7 @@ class GPSurrogate:
         noise_floor: float = 1e-2,
         n_restarts: int = 4,
         random_state: int | None = 0,
+        priors: bool = True,
     ):
         if isinstance(noise, str):
             if noise != "auto":
@@ -381,6 +405,7 @@ class GPSurrogate:
         self.noise_floor = float(noise_floor)
         self.n_restarts = int(n_restarts)
         self.random_state = random_state
+        self.priors = bool(priors)
         self.estimator: Any = None
         self.ard_: bool | None = None
         self.length_scales_: np.ndarray | None = None
@@ -391,7 +416,58 @@ class GPSurrogate:
 
     # ------------------------------------------------------------------
 
-    def _build(self, d: int, ard: bool, fixed_noise: float | None, y_var: float):
+    # Hyperparameter priors (see the module docstring). Length-scales:
+    # log-normal, median exp(sqrt(2)) * sqrt(d) * span, log-SD sqrt(3), after
+    # Hvarfner, Hellsten & Nardi (2024). Noise variance, as a fraction of the
+    # response variance (normalize_y): log-normal, median exp(-3), log-SD 1.
+    _LS_LOG_SD = float(np.sqrt(3.0))
+    _NOISE_LOG_MEAN = -3.0
+    _NOISE_LOG_SD = 1.0
+
+    def _map_optimizer(self, d: int, ard: bool, has_noise: bool, span: np.ndarray):
+        """A scipy L-BFGS-B optimizer over the log-posterior, for sklearn's ``optimizer=``.
+
+        sklearn's objective is the negative log marginal likelihood of the log
+        hyperparameters, laid out as [log signal, log length-scale(s), log noise].
+        The log-normal priors add a quadratic penalty in those coordinates.
+        """
+        from scipy.optimize import minimize
+
+        centres = np.log(span) + np.sqrt(2.0) + 0.5 * np.log(max(d, 1))
+        ls_mean = centres if ard else np.array([float(np.mean(centres))])
+        k = ls_mean.size
+        ls_sd, n_mu, n_sd = self._LS_LOG_SD, self._NOISE_LOG_MEAN, self._NOISE_LOG_SD
+
+        def penalty(theta: np.ndarray) -> tuple[float, np.ndarray]:
+            grad = np.zeros_like(theta)
+            z = (theta[1 : 1 + k] - ls_mean) / ls_sd
+            value = 0.5 * float(z @ z)
+            grad[1 : 1 + k] = z / ls_sd
+            if has_noise:
+                zn = (theta[-1] - n_mu) / n_sd
+                value += 0.5 * zn * zn
+                grad[-1] = zn / n_sd
+            return value, grad
+
+        def optimizer(obj_func, initial_theta, bounds):
+            def f(theta):
+                v, g = obj_func(theta, eval_gradient=True)
+                pv, pg = penalty(theta)
+                return v + pv, g + pg
+
+            res = minimize(f, initial_theta, jac=True, method="L-BFGS-B", bounds=bounds)
+            return res.x, float(res.fun)
+
+        return optimizer
+
+    def _build(
+        self,
+        d: int,
+        ard: bool,
+        fixed_noise: float | None,
+        y_var: float,
+        span: np.ndarray | None = None,
+    ):
         from sklearn.gaussian_process import GaussianProcessRegressor
         from sklearn.gaussian_process.kernels import ConstantKernel, Matern, WhiteKernel
 
@@ -405,12 +481,18 @@ class GPSurrogate:
             kernel = kernel + WhiteKernel(start, (self.noise_floor, 1.0))
         elif fixed_noise > 0.0:
             kernel = kernel + WhiteKernel(max(fixed_noise / y_var, 1e-12), "fixed")
+        extra: dict[str, Any] = {}
+        if self.priors:
+            if span is None:
+                span = np.ones(d)
+            extra["optimizer"] = self._map_optimizer(d, ard, fixed_noise is None, span)
         return GaussianProcessRegressor(
             kernel=kernel,
             normalize_y=True,
             n_restarts_optimizer=self.n_restarts,
             alpha=1e-10,
             random_state=self.random_state,
+            **extra,
         )
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "GPSurrogate":
@@ -418,6 +500,8 @@ class GPSurrogate:
         y = np.asarray(y, dtype=float).ravel()
         n, d = X.shape
         y_var = float(np.var(y)) if n > 1 and np.var(y) > 0 else 1.0
+        span = np.ptp(X, axis=0) if n > 1 else np.ones(d)
+        span = np.where(span > 0, span, 1.0)
 
         fixed_noise: float | None
         if isinstance(self.noise, str):  # "auto"
@@ -444,9 +528,13 @@ class GPSurrogate:
             except ImportError:  # pragma: no cover
                 pass
             for ard in options:
-                gp = self._build(d, ard, fixed_noise, y_var).fit(X, y)
+                gp = self._build(d, ard, fixed_noise, y_var, span).fit(X, y)
+                # With priors, sklearn's stored value is the (negated) MAP
+                # objective, i.e. the log posterior up to a constant, which is
+                # the natural score for the ARD choice; the priors already
+                # penalize extra length-scales. Without them, BIC does.
                 score = gp.log_marginal_likelihood_value_
-                if len(options) > 1:  # BIC penalty for the extra length-scales
+                if not self.priors and len(options) > 1:
                     score -= 0.5 * len(gp.kernel_.theta) * np.log(max(n, 2))
                 if best is None or score > best[0]:
                     best = (score, gp, ard)
@@ -460,16 +548,33 @@ class GPSurrogate:
         self.signal_sd_ = float(np.sqrt(prod.k1.constant_value * y_scale))
         self.length_scales_ = np.atleast_1d(np.asarray(prod.k2.length_scale, dtype=float))
         self.noise_sd_ = float(np.sqrt(_white_noise_variance(gp)))
-        self.noise_at_floor_ = bool(
-            self.noise_source_ == "fitted"
-            and kern.k2.noise_level <= self.noise_floor * (1.0 + 1e-6)
-        )
+        fitted = self.noise_source_ == "fitted"
+        at_floor = fitted and kern.k2.noise_level <= self.noise_floor * (1.0 + 1e-6)
+        if fitted and self.priors and not at_floor:
+            # With the noise prior the estimate rarely touches the floor; what
+            # matters is whether the *data* could have pinned it down. If the
+            # likelihood alone (other hyperparameters as fitted) is higher at
+            # the floor, the data cannot tell noise from signal and the prior
+            # is setting the noise.
+            theta = np.array(kern.theta, dtype=float)
+            floor_theta = theta.copy()
+            floor_theta[-1] = np.log(self.noise_floor)
+            at_floor = bool(
+                gp.log_marginal_likelihood(floor_theta) >= gp.log_marginal_likelihood(theta)
+            )
+        self.noise_at_floor_ = bool(self.noise_source_ == "fitted" and at_floor)
         if self.noise_at_floor_:
+            how = (
+                f"the preset's prior sets it instead (noise SD {self.noise_sd_:.3g}, "
+                f"{np.sqrt(kern.k2.noise_level):.0%} of the response SD)"
+                if self.priors
+                else f"noise SD = {np.sqrt(self.noise_floor):.0%} of the response SD"
+            )
             warnings.warn(
-                "the fitted GP noise sits on its floor (noise SD = "
-                f"{np.sqrt(self.noise_floor):.0%} of the response SD): the data cannot tell "
-                "noise from signal. Replicate a few runs so the noise can be estimated, "
-                "pass noise=<known SD>, or noise=0 for a deterministic simulator.",
+                "the fitted GP noise sits on its floor as far as the data can tell: they "
+                f"cannot tell noise from signal, and {how}. Replicate a few runs so the "
+                "noise can be estimated, pass noise=<known SD>, or noise=0 for a "
+                "deterministic simulator.",
                 UserWarning,
                 stacklevel=2,
             )
@@ -494,15 +599,19 @@ class GPSurrogate:
         """The fitted hyperparameters in plain terms."""
         if self.estimator is None:
             raise RuntimeError("call fit() before describe()")
-        return {
+        est = self.estimator
+        out = {
             "ard": self.ard_,
             "length_scales": None if self.length_scales_ is None else self.length_scales_.tolist(),
             "signal_sd": self.signal_sd_,
             "noise_sd": self.noise_sd_,
             "noise_source": self.noise_source_,
             "noise_at_floor": self.noise_at_floor_,
-            "log_marginal_likelihood": float(self.estimator.log_marginal_likelihood_value_),
+            "log_marginal_likelihood": float(est.log_marginal_likelihood(est.kernel_.theta)),
         }
+        if self.priors:
+            out["log_posterior"] = float(est.log_marginal_likelihood_value_)
+        return out
 
 
 def gp_surrogate(
@@ -514,6 +623,7 @@ def gp_surrogate(
     noise_floor: float = 1e-2,
     n_restarts: int = 4,
     random_state: int | None = 0,
+    priors: bool = True,
 ) -> GPSurrogate:
     """The ``"gp"`` preset: a Gaussian-process surrogate with calibrated defaults.
 
@@ -525,8 +635,9 @@ def gp_surrogate(
         ``noise_floor``. A float fixes the noise standard deviation in response
         units; ``0`` interpolates the data (deterministic simulators).
     ard : "auto", True or False, default "auto"
-        One length-scale per input (True), one shared (False), or choose by a
-        BIC-penalized marginal likelihood ("auto").
+        One length-scale per input (True), one shared (False), or choose by
+        the log posterior ("auto"; a BIC-penalized likelihood when
+        ``priors=False``).
     nu : float, default 2.5
         Matérn smoothness.
     length_scale_bounds : (float, float), default (0.05, 100)
@@ -539,6 +650,11 @@ def gp_surrogate(
         Optimizer restarts for the hyperparameters.
     random_state : int or None, default 0
         Seed for the optimizer restarts, so fits are reproducible.
+    priors : bool, default True
+        Fit the hyperparameters by maximum a posteriori with weak log-normal
+        priors on the length-scales and the noise (see the module docstring).
+        ``False`` gives plain maximum likelihood, which can read a small
+        design as all noise, or as noise-free.
     """
     _require_sklearn()
     return GPSurrogate(
@@ -549,6 +665,7 @@ def gp_surrogate(
         noise_floor=noise_floor,
         n_restarts=n_restarts,
         random_state=random_state,
+        priors=priors,
     )
 
 

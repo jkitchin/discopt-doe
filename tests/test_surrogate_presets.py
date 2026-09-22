@@ -285,3 +285,59 @@ def test_failed_runs_steer_away_from_the_infeasible_region(tmp_path):
     failed = [i for i, g in zip(ids, ok) if not g]
     res2 = optimize_round(path, batch_size=1, seed=0, infeasible_runs=failed)
     assert res2.next_designs[0]["x1"] <= 0.7
+
+
+# ──────────────────────────────────────────────────────────────────
+# MAP priors: no all-noise fits on small designs; ARD with the prior
+# ──────────────────────────────────────────────────────────────────
+
+
+def _reactor(X: np.ndarray) -> np.ndarray:
+    X = np.atleast_2d(X)
+    main = 25 * np.exp(-((X[:, 0] - 0.7) ** 2 / 0.03 + (X[:, 1] - 0.35) ** 2 / 0.05))
+    side = 15 * np.exp(-((X[:, 0] - 0.2) ** 2 / 0.02 + (X[:, 1] - 0.8) ** 2 / 0.02))
+    return 60 + main + side - 5 * X[:, 1]
+
+
+def test_small_design_is_not_read_as_all_noise():
+    """Eight runs between two narrow peaks: plain maximum likelihood's optimum
+    is 'everything is noise' (noise SD = response SD, no signal), which makes
+    the surrogate flat and BO a random search. The priors keep a signal."""
+    from discopt.doe import latin_hypercube_design
+
+    X = latin_hypercube_design({"a": (0, 1), "b": (0, 1)}, 8, seed=1).to_unit_matrix()
+    y = _reactor(X) + np.random.default_rng(1).normal(0, 0.5, 8)
+    Xs = (X - X.mean(0)) / X.std(0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        ml = gp_surrogate(priors=False).fit(Xs, y)
+        mapped = gp_surrogate().fit(Xs, y)
+    assert ml.noise_sd_ > 10 * ml.signal_sd_  # the degenerate ML fit
+    assert mapped.signal_sd_ > mapped.noise_sd_
+    assert mapped.noise_sd_ < 0.5 * np.std(y)
+    assert "log_posterior" in mapped.describe()
+
+
+def test_priors_off_restores_maximum_likelihood():
+    rng = np.random.default_rng(7)
+    U = _lhs(20, 2, rng)
+    y = _truth2(U) + rng.normal(0, 0.5, 20)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        s = gp_surrogate(priors=False).fit(U, y)
+    ml = s.estimator.log_marginal_likelihood(s.estimator.kernel_.theta)
+    assert s.describe()["log_marginal_likelihood"] == pytest.approx(ml)
+    assert "log_posterior" not in s.describe()
+
+
+def test_ard_auto_prefers_ard_with_many_inert_inputs():
+    """Three active inputs among twelve: the log-posterior choice keeps ARD
+    and gives the inert inputs long length-scales."""
+    rng = np.random.default_rng(11)
+    X = rng.uniform(size=(40, 12))
+    y = 3 * X[:, 0] - 2 * X[:, 1] ** 2 + np.sin(4 * X[:, 2]) + rng.normal(0, 0.1, 40)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        s = gp_surrogate().fit(X, y)
+    assert s.ard_
+    assert np.median(s.length_scales_[3:]) > 3 * np.max(s.length_scales_[:3])

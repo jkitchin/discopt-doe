@@ -7,6 +7,9 @@ criteria are exposed via the :class:`DiscriminationCriterion` enum:
 - ``HR`` — Hunter-Reiner (1965), squared difference of point predictions.
 - ``BF`` — Buzzi-Ferraris-Forzatti (1984) multiresponse, normalized
   by measurement and prediction-variance covariances. **Default.**
+- ``BH`` — Box-Hill (1967) expected entropy decrease (its upper bound), the
+  prior-weighted symmetric Kullback-Leibler divergence between the models'
+  Gaussian predictives.
 - ``JR`` — Jensen-Rényi divergence on per-model Gaussian predictives
   (Olofsson, Deisenroth & Misener 2019). Symmetric, M-model-friendly.
 - ``MI`` — Mutual information :math:`I(M; y \\mid d)` between model
@@ -59,6 +62,7 @@ class DiscriminationCriterion(str, Enum):
 
     HR = "hunter_reiner"
     BF = "buzzi_ferraris"
+    BH = "box_hill"
     JR = "jensen_renyi"
     MI = "mutual_information"
     DT = "dt_compound"
@@ -119,6 +123,7 @@ def evaluate_discrimination_criterion(
     *,
     criterion: DiscriminationCriterion = DiscriminationCriterion.BF,
     model_priors: dict[str, float] | None = None,
+    prior_fims: dict[str, np.ndarray] | None = None,
     mi_samples: int = 2000,
     seed: int | None = None,
 ) -> float:
@@ -139,7 +144,9 @@ def evaluate_discrimination_criterion(
         Which criterion to evaluate. ``DT`` is not supported here;
         evaluate its components (D-optimal + a discrimination criterion)
         separately.
-    model_priors, mi_samples, seed : as in :func:`discriminate_design`.
+    model_priors, prior_fims, mi_samples, seed : as in :func:`discriminate_design`.
+        Pass the same ``prior_fims`` the design was built with, or the value
+        will not match ``DiscriminationDesignResult.criterion_value``.
 
     Returns
     -------
@@ -149,9 +156,10 @@ def evaluate_discrimination_criterion(
     _validate_inputs(experiments, param_estimates, {k: (v, v) for k, v in design.items()})
     model_names = list(experiments.keys())
     weights = _normalise_priors(model_priors, model_names)
+    _validate_prior_fims(prior_fims, experiments, param_estimates)
     rng = np.random.default_rng(seed)
     rng_seed = int(rng.integers(0, 2**31 - 1))
-    preds = _predict_all_models(experiments, param_estimates, design)
+    preds = _predict_all_models(experiments, param_estimates, design, prior_fims)
     value, _ = _evaluate_criterion(criterion, preds, weights, mi_samples, rng_seed)
     return float(value)
 
@@ -215,16 +223,20 @@ def discriminate_design(
         )
     model_names = list(experiments.keys())
     weights = _normalise_priors(model_priors, model_names)
+    _validate_prior_fims(prior_fims, experiments, param_estimates)
 
     rng = np.random.default_rng(seed)
     rng_seed = int(rng.integers(0, 2**31 - 1))
 
+    # Build and compile every model once; the optimiser then only swaps design
+    # values (see _Predictor). Rebuilding per design point dominated the cost.
+    predict = _Predictor(experiments, param_estimates, prior_fims)
     last_exc: list[BaseException] = []
 
     def objective(design: dict[str, float]) -> float:
         """Return *negative* criterion value for minimisation."""
         try:
-            preds = _predict_all_models(experiments, param_estimates, design, prior_fims)
+            preds = predict(design)
             value, _ = _evaluate_criterion(criterion, preds, weights, mi_samples, rng_seed)
         except Exception as e:  # noqa: BLE001 -- root cause surfaced below
             last_exc.clear()
@@ -244,7 +256,7 @@ def discriminate_design(
         raise RuntimeError(msg)
 
     # Final evaluation at the optimum to populate the result.
-    preds = _predict_all_models(experiments, param_estimates, best_design, prior_fims)
+    preds = predict(best_design)
     crit_value, pairwise = _evaluate_criterion(criterion, preds, weights, mi_samples, rng_seed)
 
     return DiscriminationDesignResult(
@@ -272,6 +284,7 @@ def discriminate_compound(
     discrimination_criterion: DiscriminationCriterion = DiscriminationCriterion.BF,
     precision_model: str | None = None,
     model_priors: dict[str, float] | None = None,
+    prior_fims: dict[str, np.ndarray] | None = None,
     n_starts: int = 10,
     local_refine: bool = True,
     mi_samples: int = 2000,
@@ -298,6 +311,14 @@ def discriminate_compound(
         Which model anchors the precision objective. Defaults to the
         lexicographically first key in ``experiments`` and a warning
         is added to ``result.warnings``.
+    prior_fims : dict[str, numpy.ndarray], optional
+        Per-model FIM of the data already collected (ordered by that model's
+        parameter names). Both terms then account for it: the precision term
+        is evaluated on ``prior_fims[precision_model] + FIM(d)`` -- so
+        ``λ = 0`` is the D-optimal *next* run given the data -- and the
+        discrimination term uses the prediction covariances of
+        :func:`discriminate_design`, so ``λ = 1`` reproduces its design.
+        Without it both terms treat the candidate run as the only data.
     \*\*kwargs : dict
         Additional parameters; see :func:`discriminate_design`.
 
@@ -319,18 +340,24 @@ def discriminate_compound(
         warnings_out.append(f"precision_model not specified; defaulting to {precision_model!r}")
     if precision_model not in experiments:
         raise KeyError(f"precision_model {precision_model!r} not in experiments")
+    _validate_prior_fims(prior_fims, experiments, param_estimates)
+    prior_prec = None if prior_fims is None else prior_fims.get(precision_model)
 
     rng = np.random.default_rng(seed)
     rng_seed = int(rng.integers(0, 2**31 - 1))
     lam = float(discrimination_weight)
+    predict = _Predictor(experiments, param_estimates, prior_fims)
+
+    def precision(pred: _ModelPrediction) -> float:
+        return _precision_value(_with_prior(pred.fim_result, prior_prec), precision_criterion)
 
     def objective(design: dict[str, float]) -> float:
         try:
-            preds = _predict_all_models(experiments, param_estimates, design)
+            preds = predict(design)
             disc_value, _ = _evaluate_criterion(
                 discrimination_criterion, preds, weights, mi_samples, rng_seed
             )
-            prec_value = _precision_value(preds[precision_model].fim_result, precision_criterion)
+            prec_value = precision(preds[precision_model])
         except Exception:
             return _SINGULAR_SENTINEL
         if not (np.isfinite(disc_value) and np.isfinite(prec_value)):
@@ -343,11 +370,11 @@ def discriminate_compound(
     if best_design is None:
         raise RuntimeError("No feasible design found for compound discrimination")
 
-    preds = _predict_all_models(experiments, param_estimates, best_design)
+    preds = predict(best_design)
     disc_value, pairwise = _evaluate_criterion(
         discrimination_criterion, preds, weights, mi_samples, rng_seed
     )
-    prec_value = _precision_value(preds[precision_model].fim_result, precision_criterion)
+    prec_value = precision(preds[precision_model])
     compound_value = (1.0 - lam) * prec_value + lam * disc_value
 
     return DiscriminationDesignResult(
@@ -405,15 +432,7 @@ def _predict_all_models(
         )
         for name in experiments
     }
-    names = list(preds)
-    ref = preds[names[0]].response_names
-    for name in names[1:]:
-        if preds[name].response_names != ref:
-            raise ValueError(
-                f"models {names[0]!r} and {name!r} expose different response "
-                f"namespaces ({ref} vs {preds[name].response_names}); model "
-                "discrimination requires identical, identically-ordered responses."
-            )
+    _check_response_alignment(preds)
     return preds
 
 
@@ -514,6 +533,145 @@ def _predict_with_covariance(
     )
 
 
+def _with_prior(fim_result: FIMResult, prior: np.ndarray | None) -> FIMResult:
+    """``fim_result`` with ``prior`` added to its information (or unchanged)."""
+    if prior is None:
+        return fim_result
+    return FIMResult(
+        fim=np.asarray(fim_result.fim) + np.asarray(prior, dtype=np.float64),
+        jacobian=fim_result.jacobian,
+        parameter_names=fim_result.parameter_names,
+        response_names=fim_result.response_names,
+    )
+
+
+def _validate_prior_fims(
+    prior_fims: dict[str, np.ndarray] | None,
+    experiments: dict[str, Experiment],
+    param_estimates: dict[str, dict[str, float]],
+) -> None:
+    """Check keys and shapes of ``prior_fims`` against each model's parameters."""
+    if not prior_fims:
+        return
+    unknown = set(prior_fims) - set(experiments)
+    if unknown:
+        raise ValueError(f"prior_fims has keys {sorted(unknown)} that are not candidate models")
+    for name, fim in prior_fims.items():
+        p = len(experiments[name].create_model(**param_estimates[name]).parameter_names)
+        shape = np.asarray(fim).shape
+        if shape != (p, p):
+            raise ValueError(
+                f"prior_fims[{name!r}] has shape {shape}; model {name!r} has {p} "
+                "parameters, so it must be ({p}, {p}) ordered by its parameter names".format(p=p)
+            )
+
+
+class _ModelEvaluator:
+    """One model at fixed parameter values, compiled once for many designs.
+
+    :func:`_predict_with_covariance` rebuilds the model, recompiles every
+    response and retraces the Jacobian on each call; inside a design
+    optimisation that is dozens of rebuilds per model for what is, apart from
+    the design values, the same computation. Here the model is built once, the
+    response vector and its Jacobian are JIT-compiled once, and each design only
+    reassembles the flat solution vector. Models whose ``x*`` needs a solve
+    (constraints, implicit states) fall back to the uncached path per design.
+    """
+
+    def __init__(self, experiment: Experiment, param_values: dict[str, float]):
+        from discopt.doe import fim as _fim
+        from discopt.parametric import flatten_params
+
+        self.experiment = experiment
+        self.param_values = dict(param_values)
+        self.em = experiment.create_model(**param_values)
+        em = self.em
+        self.response_names = list(em.response_names)
+        fns = [_fim._compile_response(em.responses[n], em.model) for n in self.response_names]
+        self.p_flat = flatten_params(em.model)
+        self.param_indices = _fim._get_param_indices(em)
+        sigma = np.array([em.measurement_error[n] for n in self.response_names], dtype=np.float64)
+        self.Sigma_y = np.diag(sigma**2)
+        self.Sigma_inv = np.diag(1.0 / sigma**2)
+
+        jax, jnp = _fim._require_jax()
+        p_flat = self.p_flat
+
+        def vec(x_flat):
+            return jnp.stack([jnp.reshape(fn(x_flat, p_flat), ()) for fn in fns])
+
+        self._vec_raw = vec
+        self._jac_raw = jax.jacobian(vec)
+        self._vec = jax.jit(vec)
+        self._jac = jax.jit(self._jac_raw)
+        self._jit_ok = True
+
+    def __call__(self, design: dict[str, float], prior_fim: np.ndarray | None) -> _ModelPrediction:
+        from discopt.doe import fim as _fim
+
+        x_flat = _fim._assemble_x_flat_direct(self.em, self.param_values, design)
+        if x_flat is None:
+            return _predict_with_covariance(self.experiment, self.param_values, design, prior_fim)
+        if self._jit_ok:
+            try:
+                y_hat = np.asarray(self._vec(x_flat), dtype=np.float64).ravel()
+                J_full = np.asarray(self._jac(x_flat), dtype=np.float64)
+            except Exception:  # noqa: BLE001 - an untraceable node: run eagerly
+                self._jit_ok = False
+        if not self._jit_ok:
+            y_hat = np.asarray(self._vec_raw(x_flat), dtype=np.float64).ravel()
+            J_full = np.asarray(self._jac_raw(x_flat), dtype=np.float64)
+        J = J_full[:, self.param_indices]
+        fim = J.T @ self.Sigma_inv @ J
+        cov_theta = np.linalg.pinv(np.asarray(prior_fim) if prior_fim is not None else fim)
+        return _ModelPrediction(
+            y_hat=y_hat,
+            V=np.asarray(J @ cov_theta @ J.T),
+            Sigma_y=self.Sigma_y,
+            response_names=self.response_names,
+            fim_result=FIMResult(
+                fim=np.asarray(fim),
+                jacobian=J,
+                parameter_names=self.em.parameter_names,
+                response_names=self.response_names,
+            ),
+        )
+
+
+class _Predictor:
+    """``design -> {model: _ModelPrediction}`` with every model compiled once."""
+
+    def __init__(
+        self,
+        experiments: dict[str, Experiment],
+        param_estimates: dict[str, dict[str, float]],
+        prior_fims: dict[str, np.ndarray] | None = None,
+    ):
+        self.prior_fims = prior_fims or {}
+        self.evaluators = {
+            name: _ModelEvaluator(experiments[name], param_estimates[name]) for name in experiments
+        }
+
+    def __call__(self, design: dict[str, float]) -> dict[str, _ModelPrediction]:
+        preds = {
+            name: ev(design, self.prior_fims.get(name)) for name, ev in self.evaluators.items()
+        }
+        _check_response_alignment(preds)
+        return preds
+
+
+def _check_response_alignment(preds: dict[str, _ModelPrediction]) -> None:
+    names = list(preds)
+    ref = preds[names[0]].response_names
+    for name in names[1:]:
+        if preds[name].response_names != ref:
+            raise ValueError(
+                f"models {names[0]!r} and {name!r} expose different response "
+                f"namespaces ({ref} vs {preds[name].response_names}); model "
+                "discrimination requires identical, identically-ordered responses."
+            )
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Internal: criterion dispatch
 # ─────────────────────────────────────────────────────────────────────
@@ -532,6 +690,8 @@ def _evaluate_criterion(
         return _criterion_hunter_reiner(preds, weights)
     if crit is DiscriminationCriterion.BF:
         return _criterion_buzzi_ferraris(preds, weights)
+    if crit is DiscriminationCriterion.BH:
+        return _criterion_box_hill(preds, weights)
     if crit is DiscriminationCriterion.JR:
         return _criterion_jensen_renyi(preds, weights)
     if crit is DiscriminationCriterion.MI:
@@ -590,6 +750,60 @@ def _criterion_buzzi_ferraris(
         S_inv_diff = np.linalg.solve(S, diff)
         trace_term = float(np.trace(np.linalg.solve(S, 2.0 * sigma)))
         contrib = float(diff @ S_inv_diff) + trace_term
+        pw[i, j] = pw[j, i] = contrib
+    total = sum(
+        weights[names[i]] * weights[names[j]] * pw[i, j] for i, j in combinations(range(M), 2)
+    )
+    return float(total), pw
+
+
+def _criterion_box_hill(
+    preds: dict[str, _ModelPrediction], weights: dict[str, float]
+) -> tuple[float, np.ndarray]:
+    r"""Box & Hill (1967) discrimination criterion.
+
+    Box and Hill choose the run that maximises the expected decrease in the
+    entropy of the model probabilities, and maximise instead its upper bound
+
+    .. math::
+        D = \sum_{i<j} \pi_i \pi_j J_{ij},
+
+    where, for Gaussian predictives :math:`p_i = N(\hat y_i, S_i)` with
+    :math:`S_i = \Sigma_y + V_i` (measurement plus prediction covariance),
+    :math:`J_{ij}` is the symmetric Kullback-Leibler (Jeffreys) divergence
+
+    .. math::
+        J_{ij} = \tfrac12\,\mathrm{tr}\big(S_i S_j^{-1} + S_j S_i^{-1} - 2I\big)
+               + \tfrac12\,\Delta^\top (S_i^{-1} + S_j^{-1})\,\Delta,
+        \qquad \Delta = \hat y_i - \hat y_j .
+
+    For one response this is exactly Box and Hill's
+
+    .. math::
+        \tfrac12 \sum_{i<j} \pi_i\pi_j \Big[
+        \frac{(\sigma_i^2-\sigma_j^2)^2}{(\sigma^2+\sigma_i^2)(\sigma^2+\sigma_j^2)}
+        + (\hat y_i-\hat y_j)^2\Big(\frac1{\sigma^2+\sigma_i^2}
+        + \frac1{\sigma^2+\sigma_j^2}\Big)\Big],
+
+    with :math:`\sigma_i^2` model *i*'s prediction variance; the matrix form
+    is its multiresponse generalisation. Unlike Hunter-Reiner it rewards runs
+    where the models disagree *relative to* their predictive spread, and it
+    also rewards runs where the models disagree about that spread. Box, G. E.
+    P. and Hill, W. J. (1967) Technometrics 9, 57-71.
+    """
+    names = list(preds.keys())
+    M = len(names)
+    pw = np.zeros((M, M))
+    for i, j in combinations(range(M), 2):
+        pi, pj = preds[names[i]], preds[names[j]]
+        S_i = _pd(pi.Sigma_y + pi.V)
+        S_j = _pd(pj.Sigma_y + pj.V)
+        n = S_i.shape[0]
+        Si_inv_Sj = np.linalg.solve(S_i, S_j)
+        Sj_inv_Si = np.linalg.solve(S_j, S_i)
+        diff = pi.y_hat - pj.y_hat
+        quad = float(diff @ np.linalg.solve(S_i, diff) + diff @ np.linalg.solve(S_j, diff))
+        contrib = 0.5 * (float(np.trace(Si_inv_Sj) + np.trace(Sj_inv_Si)) - 2.0 * n + quad)
         pw[i, j] = pw[j, i] = contrib
     total = sum(
         weights[names[i]] * weights[names[j]] * pw[i, j] for i, j in combinations(range(M), 2)

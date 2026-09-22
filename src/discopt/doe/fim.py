@@ -22,6 +22,9 @@ The FIM is used to:
 
 from __future__ import annotations
 
+import dataclasses
+import weakref
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -280,6 +283,178 @@ def _assemble_x_flat_batch_direct(em, param_values, design_points):
     return jnp.asarray(np.stack(rows, axis=0), dtype=jnp.float64)
 
 
+# ─────────────────────────────────────────────────────────────
+# Compiled-Jacobian cache
+# ─────────────────────────────────────────────────────────────
+#
+# Building the model and tracing the response Jacobian costs far more than
+# evaluating it: about 1.4 s against well under a millisecond for an ODE
+# experiment, whose integrator JAX re-traces on every un-jitted call. Every
+# design search evaluates the FIM of the *same* experiment at the *same*
+# nominal parameters for many design points, so the model and a jitted
+# Jacobian are kept per experiment and reused.
+#
+# The key is the nominal parameter values (create_model may use them) plus a
+# fingerprint of the experiment's own state, so an experiment edited after a
+# first call (say, more integration steps) is recompiled rather than served a
+# stale function. Only pure explicit response models are cached: those are the
+# models whose x* is assembled directly, so nothing on the cached model is ever
+# mutated. Call :func:`clear_fim_cache` to drop everything explicitly.
+
+_FIM_CACHE_ATTR = "_discopt_doe_fim_cache"
+_FIM_CACHE_SIZE = 8
+_CACHED_EXPERIMENTS: list[weakref.ref] = []
+
+
+@dataclass
+class _FIMKernel:
+    """A built model plus its jitted response Jacobian, reusable across designs."""
+
+    em: ExperimentModel
+    src: dict
+    var_names: list[str]
+    param_indices: list[int]
+    sigma_inv: np.ndarray
+    jac: Callable
+    batch_jac: Callable
+
+    def x_flat(self, param_values, design_values):
+        """``x*`` for one design, or ``None`` on a shape mismatch / missing value."""
+        parts = []
+        for vname in self.var_names:
+            arr = _direct_var_values(self.src[vname], param_values, design_values)
+            if arr is None:
+                return None
+            parts.append(arr)
+        return np.concatenate(parts)
+
+    def result(self, J: np.ndarray, prior_fim: np.ndarray | None) -> FIMResult:
+        fim = J.T @ self.sigma_inv @ J
+        if prior_fim is not None:
+            fim = fim + prior_fim
+        return FIMResult(
+            fim=np.asarray(fim),
+            jacobian=np.asarray(J),
+            parameter_names=self.em.parameter_names,
+            response_names=self.em.response_names,
+        )
+
+
+def _experiment_fingerprint(experiment: Experiment) -> Any:
+    """A cheap summary of the experiment's state, to detect edits after caching."""
+    try:
+        if dataclasses.is_dataclass(experiment):
+            items = [
+                (f.name, getattr(experiment, f.name))
+                for f in dataclasses.fields(experiment)
+                if f.name != _FIM_CACHE_ATTR
+            ]
+        else:
+            items = [(k, v) for k, v in vars(experiment).items() if k != _FIM_CACHE_ATTR]
+        return repr(items)
+    except Exception:  # noqa: BLE001 - an unfingerprintable experiment is not cached
+        return None
+
+
+def _param_key(param_values: dict[str, Any]) -> tuple:
+    return tuple(
+        (k, tuple(np.asarray(v, dtype=np.float64).ravel().tolist()))
+        for k, v in sorted(param_values.items())
+    )
+
+
+def _cache_for(experiment: Experiment) -> OrderedDict | None:
+    cache = getattr(experiment, _FIM_CACHE_ATTR, None)
+    if isinstance(cache, OrderedDict):
+        return cache
+    cache = OrderedDict()
+    try:
+        object.__setattr__(experiment, _FIM_CACHE_ATTR, cache)
+        _CACHED_EXPERIMENTS.append(weakref.ref(experiment))
+    except (AttributeError, TypeError):  # __slots__, no __dict__, or no weakref support
+        return None
+    return cache
+
+
+def clear_fim_cache(experiment: Experiment | None = None) -> None:
+    """Drop the compiled FIM Jacobians kept for ``experiment`` (or for all).
+
+    :func:`compute_fim` and the design searches keep, per experiment, the built
+    model and a jitted Jacobian for each set of nominal parameter values, and
+    recompile automatically when the experiment's attributes change. Clear the
+    cache after changing something the fingerprint cannot see, such as the body
+    of a function the experiment calls, or to release memory.
+    """
+    targets = [experiment] if experiment is not None else [r() for r in _CACHED_EXPERIMENTS]
+    for exp in targets:
+        if exp is not None and isinstance(getattr(exp, _FIM_CACHE_ATTR, None), OrderedDict):
+            getattr(exp, _FIM_CACHE_ATTR).clear()
+    if experiment is None:
+        _CACHED_EXPERIMENTS.clear()
+
+
+def _fim_kernel(experiment: Experiment, param_values: dict[str, float]) -> _FIMKernel | None:
+    """The cached kernel for ``(experiment, param_values)``, building it if needed.
+
+    Returns ``None`` for a model that needs a solve (constraints or implicit
+    state); callers then take the general path.
+    """
+    fingerprint = _experiment_fingerprint(experiment)
+    cache = _cache_for(experiment) if fingerprint is not None else None
+    key = (_param_key(param_values), fingerprint)
+    if cache is not None and key in cache:
+        cache.move_to_end(key)
+        return cache[key]
+
+    kernel = _build_fim_kernel(experiment, param_values)
+    if cache is not None:
+        cache[key] = kernel
+        while len(cache) > _FIM_CACHE_SIZE:
+            cache.popitem(last=False)
+    return kernel
+
+
+def _build_fim_kernel(experiment: Experiment, param_values: dict[str, float]):
+    from discopt.parametric import flatten_params, variable_slices
+
+    jax, jnp = _require_jax()
+    em = experiment.create_model(**param_values)
+    src = _design_source_map(em)
+    if src is None:
+        return None
+    response_fns = [_compile_response(em.responses[n], em.model) for n in em.response_names]
+    p_flat = flatten_params(em.model)
+
+    def response_vector(x_flat_arg):
+        return jnp.stack([fn(x_flat_arg, p_flat) for fn in response_fns])
+
+    jacobian = jax.jacobian(response_vector)
+    sigma = _measurement_sigma(em)
+    return _FIMKernel(
+        em=em,
+        src=src,
+        var_names=list(variable_slices(em.model)),
+        param_indices=_get_param_indices(em),
+        sigma_inv=np.diag(1.0 / sigma**2),
+        jac=jax.jit(jacobian),
+        batch_jac=jax.jit(jax.vmap(jacobian)),
+    )
+
+
+def _check_design_names(em: ExperimentModel, design_values: dict[str, float] | None) -> None:
+    # Reject unknown design_values keys. Silently ignoring them (e.g. a typo
+    # like "temperture") would leave the real design input free and compute the
+    # FIM at an arbitrary point -- worse than a crash, since it propagates
+    # meaningless "optima" through optimal_experiment.
+    if design_values:
+        unknown = [name for name in design_values if name not in em.design_inputs]
+        if unknown:
+            raise ValueError(
+                f"unknown design input(s) {unknown} in design_values; "
+                f"model design inputs are {sorted(em.design_inputs)}."
+            )
+
+
 def compute_fim(
     experiment: Experiment,
     param_values: dict[str, float],
@@ -319,24 +494,30 @@ def compute_fim(
     -------
     FIMResult
         FIM, Jacobian, and optimality metrics.
+
+    Notes
+    -----
+    For a pure explicit response model (no constraints; every variable an
+    unknown parameter or a design input) the built model and a jitted Jacobian
+    are cached per experiment and nominal parameter values, so repeated calls
+    at new design points cost a compiled evaluation rather than a rebuild and
+    re-trace. See :func:`clear_fim_cache`.
     """
 
     from discopt.parametric import extract_x_flat, flatten_params
 
+    if method == "autodiff":
+        kernel = _fim_kernel(experiment, param_values)
+        if kernel is not None:
+            _check_design_names(kernel.em, design_values)
+            x = kernel.x_flat(param_values, design_values)
+            if x is not None:
+                J = np.asarray(kernel.jac(x))[:, kernel.param_indices]
+                return kernel.result(J, prior_fim)
+
     # Build the model at nominal parameter values
     em = experiment.create_model(**param_values)
-
-    # Reject unknown design_values keys. Silently ignoring them (e.g. a typo
-    # like "temperture") would leave the real design input free and compute the
-    # FIM at an arbitrary point -- worse than a crash, since it propagates
-    # meaningless "optima" through optimal_experiment.
-    if design_values:
-        unknown = [name for name in design_values if name not in em.design_inputs]
-        if unknown:
-            raise ValueError(
-                f"unknown design input(s) {unknown} in design_values; "
-                f"model design inputs are {sorted(em.design_inputs)}."
-            )
+    _check_design_names(em, design_values)
 
     # Fast path: for a pure explicit response model (no constraints; every
     # variable is an unknown parameter or a design input) the solution point
@@ -427,16 +608,17 @@ def compute_fim_batch(
     a non-autodiff ``method``, so the result is always identical to calling
     :func:`compute_fim` on each point.
     """
-    from discopt.parametric import flatten_params
-
     if not design_points:
         return []
 
-    em = experiment.create_model(**param_values)
-
+    kernel = _fim_kernel(experiment, param_values) if method == "autodiff" else None
     X = None
-    if method == "autodiff":
-        X = _assemble_x_flat_batch_direct(em, param_values, design_points)
+    if kernel is not None:
+        for dp in design_points:
+            _check_design_names(kernel.em, dp)
+        rows = [kernel.x_flat(param_values, dp) for dp in design_points]
+        if all(r is not None for r in rows):
+            X = np.stack(rows, axis=0)
     if X is None:
         return [
             compute_fim(
@@ -445,37 +627,9 @@ def compute_fim_batch(
             for dp in design_points
         ]
 
-    jax, jnp = _require_jax()
-
-    response_fns = [_compile_response(em.responses[n], em.model) for n in em.response_names]
-    param_indices = _get_param_indices(em)
-    p_flat = flatten_params(em.model)
-
-    def response_vector(x_flat_arg):
-        return jnp.stack([fn(x_flat_arg, p_flat) for fn in response_fns])
-
-    # One traced Jacobian, vmapped across the batch axis of x*.
-    J_all = np.asarray(jax.vmap(jax.jacobian(response_vector))(X))
-    J_all = J_all[:, :, param_indices]
-
-    sigma = _measurement_sigma(em)
-    Sigma_inv = np.diag(1.0 / sigma**2)
-
-    results: list[FIMResult] = []
-    for b in range(J_all.shape[0]):
-        J = J_all[b]
-        fim = J.T @ Sigma_inv @ J
-        if prior_fim is not None:
-            fim = fim + prior_fim
-        results.append(
-            FIMResult(
-                fim=np.asarray(fim),
-                jacobian=np.asarray(J),
-                parameter_names=em.parameter_names,
-                response_names=em.response_names,
-            )
-        )
-    return results
+    # One compiled Jacobian, vmapped across the batch axis of x*.
+    J_all = np.asarray(kernel.batch_jac(X))[:, :, kernel.param_indices]
+    return [kernel.result(J_all[b], prior_fim) for b in range(J_all.shape[0])]
 
 
 def _make_direct_fim_evaluator(
@@ -501,44 +655,18 @@ def _make_direct_fim_evaluator(
     :func:`compute_fim` on that point — only the per-call model rebuild and JAX
     re-trace are eliminated.
     """
-    jax, jnp = _require_jax()
-
-    from discopt.parametric import flatten_params
-
-    em = experiment.create_model(**param_values)
-    if _design_source_map(em) is None:
+    kernel = _fim_kernel(experiment, param_values)
+    if kernel is None:
         return None
 
-    response_fns = [_compile_response(em.responses[n], em.model) for n in em.response_names]
-    param_indices = _get_param_indices(em)
-    p_flat = flatten_params(em.model)
-
-    def response_vector(x_flat_arg):
-        return jnp.stack([fn(x_flat_arg, p_flat) for fn in response_fns])
-
-    # Compile the Jacobian once; the JIT cache keys on x*'s (fixed) shape, so
-    # every subsequent design point reuses the same compiled trace.
-    jac = jax.jit(jax.jacobian(response_vector))
-    sigma = _measurement_sigma(em)
-    Sigma_inv = np.diag(1.0 / sigma**2)
-    param_names = em.parameter_names
-    response_names = em.response_names
-
     def evaluator(design_values: dict[str, float] | None) -> FIMResult:
-        x_flat = _assemble_x_flat_direct(em, param_values, design_values)
+        _check_design_names(kernel.em, design_values)
+        x_flat = kernel.x_flat(param_values, design_values)
         if x_flat is None:
             # Per-point shape/missing-design mismatch: fall back to the solve.
             return compute_fim(experiment, param_values, design_values, prior_fim=prior_fim)
-        J = np.asarray(jac(x_flat))[:, param_indices]
-        fim = J.T @ Sigma_inv @ J
-        if prior_fim is not None:
-            fim = fim + prior_fim
-        return FIMResult(
-            fim=np.asarray(fim),
-            jacobian=np.asarray(J),
-            parameter_names=param_names,
-            response_names=response_names,
-        )
+        J = np.asarray(kernel.jac(x_flat))[:, kernel.param_indices]
+        return kernel.result(J, prior_fim)
 
     return evaluator
 
@@ -569,6 +697,11 @@ class IdentifiabilityResult:
     problematic_parameters: list[str]
     condition_number: float
     fim_result: FIMResult
+
+    @property
+    def parameter_names(self) -> list[str]:
+        """Parameter order of every matrix in this result."""
+        return list(self.fim_result.parameter_names)
 
 
 @dataclass
@@ -654,6 +787,25 @@ class IdentifiabilityDiagnostics:
     standard_errors: dict[str, float]
     warnings: list[str]
     problematic_parameters: list[str]
+
+    @property
+    def parameter_names(self) -> list[str]:
+        """Row/column order of ``correlation_matrix``, ``variance_decomposition``."""
+        return list(self.fim_result.parameter_names)
+
+    def correlation_frame(self) -> dict[str, dict[str, float]]:
+        """The correlation matrix as ``{name: {name: value}}``, keyed by parameter."""
+        names = self.parameter_names
+        C = np.asarray(self.correlation_matrix)
+        return {a: {b: float(C[i, j]) for j, b in enumerate(names)} for i, a in enumerate(names)}
+
+    def correlation(self, a: str, b: str) -> float:
+        """Estimated correlation between parameters ``a`` and ``b`` (``nan`` if undefined)."""
+        names = self.parameter_names
+        for n in (a, b):
+            if n not in names:
+                raise KeyError(f"{n!r} is not a parameter ({names})")
+        return float(np.asarray(self.correlation_matrix)[names.index(a), names.index(b)])
 
 
 def diagnose_identifiability(

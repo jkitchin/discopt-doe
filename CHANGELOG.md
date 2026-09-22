@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Model-based design is fast.** `compute_fim` rebuilt and recompiled the model on
+  every call, about a second for an ODE model. It now caches a compiled Jacobian per
+  experiment, and `clear_fim_cache` resets it. A three-batch joint design for a
+  four-parameter reactor dropped from 358 s to 0.2 s, and a constrained greedy
+  batch that did not finish in ten minutes now takes 1.4 s, with the same designs.
+- **The GP preset no longer reads a small design as pure noise.** With about 8
+  runs, "everything is noise" was the exact maximum-likelihood fit, so batches
+  degenerated into exploration.
+  - Hyperparameters are now fit by MAP with weak log-normal priors on the
+    length-scales and noise (after Hvarfner et al. 2024).
+  - `ard="auto"` compares log posteriors, which no longer under-selects per-factor
+    length-scales in high dimension. BO regret in 12-D fell from 0.74 to 0.18.
+  - Unreplicated coverage is 0.97, where it was 0.92.
+  - The cost: when the response is mostly noise, intervals run
+    overconfident. A few replicated runs, which give a pure-error noise
+    estimate, fix it.
+  - `priors=False` restores plain maximum likelihood.
+- `discriminate_design` builds and jits each model once per call, and sequential
+  discrimination is about 3× faster.
+- `explore_design_space` reports and warns about points it could not evaluate,
+  where it used to leave NaN silently.
 - **`anova_report` no longer reports wrong sums of squares when an
   interaction is partly confounded with a block.** The decomposition used
   marginal (cell-mean) sums of squares, which are exact only for orthogonal
@@ -74,6 +95,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of a misleading `0.0000`.
 
 ### Added
+- **Campaigns: runs with conditions.**
+  - `campaign_experiment(model, runs)` turns a per-run model (a `SymbolicModel`,
+    an `ODEExperiment` or an `Experiment` with design inputs) plus a list of run
+    conditions into one experiment, so the FIM, identifiability,
+    estimability and profile-likelihood tools take a whole campaign.
+  - `fit_campaign` fits one with exact Jacobians and calibrated SEs.
+  - `symbolic_experiment` wraps a `SymbolicModel` as an `Experiment`.
+  - `sequential_doe` accepts runs that carry their conditions, so models
+    with design inputs, including ODE models, work round by round.
+  - `ParametricSurrogate.from_symbolic` builds the mechanistic BO surrogate
+    from the same equation.
+- **Robust designs.** `robust_optimal_experiment(..., robust="expected"|"maximin")`
+  gives pseudo-Bayesian and max-min D-optimal designs over a sample of
+  parameter values. `design_efficiencies` scores designs over that sample.
+- **Identifiability and estimability.**
+  - `profile_likelihood(..., expression="k*K")` or `function=` profiles a
+    derived quantity, which can be identifiable when its parts are not.
+  - Multi-start estimation (`n_starts=`) warns when distinct optima tie,
+    as mirror solutions do.
+  - `EstimabilityResult.raw_norms`, and `mse_subset_selection` /
+    `estimability_rank(method="mse")`, choose how many parameters to
+    estimate by the mean-squared-error criterion of Wu, McAuley & Harris
+    (2011).
+  - Correlation matrices carry parameter names: `correlation_frame()` and
+    `correlation(a, b)`.
+  - `quiet_solver()` silences base-discopt solver logging, and profiles and
+    estimation use it by default.
+- **Discrimination.**
+  - `discriminate_compound` and `evaluate_discrimination_criterion` accept
+    `prior_fims`, so designs account for data already collected. With data
+    in hand, the compound design at weight 0 is now the D-optimal design
+    given the data, and at weight 1 the Buzzi-Ferraris design.
+  - A Box–Hill (1967) criterion (`DiscriminationCriterion.BH`).
+  - `likelihood_ratio_test(..., boundary=)` applies the chi-bar-squared
+    correction of Self & Liang (1987) for parameters on a bound.
+- **ODE experiments.**
+  - Public `jacobian`, `fim` and `response_function`.
+  - `check_accuracy` compares against twice the steps.
+  - `simulate` asks only for the inputs it uses.
+- **`fit_least_squares`.** `sigma=` gives known-noise standard errors, and it
+  warns, naming the parameters involved, when the Jacobian is rank-deficient.
+  So does `check_jacobian_rank`.
 - **Dynamic (ODE) experiments.** `ode_experiment(rhs, states=, parameters=,
   measured=, sample_times=, design_inputs=)` builds an `ODEExperiment`. Its
   sampling times, initial conditions and inputs (such as temperature) can be
