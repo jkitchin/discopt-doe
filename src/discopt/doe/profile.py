@@ -31,13 +31,15 @@ exploiting the profile likelihood. *Bioinformatics* 25, 1923-1929
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 from scipy.stats import chi2
 
-from discopt.doe._estimation import estimate_parameters
+from discopt.doe._estimation import DevianceFunction, estimate_parameters, parameter_bounds
+from discopt.doe._logging import quiet_solver
 from discopt.estimate import EstimationResult, Experiment
 
 ProfileShape = Literal["bounded", "one_sided_lower", "one_sided_upper", "flat"]
@@ -50,7 +52,8 @@ class ProfileLikelihoodResult:
     Attributes
     ----------
     parameter : str
-        Name of the profiled parameter.
+        Name of the profiled parameter, or of the profiled combination
+        (e.g. ``"k*K"``).
     theta_values : numpy.ndarray
         Parameter values visited, sorted ascending.
     neg_log_lik : numpy.ndarray
@@ -94,15 +97,29 @@ class ProfileLikelihoodResult:
 def profile_likelihood(
     experiment: Experiment,
     data: dict,
-    parameter_name: str,
+    parameter_name: str | None = None,
     *,
+    expression: str | None = None,
+    function: Callable[[Mapping[str, float]], float] | None = None,
+    name: str | None = None,
     confidence_level: float = 0.95,
     max_steps: int = 40,
     target_delta_loglik: float = 0.2,
     initial_estimate: EstimationResult | None = None,
     initial_step: float | None = None,
+    design: Mapping[str, float] | None = None,
+    quiet: bool = True,
 ) -> ProfileLikelihoodResult:
-    """Compute the profile likelihood for one parameter.
+    """Compute the profile likelihood for one parameter, or for a combination.
+
+    Pass ``parameter_name`` to profile a single parameter, or ``expression``
+    (e.g. ``"k*K"``, written in the parameter names) or ``function`` (any
+    callable of the parameter dict) to profile a derived quantity. A
+    combination is profiled by constrained re-optimization: at each value ``c``
+    the deviance is minimized over all parameters subject to ``g(theta) = c``.
+    This is how to show that a product is identifiable when its factors are
+    not: the profile of ``k*K`` is bounded while those of ``k`` and ``K`` are
+    flat.
 
     Parameters
     ----------
@@ -125,7 +142,19 @@ def profile_likelihood(
         Pre-computed global fit. If omitted, one is computed.
     initial_step : float, optional
         Override the starting step size. Defaults to a curvature-based
-        estimate from the FIM diagonal.
+        estimate from the FIM diagonal (for a combination, from the
+        delta-method variance of ``g``).
+    expression : str, optional
+        A combination of the parameters to profile instead of one parameter.
+    function : callable, optional
+        ``function(theta_dict) -> float``, a combination given as code.
+    name : str, optional
+        Label for a ``function`` in the result (defaults to its ``__name__``).
+    design : mapping, optional
+        Design conditions, for experiments whose fit needs them (e.g. an
+        :class:`~discopt.doe.ODEExperiment` with design inputs).
+    quiet : bool, default True
+        Hide the base solver's per-solve log messages.
 
     Returns
     -------
@@ -133,9 +162,53 @@ def profile_likelihood(
     """
     if not 0 < confidence_level < 1:
         raise ValueError("confidence_level must be in (0, 1)")
+    given = sum(x is not None for x in (parameter_name, expression, function))
+    if given != 1:
+        raise ValueError("pass exactly one of parameter_name, expression or function")
+    extra: dict[str, Any] = {"design": dict(design)} if design else {}
 
-    if initial_estimate is None:
-        initial_estimate = estimate_parameters(experiment, data)
+    with quiet_solver(quiet):
+        if initial_estimate is None:
+            initial_estimate = estimate_parameters(experiment, data, **extra)
+        if parameter_name is None:
+            return _profile_combination(
+                experiment,
+                data,
+                initial_estimate,
+                expression=expression,
+                function=function,
+                name=name,
+                confidence_level=confidence_level,
+                max_steps=max_steps,
+                target=target_delta_loglik,
+                initial_step=initial_step,
+                design=design,
+            )
+        return _profile_parameter(
+            experiment,
+            data,
+            parameter_name,
+            initial_estimate,
+            confidence_level=confidence_level,
+            max_steps=max_steps,
+            target_delta_loglik=target_delta_loglik,
+            initial_step=initial_step,
+            extra=extra,
+        )
+
+
+def _profile_parameter(
+    experiment: Experiment,
+    data: dict,
+    parameter_name: str,
+    initial_estimate: EstimationResult,
+    *,
+    confidence_level: float,
+    max_steps: int,
+    target_delta_loglik: float,
+    initial_step: float | None,
+    extra: dict[str, Any],
+) -> ProfileLikelihoodResult:
     if parameter_name not in initial_estimate.parameters:
         raise KeyError(
             f"{parameter_name!r} not in estimated parameters ({list(initial_estimate.parameters)})"
@@ -146,10 +219,9 @@ def profile_likelihood(
     threshold_offset = float(chi2.ppf(confidence_level, df=1))
     threshold = objective_hat + threshold_offset
 
-    em = experiment.create_model(**initial_estimate.parameters)
-    var = em.unknown_parameters.get(parameter_name)
-    lb = float(var.lb) if var is not None else -np.inf
-    ub = float(var.ub) if var is not None else np.inf
+    lb, ub = parameter_bounds(experiment, initial_estimate.parameters).get(
+        parameter_name, (-np.inf, np.inf)
+    )
 
     # Curvature-based initial step size from FIM diagonal.
     if initial_step is None:
@@ -179,6 +251,7 @@ def profile_likelihood(
         target=target_delta_loglik,
         other_init=dict(initial_estimate.parameters),
         warnings_out=warnings_out,
+        extra=extra,
     )
     upper_points, upper_obj = _profile_direction(
         experiment,
@@ -194,8 +267,39 @@ def profile_likelihood(
         target=target_delta_loglik,
         other_init=dict(initial_estimate.parameters),
         warnings_out=warnings_out,
+        extra=extra,
+    )
+    return _assemble(
+        parameter_name,
+        theta_hat,
+        objective_hat,
+        (lower_points, lower_obj),
+        (upper_points, upper_obj),
+        lb,
+        ub,
+        confidence_level,
+        threshold,
+        threshold_offset,
+        warnings_out,
     )
 
+
+def _assemble(
+    parameter_name: str,
+    theta_hat: float,
+    objective_hat: float,
+    lower: tuple[list[float], list[float]],
+    upper: tuple[list[float], list[float]],
+    lb: float,
+    ub: float,
+    confidence_level: float,
+    threshold: float,
+    threshold_offset: float,
+    warnings_out: list[str],
+) -> ProfileLikelihoodResult:
+    """Stitch two profile arms into a result: interval, shape and warnings."""
+    lower_points, lower_obj = lower
+    upper_points, upper_obj = upper
     # Stitch arms together (lower arm reversed so theta ascends).
     theta_vals = np.concatenate(
         [np.asarray(lower_points[::-1]), [theta_hat], np.asarray(upper_points)]
@@ -270,22 +374,226 @@ def profile_all(
     *,
     confidence_level: float = 0.95,
     initial_estimate: EstimationResult | None = None,
+    quiet: bool = True,
     **kwargs,
 ) -> dict[str, ProfileLikelihoodResult]:
     """Run :func:`profile_likelihood` for every unknown parameter."""
-    if initial_estimate is None:
-        initial_estimate = estimate_parameters(experiment, data)
-    return {
-        name: profile_likelihood(
-            experiment,
-            data,
-            name,
-            confidence_level=confidence_level,
-            initial_estimate=initial_estimate,
-            **kwargs,
+    with quiet_solver(quiet):
+        if initial_estimate is None:
+            design = kwargs.get("design")
+            initial_estimate = estimate_parameters(
+                experiment, data, **({"design": dict(design)} if design else {})
+            )
+        return {
+            name: profile_likelihood(
+                experiment,
+                data,
+                name,
+                confidence_level=confidence_level,
+                initial_estimate=initial_estimate,
+                quiet=quiet,
+                **kwargs,
+            )
+            for name in initial_estimate.parameter_names
+        }
+
+
+def _combination(
+    names: list[str],
+    expression: str | None,
+    function: Callable[[Mapping[str, float]], float] | None,
+    name: str | None,
+) -> tuple[str, Callable[[np.ndarray], float], Callable[[np.ndarray], np.ndarray] | None]:
+    """``(label, g(theta_vec), grad_g(theta_vec) or None)`` for the combination."""
+    if expression is not None:
+        import sympy
+
+        from discopt.doe.symbolic import parse_expression
+
+        expr = parse_expression(expression, names)
+        # Use the parser's own symbols: it creates them with assumptions
+        # (real=True), and a plain Symbol of the same name would differentiate
+        # to zero.
+        by_name = {sym.name: sym for sym in expr.free_symbols}
+        symbols = [by_name.get(n, sympy.Symbol(n, real=True)) for n in names]
+        g_fn = sympy.lambdify(symbols, expr, "numpy")
+        dg = sympy.lambdify(symbols, [sympy.diff(expr, s) for s in symbols], "numpy")
+
+        def g(v: np.ndarray) -> float:
+            return float(g_fn(*v))
+
+        def grad(v: np.ndarray) -> np.ndarray:
+            return np.asarray(dg(*v), dtype=float)
+
+        return (name or expression, g, grad)
+    assert function is not None
+
+    def g_call(v: np.ndarray) -> float:
+        return float(function(dict(zip(names, map(float, v)))))
+
+    return (name or getattr(function, "__name__", "g"), g_call, None)
+
+
+def _profile_combination(
+    experiment: Experiment,
+    data: dict,
+    estimate: EstimationResult,
+    *,
+    expression: str | None,
+    function: Callable[[Mapping[str, float]], float] | None,
+    name: str | None,
+    confidence_level: float,
+    max_steps: int,
+    target: float,
+    initial_step: float | None,
+    design: Mapping[str, float] | None,
+) -> ProfileLikelihoodResult:
+    """Profile ``g(theta)`` by minimizing the deviance subject to ``g(theta) = c``."""
+    from scipy.optimize import approx_fprime, minimize
+
+    names = list(estimate.parameter_names)
+    label, g, grad_g = _combination(names, expression, function, name)
+    theta_hat_d = {n: float(estimate.parameters[n]) for n in names}
+    dev = DevianceFunction(experiment, data, theta_hat_d, design=design)
+    theta_hat = dev.vector(theta_hat_d)
+    objective_hat = float(estimate.objective)
+    c_hat = g(theta_hat)
+    threshold_offset = float(chi2.ppf(confidence_level, df=1))
+    threshold = objective_hat + threshold_offset
+
+    # Optimize in log space for parameters bounded away from zero (rate
+    # constants, equilibrium constants): along a ridge they move over decades,
+    # and a linear scaling leaves SLSQP badly conditioned. Others are scaled
+    # by their estimate.
+    bnds = parameter_bounds(experiment, theta_hat_d)
+    lo = np.array([bnds.get(n, (-np.inf, np.inf))[0] for n in names], dtype=float)
+    hi = np.array([bnds.get(n, (-np.inf, np.inf))[1] for n in names], dtype=float)
+    logv = np.isfinite(lo) & (lo > 0)
+    scale = np.maximum(np.abs(theta_hat), 1e-12)
+
+    def to_theta(u: np.ndarray) -> np.ndarray:
+        return np.where(logv, np.exp(np.where(logv, u, 0.0)), u * scale)
+
+    def dtheta(u: np.ndarray) -> np.ndarray:
+        return np.where(logv, to_theta(u), scale)
+
+    def to_u(theta: np.ndarray) -> np.ndarray:
+        return np.where(logv, np.log(np.where(logv, np.maximum(theta, 1e-300), 1.0)), theta / scale)
+
+    box = []
+    for i in range(len(names)):
+        if logv[i]:
+            box.append((np.log(lo[i]), np.log(hi[i]) if np.isfinite(hi[i]) else None))
+        else:
+            box.append(
+                (
+                    lo[i] / scale[i] if np.isfinite(lo[i]) else None,
+                    hi[i] / scale[i] if np.isfinite(hi[i]) else None,
+                )
+            )
+
+    def grad_c(v: np.ndarray) -> np.ndarray:
+        if grad_g is not None:
+            return grad_g(v)
+        h = 1e-6 * np.maximum(np.abs(v), 1e-8)
+        return approx_fprime(v, g, h)
+
+    if initial_step is None:
+        cov = np.asarray(getattr(estimate, "covariance", None), dtype=float)
+        dg = grad_c(theta_hat)
+        var_g = float(dg @ cov @ dg) if cov.shape == (len(names), len(names)) else np.nan
+        if np.isfinite(var_g) and var_g > 0:
+            # D(c) ~ D_hat + (c - c_hat)^2 / var_g: aim for a step of ~target.
+            initial_step = 0.5 * float(np.sqrt(target * var_g))
+        else:
+            initial_step = 1e-2 * max(abs(c_hat), 1.0)
+
+    def f(u: np.ndarray) -> float:
+        val = dev(to_theta(u))
+        return val if np.isfinite(val) else 1e300
+
+    def df(u: np.ndarray) -> np.ndarray:
+        th = to_theta(u)
+        gr = dev.gradient(th)
+        if gr is None:
+            h = 1e-7 * np.maximum(np.abs(u), 1e-6)
+            return approx_fprime(u, f, h)
+        return np.asarray(gr) * dtheta(u)
+
+    def attempt(c: float, u0: np.ndarray) -> tuple[np.ndarray, float] | None:
+        cons = {
+            "type": "eq",
+            "fun": lambda u: g(to_theta(u)) - c,
+            "jac": lambda u: grad_c(to_theta(u)) * dtheta(u),
+        }
+        res = minimize(
+            f,
+            u0,
+            jac=df,
+            method="SLSQP",
+            bounds=box,
+            constraints=[cons],
+            options={"maxiter": 1000, "ftol": 1e-12},
         )
-        for name in initial_estimate.parameter_names
-    }
+        u = np.asarray(res.x, dtype=float)
+        if (
+            not res.success
+            or not np.isfinite(res.fun)
+            or abs(g(to_theta(u)) - c) > 1e-6 * max(abs(c), 1.0)
+        ):
+            return None
+        return u, float(res.fun)
+
+    u_hat = to_u(theta_hat)
+
+    def solve(c: float, u0: np.ndarray) -> tuple[np.ndarray, float] | None:
+        return attempt(c, u0) or attempt(c, u_hat)
+
+    warnings_out: list[str] = []
+
+    def arm(direction: int) -> tuple[list[float], list[float]]:
+        cs: list[float] = []
+        objs: list[float] = []
+        c_cur, obj_cur, y = c_hat, objective_hat, u_hat
+        step = float(initial_step)
+        for _ in range(max_steps):
+            c_new = c_cur + direction * step
+            out = solve(c_new, y)
+            if out is None:
+                step /= 2.0
+                if step < 1e-10 * max(abs(c_hat), 1.0):
+                    warnings_out.append(
+                        f"{'upper' if direction > 0 else 'lower'} arm stopped near "
+                        f"{c_new:.6g}: g = c could not be met within the parameter bounds"
+                    )
+                    break
+                continue
+            y, obj_new = out
+            cs.append(c_new)
+            objs.append(obj_new)
+            delta = obj_new - obj_cur
+            c_cur, obj_cur = c_new, obj_new
+            if obj_new > threshold:
+                break
+            factor = target / delta if delta > 0 else 10.0
+            step *= max(0.1, min(10.0, factor))
+        return cs, objs
+
+    lower = arm(-1)
+    upper = arm(+1)
+    return _assemble(
+        label,
+        c_hat,
+        objective_hat,
+        lower,
+        upper,
+        -np.inf,
+        np.inf,
+        confidence_level,
+        threshold,
+        threshold_offset,
+        warnings_out,
+    )
 
 
 def _profile_direction(
@@ -303,6 +611,7 @@ def _profile_direction(
     target: float,
     other_init: dict[str, float],
     warnings_out: list[str],
+    extra: dict[str, Any] | None = None,
 ) -> tuple[list[float], list[float]]:
     """Walk out in one direction, re-solving at each step.
 
@@ -331,6 +640,7 @@ def _profile_direction(
                 data,
                 initial_guess=warm_no_fixed,
                 fixed_parameters={name: proposal},
+                **(extra or {}),
             )
             new_obj = float(res.objective)
         except (RuntimeError, ValueError, np.linalg.LinAlgError) as exc:  # pragma: no cover

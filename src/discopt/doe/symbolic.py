@@ -35,6 +35,8 @@ both ultimately call ``eval``.
 
 from __future__ import annotations
 
+import warnings
+
 import ast
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -373,6 +375,7 @@ def fit_least_squares(
     bounds: Mapping[str, tuple[float, float]] | None = None,
     max_nfev: int | None = None,
     level: float = 0.95,
+    sigma: float | str | None = None,
 ) -> dict[str, Any]:
     """Fit a user-defined model to completed runs by nonlinear least squares.
 
@@ -395,6 +398,15 @@ def fit_least_squares(
         Cap on residual evaluations.
     level : float, default 0.95
         Confidence level of ``ci_lower``/``ci_upper``.
+    sigma : float, "declared", "residual" or None
+        The noise level behind the reported uncertainty. ``None`` (default) uses
+        the residual estimate when there are degrees of freedom left, else the
+        model's declared ``measurement_error``. ``"declared"`` always uses the
+        declared value, and a float uses that value: use either when the noise
+        is known from replicates or the instrument, since a residual estimate
+        from a few degrees of freedom is itself very uncertain (the intervals
+        then use the normal critical value). ``"residual"`` insists on the
+        residual estimate.
 
     Returns
     -------
@@ -459,16 +471,29 @@ def fit_least_squares(
     # declared sigma is often a guess; fall back to the declared one otherwise.
     J = model.design_matrix(theta, designs)
     dof = n_obs - n_p
-    if dof > 0 and rss > 0:
-        sigma2, sigma_source = rss / dof, "residual"
+    known = False
+    if sigma is None:
+        # No residual to estimate the noise from (no degrees of freedom, or an
+        # exact fit) means falling back to the declared sigma. Reporting
+        # sigma = 0 would make `fim` and `sigma` describe different scales, and
+        # a caller rescaling the FIM by (sigma / declared)**2 -- as the CLI does
+        # to keep the workbook prior on the declared scale -- would zero it out
+        # and lose the design's information entirely.
+        sigma = "residual" if (dof > 0 and rss > 0) else "declared"
+    if isinstance(sigma, str):
+        if sigma == "residual":
+            if dof <= 0:
+                raise ValueError("sigma='residual' needs more runs than parameters")
+            sigma2, sigma_source = rss / dof, "residual"
+        elif sigma == "declared":
+            sigma2, sigma_source, known = float(model.measurement_error) ** 2, "declared", True
+        else:
+            raise ValueError(f"sigma must be a number, 'declared' or 'residual', got {sigma!r}")
     else:
-        # No degrees of freedom left, or an exact fit: there is no residual to
-        # estimate the noise from. Reporting sigma = 0 would make `fim` and
-        # `sigma` describe different scales, and a caller rescaling the FIM by
-        # (sigma / declared)**2 -- as the CLI does to keep the workbook prior on
-        # the declared scale -- would zero it out and lose the design's
-        # information entirely.
-        sigma2, sigma_source = float(model.measurement_error) ** 2, "declared"
+        if not (float(sigma) > 0 and np.isfinite(float(sigma))):
+            raise ValueError(f"sigma must be positive and finite, got {sigma!r}")
+        sigma2, sigma_source, known = float(sigma) ** 2, "given", True
+    check_jacobian_rank(J, names)
     # One sigma for both, so the information matrix and the reported
     # uncertainty describe the same thing: inv(fim) == cov.
     fim = J.T @ J / sigma2
@@ -481,7 +506,11 @@ def fit_least_squares(
     diag = np.diag(cov)
     std_errors = np.sqrt(np.where(diag >= 0, diag, np.nan))
 
-    if dof > 0:
+    if known:
+        from scipy.stats import norm
+
+        crit = float(norm.ppf(0.5 + float(level) / 2.0))
+    elif dof > 0:
         from scipy.stats import t as t_dist
 
         crit = float(t_dist.ppf(0.5 + float(level) / 2.0, dof))
@@ -506,6 +535,46 @@ def fit_least_squares(
         "success": bool(result.success),
         "message": str(result.message),
     }
+
+
+def check_jacobian_rank(J: np.ndarray, names: Sequence[str], *, stacklevel: int = 3) -> int:
+    """Warn when a sensitivity matrix cannot identify every parameter; return its rank.
+
+    The rank is taken on the column-normalized matrix, so parameters on very
+    different scales are not mistaken for unidentifiable ones. The warning names
+    the parameters in the weakest direction, which is what to fix, reparameterize,
+    or design new runs for; their standard errors are otherwise meaningless
+    (``nan`` or astronomically large).
+    """
+    J = np.asarray(J, dtype=np.float64)
+    names = list(names)
+    if J.size == 0 or J.shape[1] == 0:
+        return 0
+    if not np.all(np.isfinite(J)):
+        warnings.warn(
+            "the sensitivity matrix has non-finite entries; standard errors are meaningless",
+            UserWarning,
+            stacklevel=stacklevel,
+        )
+        return 0
+    norms = np.linalg.norm(J, axis=0)
+    Js = J / np.where(norms > 0, norms, 1.0)
+    _, s, vt = np.linalg.svd(Js, full_matrices=False)
+    tol = (s.max() if s.size else 0.0) * max(J.shape) * np.finfo(float).eps * 1e3
+    rank = int(np.sum(s > tol))
+    dead = [n for n, v in zip(names, norms) if not v > 0]
+    if dead or rank < len(names):
+        weak = vt[-1] if vt.shape[0] == len(names) else np.zeros(len(names))
+        involved = dead or [n for n, w in zip(names, weak) if abs(w) > 0.1]
+        warnings.warn(
+            f"the data cannot identify every parameter: sensitivity rank {rank} of "
+            f"{len(names)}; the unidentified direction involves {involved}. Their "
+            "standard errors are meaningless: fix a parameter, reparameterize, or add "
+            "runs that separate them.",
+            UserWarning,
+            stacklevel=stacklevel,
+        )
+    return rank
 
 
 def basis_evaluator(

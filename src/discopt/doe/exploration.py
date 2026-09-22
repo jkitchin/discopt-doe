@@ -6,7 +6,8 @@ the information landscape and identify promising experimental regions.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import warnings
+from dataclasses import dataclass, field
 from itertools import product
 
 import numpy as np
@@ -42,11 +43,17 @@ class ExplorationResult:
         ``"condition_number"``.
     design_names : list[str]
         Ordered design variable names.
+    n_failed : int
+        Grid points where the FIM could not be computed; their metrics are NaN.
+    failures : list[dict]
+        Up to the first ten failed points, each ``{"design": ..., "error": ...}``.
     """
 
     grid: dict[str, np.ndarray]
     metrics: dict[str, np.ndarray]
     design_names: list[str]
+    n_failed: int = 0
+    failures: list[dict] = field(default_factory=list)
 
     def best_point(self, criterion: str = "log_det_fim") -> dict[str, float]:
         """Find the grid point with the best criterion value.
@@ -206,7 +213,12 @@ def explore_design_space(
     metric_keys = ["log_det_fim", "trace_fim_inv", "min_eigenvalue", "condition_number"]
     metrics = {key: np.full(grid_shape, np.nan) for key in metric_keys}
 
-    # Evaluate FIM at each grid point
+    # Evaluate FIM at each grid point. A point whose FIM cannot be computed is
+    # left NaN, but counted and reported: silently blank regions used to look
+    # like "no information here" on a map.
+    n_points = int(np.prod(grid_shape))
+    n_failed = 0
+    failures: list[dict] = []
     for idx in product(*(range(n) for n in grid_shape)):
         design_point = {name: float(grid_arrays[i][idx[i]]) for i, name in enumerate(design_names)}
         try:
@@ -214,12 +226,29 @@ def explore_design_space(
             m = fim_result.metrics
             for key in metric_keys:
                 metrics[key][idx] = m[key]
-        except Exception:
-            # Leave as NaN for infeasible points
-            continue
+        except Exception as exc:  # noqa: BLE001 - reported below
+            n_failed += 1
+            if len(failures) < 10:
+                failures.append({"design": design_point, "error": f"{type(exc).__name__}: {exc}"})
+
+    if n_failed == n_points:
+        raise ValueError(
+            f"the FIM could not be computed at any of the {n_points} grid points; "
+            f"first error: {failures[0]['error']}"
+        )
+    if n_failed:
+        warnings.warn(
+            f"the FIM could not be computed at {n_failed} of {n_points} grid points; their "
+            f"metrics are NaN (see ExplorationResult.failures). First error: "
+            f"{failures[0]['error']}",
+            UserWarning,
+            stacklevel=2,
+        )
 
     return ExplorationResult(
         grid={name: grid_arrays[i] for i, name in enumerate(design_names)},
         metrics=metrics,
         design_names=design_names,
+        n_failed=n_failed,
+        failures=failures,
     )

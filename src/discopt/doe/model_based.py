@@ -197,6 +197,50 @@ class ParametricSurrogate:
 
         self._compile()
 
+    @classmethod
+    def from_symbolic(
+        cls,
+        model: Any,
+        theta: dict[str, float] | None = None,
+        *,
+        measurement_noise_var: float | None = None,
+        parameter_bounds: dict[str, tuple[float, float]] | None = None,
+        regularize: float = 1e-12,
+    ) -> "ParametricSurrogate":
+        """Build the surrogate straight from a :class:`~discopt.doe.SymbolicModel`.
+
+        The equation is written once, as a string, and used both to fit and to
+        predict: no separate :mod:`discopt.modeling` Experiment is needed. The
+        model's inputs are the surrogate's input columns, in order.
+
+        Parameters
+        ----------
+        model : SymbolicModel
+        theta : dict, optional
+            Starting parameter values for the first fit.
+        measurement_noise_var : float, optional
+            Defaults to the model's ``measurement_error ** 2``.
+        parameter_bounds : dict name -> (lb, ub), optional
+            Bounds for the least-squares refit (e.g. to keep a rate constant
+            positive).
+        regularize : float, default 1e-12
+        """
+        from discopt.doe.runs import symbolic_experiment
+
+        noise = (
+            float(model.measurement_error) ** 2
+            if measurement_noise_var is None
+            else float(measurement_noise_var)
+        )
+        return cls(
+            symbolic_experiment(model, parameter_bounds=parameter_bounds),
+            input_names=list(model.input_names),
+            response_name=model.response_name,
+            initial_guess=dict(theta or {}),
+            measurement_noise_var=noise,
+            regularize=regularize,
+        )
+
     # ------------------------------------------------------------------
     # JIT compilation of f(design, theta) and its parameter Jacobian
     # ------------------------------------------------------------------
