@@ -6,6 +6,9 @@ Tools for the chemical-engineering estimability literature:
   rank-revealing QR on the scaled sensitivity matrix.
 - ``collinearity_index`` : Brun, Reichert & Kuensch (2001) collinearity
   index gamma_K for a user-specified parameter subset.
+- ``mse_subset_selection`` : Wu, McAuley & Harris (2011) choice of *how
+  many* ranked parameters to estimate, from data, by the corrected critical
+  ratio (a mean-squared-error trade-off between bias and variance).
 - ``d_optimal_subset`` : Chu & Hahn (2007, 2012) D-optimal subset
   selection. ``method="auto"`` dispatches to enumeration for small
   problems and to the greedy Yao ranking for larger ones. A MINLP
@@ -36,9 +39,10 @@ parameterization itself is in question.
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from itertools import combinations
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import scipy.linalg
@@ -64,6 +68,16 @@ class EstimabilityResult:
         Brun gamma_K of the recommended subset.
     parameter_names : list[str]
         Original (unranked) parameter order, for reference.
+    raw_norms : numpy.ndarray
+        Unprojected 2-norms of the scaled sensitivity columns, in ``ranking``
+        order. Compare with ``projected_norms``: a parameter weak in both has a
+        small effect; one strong raw but weak projected is collinear with
+        parameters ranked above it.
+    method : str
+        ``"cutoff"`` (the recommended subset uses ``cutoff``) or ``"mse"``
+        (it uses :func:`mse_subset_selection`).
+    mse : MSESubsetResult or None
+        The mean-squared-error table when ``method="mse"``.
     """
 
     ranking: list[str]
@@ -71,6 +85,69 @@ class EstimabilityResult:
     recommended_subset: list[str]
     collinearity_index: float
     parameter_names: list[str]
+    raw_norms: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    method: str = "cutoff"
+    mse: MSESubsetResult | None = None
+
+
+@dataclass
+class MSESubsetResult:
+    """How many ranked parameters to estimate: Wu et al. (2011).
+
+    For each ``k``, the top ``k`` ranked parameters are estimated and the rest
+    held at their nominal values, giving the weighted least-squares objective
+    ``J_k``. With ``p`` parameters and ``N`` observations,
+
+    - critical ratio ``r_C,k = (J_k - J_p) / (p - k)``;
+    - truncated estimate ``r_CKub,k = max(r_C,k - 1, 2 r_C,k / (p - k + 2))``;
+    - corrected critical ratio ``r_CC,k = (p - k) / N * (r_CKub,k - 1)``,
+      with ``r_CC,p = 0`` (estimate everything).
+
+    The recommended ``k`` has the lowest ``r_CC,k``: it is the simplified model
+    expected to give the most accurate predictions, trading the bias of fixing
+    parameters against the variance of estimating them. ``r_C,k`` near 1 means
+    the fixed values are consistent with the data; much larger means fixing
+    them biases the fit. The objective must be weighted by the true measurement
+    uncertainties (the ``measurement_error`` of the experiment) for the ratios
+    to be calibrated.
+
+    Attributes
+    ----------
+    ranking : list[str]
+        Parameters in estimability order.
+    k : numpy.ndarray
+        ``1 .. p``.
+    objectives : numpy.ndarray
+        ``J_k``.
+    critical_ratios : numpy.ndarray
+        ``r_C,k`` (``nan`` at ``k = p``).
+    corrected_ratios : numpy.ndarray
+        ``r_CC,k``.
+    recommended_k : int
+    recommended_subset : list[str]
+    n_observations : int
+    """
+
+    ranking: list[str]
+    k: np.ndarray
+    objectives: np.ndarray
+    critical_ratios: np.ndarray
+    corrected_ratios: np.ndarray
+    recommended_k: int
+    recommended_subset: list[str]
+    n_observations: int
+
+    def summary(self) -> str:
+        lines = [f"{'k':>3s} {'estimated (added)':<22s} {'J_k':>12s} {'r_C':>10s} {'r_CC':>10s}"]
+        for i, kk in enumerate(self.k):
+            mark = "  <- recommended" if int(kk) == self.recommended_k else ""
+            rc = self.critical_ratios[i]
+            rc_s = "       ---" if not np.isfinite(rc) else f"{rc:10.3f}"
+            lines.append(
+                f"{int(kk):3d} {'+' + self.ranking[int(kk) - 1]:<22s} "
+                f"{self.objectives[i]:12.4f} {rc_s} {self.corrected_ratios[i]:10.4f}{mark}"
+            )
+        return "\n".join(lines)
 
 
 def _scaled_sensitivity(
@@ -132,6 +209,8 @@ def estimability_rank(
     cutoff: float = 0.04,
     parameter_scales: dict[str, float] | None = None,
     noise_covariance: np.ndarray | None = None,
+    method: Literal["cutoff", "mse"] = "cutoff",
+    data: Mapping[str, Any] | None = None,
     _cache: tuple[np.ndarray, list[str]] | None = None,
 ) -> EstimabilityResult:
     """Rank parameters by estimability (Yao et al. 2003).
@@ -164,12 +243,24 @@ def estimability_rank(
     noise_covariance : numpy.ndarray, optional
         Full noise covariance. Defaults to the diagonal
         ``ExperimentModel.measurement_error`` from ``experiment``.
+    method : {"cutoff", "mse"}, default "cutoff"
+        How the recommended subset is chosen. ``"cutoff"`` applies ``cutoff``
+        to the projected norms (needs no data). ``"mse"`` fits the ranked
+        subsets to ``data`` and picks the size with the lowest corrected
+        critical ratio (Wu et al. 2011; see :func:`mse_subset_selection`).
+    data : mapping, optional
+        Observed responses, required for ``method="mse"``.
 
     Returns
     -------
     EstimabilityResult
-        Ranking, projected norms, recommended subset, collinearity index.
+        Ranking, projected and raw norms, recommended subset, collinearity
+        index (and the MSE table for ``method="mse"``).
     """
+    if method not in ("cutoff", "mse"):
+        raise ValueError(f"method must be 'cutoff' or 'mse', got {method!r}")
+    if method == "mse" and data is None:
+        raise ValueError("method='mse' needs the observed data (data=...)")
     if _cache is not None:
         Z, names = _cache
     else:
@@ -186,8 +277,16 @@ def estimability_rank(
     projected[:k] = np.abs(np.diag(R)[:k])
 
     ranking = [names[i] for i in piv]
+    raw = np.linalg.norm(Z, axis=0)[piv]
     top = projected[0] if projected[0] > 0 else 1.0
     recommended = [ranking[i] for i in range(n_params) if projected[i] / top >= cutoff]
+    mse_result = None
+    if method == "mse":
+        assert data is not None
+        mse_result = mse_subset_selection(
+            experiment, data, param_values, ranking=ranking, design_values=design_values
+        )
+        recommended = list(mse_result.recommended_subset)
 
     coll_idx = (
         collinearity_index(
@@ -209,6 +308,99 @@ def estimability_rank(
         recommended_subset=recommended,
         collinearity_index=coll_idx,
         parameter_names=names,
+        raw_norms=raw,
+        method=method,
+        mse=mse_result,
+    )
+
+
+def mse_subset_selection(
+    experiment: Experiment,
+    data: Mapping[str, Any],
+    param_values: Mapping[str, float],
+    *,
+    ranking: Sequence[str] | None = None,
+    design_values: Mapping[str, float] | None = None,
+    n_starts: int = 1,
+) -> MSESubsetResult:
+    """Choose how many ranked parameters to estimate (Wu, McAuley & Harris 2011).
+
+    Fits the model ``p`` times: with the top ``k`` parameters of ``ranking``
+    estimated and the rest held at ``param_values``, for ``k = 1 .. p``. The
+    corrected critical ratio ``r_CC,k`` of each fit (see
+    :class:`MSESubsetResult`) estimates how much the simplified model's
+    prediction error exceeds the full model's, and the ``k`` with the lowest
+    value is recommended. Unlike a fixed cutoff on the ranking, this uses the
+    data: it keeps a weakly estimable parameter fixed when fixing it costs less
+    in bias than estimating it costs in variance, and estimates it when the
+    fixed value is visibly wrong.
+
+    Parameters
+    ----------
+    experiment : Experiment
+    data : mapping
+        Observed responses (as for :func:`discopt.estimate.estimate_parameters`).
+    param_values : mapping
+        Nominal values; the non-estimated parameters are held here, and they
+        start each fit.
+    ranking : sequence of str, optional
+        Estimability order. Defaults to :func:`estimability_rank` at
+        ``param_values``.
+    design_values : mapping, optional
+        Design conditions for experiments whose fit needs them.
+    n_starts : int, default 1
+        Starting points per fit (see :func:`discopt.doe._estimation.estimate_parameters`).
+
+    References
+    ----------
+    Wu, S., McAuley, K. B. & Harris, T. J. Selection of simplified models: II.
+    Development of a model selection criterion based on mean squared error.
+    *Can. J. Chem. Eng.* 89, 325-336 (2011).
+    """
+    from discopt.doe._estimation import estimate_parameters
+
+    if ranking is None:
+        ranking = estimability_rank(experiment, dict(param_values), design_values).ranking
+    ranking = list(ranking)
+    p = len(ranking)
+    if p == 0:
+        raise ValueError("no parameters to rank")
+    extra: dict[str, Any] = {"design": dict(design_values)} if design_values else {}
+    nominal = {k: float(v) for k, v in param_values.items()}
+    n_obs = int(sum(np.atleast_1d(np.asarray(v)).size for v in data.values()))
+
+    J = np.zeros(p)
+    for k in range(1, p + 1):
+        fixed = {name: nominal[name] for name in ranking[k:]}
+        res = estimate_parameters(
+            experiment,
+            data,
+            initial_guess=nominal,
+            fixed_parameters=fixed or None,
+            n_starts=n_starts,
+            **extra,
+        )
+        J[k - 1] = float(res.objective)
+
+    Jp = J[-1]
+    k_arr = np.arange(1, p + 1)
+    rc = np.full(p, np.nan)
+    rcc = np.zeros(p)
+    for i, k in enumerate(k_arr[:-1]):
+        r = (J[i] - Jp) / (p - k)
+        rc[i] = r
+        r_kub = max(r - 1.0, 2.0 * r / (p - k + 2.0))
+        rcc[i] = (p - k) / n_obs * (r_kub - 1.0)
+    best = int(k_arr[int(np.argmin(rcc))])
+    return MSESubsetResult(
+        ranking=ranking,
+        k=k_arr,
+        objectives=J,
+        critical_ratios=rc,
+        corrected_ratios=rcc,
+        recommended_k=best,
+        recommended_subset=ranking[:best],
+        n_observations=n_obs,
     )
 
 

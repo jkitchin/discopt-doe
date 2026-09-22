@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import Callable, Union
+from typing import Any, Callable, Mapping, Sequence, Union
 
 import numpy as np
 
@@ -46,20 +46,25 @@ class DoERound:
         ``BatchDesignResult`` when ``experiments_per_round > 1``.
     data_collected : dict[str, float or numpy.ndarray] or None
         New data collected in this round (if experiment runner provided).
+    runs : list of dict or None
+        With ``initial_runs``: every run (conditions and responses) that this
+        round's estimate was fitted to.
     """
 
     round: int
     estimation: EstimationResult
     design: DesignResult | BatchDesignResult
     data_collected: dict[str, Union[float, np.ndarray]] | None = None
+    runs: list[dict[str, Any]] | None = None
 
 
 def sequential_doe(
     experiment: Experiment,
-    initial_data: dict[str, Union[float, np.ndarray]],
+    initial_data: dict[str, Union[float, np.ndarray]] | None,
     initial_guess: dict[str, float],
     design_bounds: dict[str, tuple[float, float]],
     *,
+    initial_runs: Sequence[Mapping[str, Any]] | None = None,
     n_rounds: int = 5,
     criterion: str = DesignCriterion.D_OPTIMAL,
     experiments_per_round: int = 1,
@@ -69,16 +74,31 @@ def sequential_doe(
 ) -> list[DoERound]:
     """Run the full sequential MBDoE loop.
 
+    There are two ways to hand over the data. **Runs with conditions**
+    (``initial_runs``, recommended whenever the model has design inputs): each
+    run is a row holding its design-input values *and* its measured responses,
+    every round refits one campaign (:func:`~discopt.doe.campaign_experiment`)
+    over all runs so far, and ``run_experiment`` returns the responses of the
+    run it was given, under the model's own response names (e.g. ``{"y": 3.2}``
+    or ``{"A@2": 0.41, "A@5": 0.12}``). Nothing needs a fresh response key. The
+    older **response-keyed** form (``initial_data``) is kept for models without
+    design inputs; see the caveat under ``run_experiment``.
+
     Parameters
     ----------
-    experiment : Experiment
-        Experiment definition.
-    initial_data : dict
-        Initial experimental data for first estimation.
+    experiment : Experiment, ODEExperiment, or SymbolicModel
+        The model of one run. A :class:`~discopt.doe.SymbolicModel` needs
+        ``initial_runs``.
+    initial_data : dict or None
+        Response-keyed data for the first estimation. Pass ``None`` when
+        giving ``initial_runs``.
     initial_guess : dict[str, float]
         Starting parameter estimates.
     design_bounds : dict[str, tuple[float, float]]
         Bounds on design variables.
+    initial_runs : sequence of dict, optional
+        Runs with conditions: each row gives every design input and the
+        measured responses (missing or NaN responses are skipped).
     n_rounds : int, default 5
         Number of DoE rounds.
     criterion : str, default DesignCriterion.D_OPTIMAL
@@ -128,6 +148,23 @@ def sequential_doe(
     """
     if experiments_per_round < 1:
         raise ValueError(f"experiments_per_round must be >= 1, got {experiments_per_round}")
+    if initial_runs is not None:
+        if initial_data:
+            raise ValueError("pass either initial_data or initial_runs, not both")
+        return _sequential_runs(
+            experiment,
+            list(initial_runs),
+            initial_guess,
+            design_bounds,
+            n_rounds=n_rounds,
+            criterion=criterion,
+            experiments_per_round=experiments_per_round,
+            batch_strategy=batch_strategy,
+            run_experiment=run_experiment,
+            callback=callback,
+        )
+    if initial_data is None:
+        raise ValueError("initial_data is required unless initial_runs is given")
 
     history = []
     current_guess = dict(initial_guess)
@@ -222,4 +259,87 @@ def sequential_doe(
         if run_experiment is None:
             break
 
+    return history
+
+
+def _sequential_runs(
+    model: Any,
+    runs: list[Mapping[str, Any]],
+    initial_guess: dict[str, float],
+    design_bounds: dict[str, tuple[float, float]],
+    *,
+    n_rounds: int,
+    criterion: str,
+    experiments_per_round: int,
+    batch_strategy: str,
+    run_experiment: Callable[[dict[str, float]], dict[str, float]] | None,
+    callback: Callable[[DoERound], None] | None,
+) -> list[DoERound]:
+    """The loop on runs-with-conditions: refit the campaign, design, run, repeat."""
+    from discopt.doe.runs import campaign_experiment, symbolic_experiment
+    from discopt.doe.symbolic import SymbolicModel
+
+    design_model = (
+        symbolic_experiment(model, input_bounds=design_bounds)
+        if isinstance(model, SymbolicModel)
+        else model
+    )
+    history: list[DoERound] = []
+    current_guess = dict(initial_guess)
+    all_runs = [dict(r) for r in runs]
+    if not all_runs:
+        raise ValueError("initial_runs is empty")
+
+    for round_idx in range(n_rounds):
+        campaign = campaign_experiment(model, all_runs)
+        data = campaign.data_from_runs(all_runs)
+        est = campaign.estimate(data, initial_guess=current_guess)
+        prior_fim = est.fim
+
+        design: DesignResult | BatchDesignResult
+        if experiments_per_round == 1:
+            design = optimal_experiment(
+                design_model,
+                est.parameters,
+                design_bounds,
+                criterion=criterion,
+                prior_fim=prior_fim,
+            )
+            round_designs = [design.design]
+        else:
+            design = batch_optimal_experiment(
+                design_model,
+                est.parameters,
+                design_bounds,
+                n_experiments=experiments_per_round,
+                criterion=criterion,
+                strategy=batch_strategy,
+                prior_fim=prior_fim,
+            )
+            round_designs = list(design.designs)
+
+        round_result = DoERound(
+            round=round_idx,
+            estimation=est,
+            design=design,
+            data_collected=None,
+            runs=[dict(r) for r in all_runs],
+        )
+        if run_experiment is not None:
+            collected: dict[str, np.ndarray] = {}
+            for d in round_designs:
+                measured = dict(run_experiment(dict(d)))
+                all_runs.append({**d, **measured})
+                for key, val in measured.items():
+                    arr = np.atleast_1d(val)
+                    collected[key] = (
+                        arr if key not in collected else np.concatenate([collected[key], arr])
+                    )
+            round_result.data_collected = collected
+            current_guess = dict(est.parameters)
+        history.append(round_result)
+        if callback is not None:
+            callback(round_result)
+        if run_experiment is None:
+            break
     return history

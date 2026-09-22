@@ -22,7 +22,8 @@ Usage
 References
 ----------
 Akaike (1973); Schwarz (1978); Hurvich & Tsai (1989) AICc;
-Wilks (1938) LRT; Vuong (1989) non-nested LRT.
+Wilks (1938) LRT; Self & Liang (1987) LRT on the boundary;
+Vuong (1989) non-nested LRT.
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
+from math import comb
+
 from scipy.stats import chi2, norm
 
 from discopt.estimate import EstimationResult, Experiment
@@ -164,6 +167,7 @@ def likelihood_ratio_test(
     nested_name: str = "nested",
     full_name: str = "full",
     alpha: float = 0.05,
+    boundary: int = 0,
 ) -> ModelSelectionResult:
     """Likelihood-ratio test on a nested pair (Wilks 1938).
 
@@ -181,6 +185,21 @@ def likelihood_ratio_test(
         share ``n_observations``.
     nested_name, full_name : str
         Labels to use in the result's ``scores`` and ``best_model``.
+    alpha : float, default 0.05
+        Significance level for the "best" decision.
+    boundary : int, default 0
+        How many of the ``df`` tested parameters sit **on the boundary** of
+        their range under the null -- e.g. a rate constant or adsorption
+        constant constrained ``>= 0`` whose null value is 0, or a variance
+        component. Wilks' χ² then no longer applies: half the time the
+        constrained fit lands exactly on the boundary and ``G² = 0``. With
+        ``boundary = b`` the null distribution is the χ̄² mixture
+        ``Σ_{j=0}^{b} C(b, j) 2^{-b} χ²_{df - b + j}`` (χ²_0 a point mass at 0;
+        Self & Liang 1987), which halves the p-value in the common
+        one-parameter case. The weights assume the boundary parameters' Fisher
+        information is orthogonal to that of the other tested parameters;
+        otherwise they depend on the information matrix and this is an
+        approximation.
 
     Returns
     -------
@@ -206,6 +225,8 @@ def likelihood_ratio_test(
 
     G2 = float(nested.objective - full.objective)
     df = p_full - p_nested
+    if not 0 <= int(boundary) <= df:
+        raise ValueError(f"boundary must be between 0 and df = {df}, got {boundary}")
     warnings_out: list[str] = []
     if G2 < 0:
         warnings_out.append(
@@ -213,7 +234,7 @@ def likelihood_ratio_test(
             "Likely a convergence issue; treat p-value with suspicion."
         )
         G2 = max(G2, 0.0)
-    p_value = float(chi2.sf(G2, df=df))
+    p_value = _chibar_sf(G2, df, int(boundary))
     best = full_name if p_value < alpha else nested_name
 
     return ModelSelectionResult(
@@ -325,6 +346,19 @@ def vuong_test(
         z_statistic=z,
         warnings=warnings_out,
     )
+
+
+def _chibar_sf(g2: float, df: int, boundary: int) -> float:
+    """Tail probability of the χ̄² mixture for ``boundary`` boundary parameters."""
+    if boundary == 0:
+        return float(chi2.sf(g2, df=df))
+    total = 0.0
+    for j in range(boundary + 1):
+        k = df - boundary + j
+        weight = comb(boundary, j) / 2.0**boundary
+        tail = (1.0 if g2 <= 0.0 else 0.0) if k == 0 else float(chi2.sf(g2, df=k))
+        total += weight * tail
+    return float(total)
 
 
 # ─────────────────────────────────────────────────────────────────────
