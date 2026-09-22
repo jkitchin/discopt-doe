@@ -258,8 +258,11 @@ def effects_estimates(
     list of dict
         One entry per effect with keys ``factor`` (``"A:B"`` for an
         interaction), ``effect``, ``se``, ``t``, ``p``, ``low``, ``high``
-        (``-1``/``+1`` for an interaction) and ``method`` (``"residual"`` or
-        ``"lenth"``), sorted by ``|effect|`` descending.
+        (``-1``/``+1`` for an interaction), ``method`` (``"residual"`` or
+        ``"lenth"``) and ``df``, the degrees of freedom behind ``se``: the
+        residual df, or Lenth's ``m/3`` for ``"lenth"``. Use it for the ``t``
+        critical value of a confidence interval. Sorted by ``|effect|``
+        descending.
     """
     from scipy import stats
 
@@ -372,6 +375,7 @@ def effects_estimates(
                     "low": lo,
                     "high": hi,
                     "method": "residual",
+                    "df": df_resid,
                 }
             )
     else:
@@ -397,6 +401,7 @@ def effects_estimates(
                     "low": lo,
                     "high": hi,
                     "method": "lenth",
+                    "df": d,
                 }
             )
 

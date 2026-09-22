@@ -303,6 +303,8 @@ def test_omitting_a_real_interaction_inflates_the_se():
         for e in effects_estimates(rows, "y", factors=list("ABC"), interactions=[("A", "B")])
     }
     assert mains["A"]["se"] > 5 * full["A"]["se"]
+    # df is the residual df behind the SE: n - rank(model matrix).
+    assert mains["A"]["df"] == len(rows) - 4 and full["A"]["df"] == len(rows) - 5
 
 
 def test_effects_estimates_falls_back_to_lenth_without_residual_df():
@@ -313,6 +315,7 @@ def test_effects_estimates_falls_back_to_lenth_without_residual_df():
     est = effects_estimates(rows, "y", factors=list("ABC"), interactions=inter)
     assert len(est) == 7
     assert {e["method"] for e in est} == {"lenth"}
+    assert all(e["df"] == pytest.approx(7 / 3) for e in est)  # Lenth's m/3
     pse = lenth_pse([e["effect"] for e in est]).pse
     assert all(e["se"] == pytest.approx(pse) for e in est)
     top = est[0]

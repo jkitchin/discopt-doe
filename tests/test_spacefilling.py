@@ -105,3 +105,14 @@ def test_quasi_random_respects_bounds_and_method_names() -> None:
     assert x.min() >= 300.0 and x.max() <= 400.0
     with pytest.raises(ValueError, match="method"):
         quasi_random_design(FACTORS, 8, method="grid")
+
+
+def test_metrics_warn_on_natural_units_without_bounds() -> None:
+    from discopt.doe import space_filling_metrics
+
+    with pytest.warns(UserWarning, match="bounds"):
+        space_filling_metrics([[300.0, 1.0], [400.0, 5.0], [350.0, 3.0]])
+    m = space_filling_metrics(
+        [[300.0, 1.0], [400.0, 5.0], [350.0, 3.0]], bounds=[(300.0, 400.0), (1.0, 5.0)]
+    )
+    assert m["min_distance"] == pytest.approx(np.sqrt(0.5))

@@ -277,3 +277,33 @@ def test_anova_report_names_a_missing_column():
     rows = [{"A": 1, "y": 1.0}, {"A": 2, "y": 2.0}, {"A": 1, "y": 1.5}]
     with pytest.raises(ValueError, match=r"\['B'\] missing"):
         anova_report(rows, "y", factors=["A", "B"])
+
+
+def test_split_plot_with_sub_plot_replicates() -> None:
+    """Several copies of the sub-plot factorial per whole plot: more sub-plot
+    error df, the same whole-plot error df, and unbiased variance components."""
+    from discopt.doe import split_plot_anova, split_plot_design
+
+    d = split_plot_design(
+        {"T": (1, 2)},
+        {"R": (0, 1), "S": (0, 1)},
+        whole_plot_replicates=3,
+        sub_plot_replicates=2,
+        seed=0,
+    )
+    assert len(d.rows) == 6 * 8
+    per_wp = {}
+    for r in d.rows:
+        per_wp.setdefault(r["whole_plot"], []).append(r)
+    assert all(len(v) == 8 and {x["T"] for x in v} == {v[0]["T"]} for v in per_wp.values())
+    rng = np.random.default_rng(1)
+    est = []
+    for _ in range(200):
+        wp = rng.normal(0.0, 1.0, d.n_whole_plots)
+        rows = [dict(r, y=r["R"] + wp[r["whole_plot"]] + rng.normal(0.0, 0.3)) for r in d.rows]
+        t = split_plot_anova(rows, "y", whole_plot_factors=["T"], sub_plot_factors=["R", "S"])
+        est.append(t.variance_components["whole_plot"])
+    by = {r.source: r for r in t.rows}
+    assert by["Whole-plot error"].df == 4
+    assert by["Sub-plot error"].df == 48 - 1 - 1 - 4 - 2
+    assert np.mean(est) == pytest.approx(1.0, abs=0.25)

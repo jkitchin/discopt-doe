@@ -144,3 +144,11 @@ def test_bad_inputs():
     a = alias_structure(np.array([[1, 1], [-1, -1], [1, -1], [-1, 1]]))
     with pytest.raises(ValueError, match="unknown effect"):
         a.aliases("Z")
+
+
+def test_coded_matrix_public_helper() -> None:
+    from discopt.doe import coded_matrix
+
+    X, names = coded_matrix([{"T": 80, "t": 10}, {"T": 120, "t": 30}, {"T": 100, "t": 20}])
+    assert names == ["T", "t"]
+    assert X.tolist() == [[-1.0, -1.0], [1.0, 1.0], [0.0, 0.0]]

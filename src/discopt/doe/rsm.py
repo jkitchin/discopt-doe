@@ -392,6 +392,9 @@ class StationaryPointCI:
         Approximate covariance of the stationary point, ``J Σ Jᵀ``.
     level : float
         Confidence level.
+    natural_point, natural_std_errors, natural_lower, natural_upper : numpy.ndarray or None
+        The same in natural units, when ``center`` and ``half_range`` were
+        given (``x = center + half_range * coded``); otherwise ``None``.
     """
 
     point: np.ndarray
@@ -400,6 +403,10 @@ class StationaryPointCI:
     upper: np.ndarray
     covariance: np.ndarray
     level: float
+    natural_point: np.ndarray | None = None
+    natural_std_errors: np.ndarray | None = None
+    natural_lower: np.ndarray | None = None
+    natural_upper: np.ndarray | None = None
 
 
 def stationary_point_ci(
@@ -409,6 +416,8 @@ def stationary_point_ci(
     parameter_names: Sequence[str] | None = None,
     level: float = 0.95,
     dof: int | None = None,
+    center: Sequence[float] | None = None,
+    half_range: Sequence[float] | None = None,
 ) -> StationaryPointCI:
     """Delta-method confidence interval on the location of the stationary point.
 
@@ -436,6 +445,9 @@ def stationary_point_ci(
     dof : int, optional
         Residual degrees of freedom: use a ``t`` critical value. The normal
         value is used when omitted.
+    center, half_range : sequence of float, optional
+        The coding of each factor, ``coded = (x - center) / half_range``. When
+        both are given the result also carries the interval in natural units.
     """
     from scipy import stats
 
@@ -492,7 +504,7 @@ def stationary_point_ci(
     se = np.sqrt(np.clip(np.diag(cov_xs), 0.0, None))
     q = 0.5 + float(level) / 2.0
     crit = float(stats.t.ppf(q, dof)) if dof else float(stats.norm.ppf(q))
-    return StationaryPointCI(
+    out = StationaryPointCI(
         point=xs,
         std_errors=se,
         lower=xs - crit * se,
@@ -500,6 +512,18 @@ def stationary_point_ci(
         covariance=cov_xs,
         level=float(level),
     )
+    if center is not None or half_range is not None:
+        if center is None or half_range is None:
+            raise ValueError("pass both center and half_range to get natural units")
+        c = np.asarray(center, dtype=np.float64).reshape(-1)
+        h = np.asarray(half_range, dtype=np.float64).reshape(-1)
+        if c.size != k or h.size != k:
+            raise ValueError(f"center and half_range need {k} entries each")
+        out.natural_point = c + h * xs
+        out.natural_std_errors = np.abs(h) * se
+        out.natural_lower = c + h * out.lower
+        out.natural_upper = c + h * out.upper
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -546,7 +570,9 @@ def ridge_analysis(
     ``μ``. Each radius is found by a 1-D root search. The path is the right
     tool when the stationary point is a saddle or lies outside the explored
     region: it shows how far, and in which direction, to move (Hoerl 1959;
-    Draper 1963).
+    Draper 1963). The degenerate "hard case", where ``b`` has no component
+    along the leading canonical axis (including ``b = 0``), is solved in closed
+    form rather than by the root search.
     """
     from scipy.optimize import brentq
 
@@ -561,6 +587,24 @@ def ridge_analysis(
         return np.linalg.solve(Bs - mu * eye, -0.5 * bs)
 
     radii_arr = np.asarray(radii, dtype=np.float64)
+
+    # The "hard case" (Moré & Sorensen 1983): b has no component along the
+    # leading eigenvector(s) of B. Then ||x(mu)|| stays bounded as mu -> lam_max,
+    # at the radius of x_p = lim x(mu); beyond it the optimum is x_p plus a step
+    # along the leading axis. b = 0 is the extreme case, with x_p = 0.
+    lam, V = np.linalg.eigh(Bs)
+    c = V.T @ (-0.5 * bs)
+    scale = max(1.0, float(np.abs(lam).max()), float(np.linalg.norm(bs)))
+    top = np.abs(lam - lam_max) <= 1e-10 * scale
+    hard = bool(np.all(np.abs(c[top]) <= 1e-12 * scale))
+    x_p = r_p = v_top = None
+    if hard:
+        x_p = V[:, ~top] @ (c[~top] / (lam[~top] - lam_max)) if np.any(~top) else np.zeros(k)
+        r_p = float(np.linalg.norm(x_p))
+        v_top = V[:, np.flatnonzero(top)[0]].copy()
+        if v_top[np.argmax(np.abs(v_top))] < 0:  # a fixed sign; +/- give the same response
+            v_top = -v_top
+
     pts, mus = [], []
     for R in radii_arr:
         if R < 0:
@@ -569,22 +613,19 @@ def ridge_analysis(
             pts.append(np.zeros(k))
             mus.append(np.nan)
             continue
-        if np.linalg.norm(bs) == 0:
-            raise ValueError("b = 0: every point on a sphere is stationary; ridge undefined")
-        # ||x(mu)|| -> inf as mu -> lam_max+, -> 0 as mu -> inf.
+        if hard and R >= r_p - 1e-12:
+            tau = float(np.sqrt(max(R * R - r_p * r_p, 0.0)))
+            pts.append(x_p + tau * v_top)
+            mus.append(sign * lam_max)
+            continue
+        # ||x(mu)|| -> inf (or -> r_p in the hard case) as mu -> lam_max+, -> 0
+        # as mu -> inf, so the root is bracketed.
         span = max(1.0, abs(lam_max))
         lo = lam_max + 1e-12 * span
         hi = lam_max + span
         while np.linalg.norm(x_of(hi)) > R:
             hi = lam_max + 2 * (hi - lam_max)
         g = lambda mu: np.linalg.norm(x_of(mu)) - R  # noqa: E731
-        if g(lo) < 0:
-            # b has (numerically) no component along the top eigenvector (the
-            # "hard case"); the root search cannot reach R from above.
-            raise ValueError(
-                f"radius {R} is not reachable along the ridge (degenerate case: b is "
-                "orthogonal to the leading canonical axis)"
-            )
         mu = brentq(g, lo, hi, xtol=1e-14, rtol=1e-12, maxiter=500)
         pts.append(x_of(mu))
         mus.append(sign * mu)

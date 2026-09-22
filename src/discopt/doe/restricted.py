@@ -403,8 +403,10 @@ class SplitPlotDesign:
         Number of whole plots (e.g. furnace runs).
     rows : list of dict
         One dict per run: every factor value, ``whole_plot`` (0-based, in run
-        sequence), ``replicate`` (0-based replicate of the whole-plot
-        factorial), and ``run_order``. Whole plots run in random order, and
+        sequence), ``replicate`` (which copy of the *whole-plot* factorial this
+        whole plot belongs to; not a block of the whole experiment),
+        ``sub_replicate`` (which copy of the sub-plot factorial within the
+        whole plot), and ``run_order``. Whole plots run in random order, and
         the sub-plot runs are randomized *within* each whole plot.
     """
 
@@ -423,13 +425,15 @@ def split_plot_design(
     sub_plot_factors: Mapping[str, tuple[object, object]],
     *,
     whole_plot_replicates: int = 2,
+    sub_plot_replicates: int = 1,
     seed: int | None = None,
 ) -> SplitPlotDesign:
     """Build a 2-level split-plot design.
 
     Every combination of the whole-plot factors is run ``whole_plot_replicates``
     times as a whole plot, and each whole plot holds the full factorial in the
-    sub-plot factors.
+    sub-plot factors ``sub_plot_replicates`` times (e.g. 16 samples in one
+    furnace firing for a 2^3 sub-plot factorial run twice).
 
     Parameters
     ----------
@@ -441,6 +445,10 @@ def split_plot_design(
         Whole plots per whole-plot treatment. At least 2: with one, there are
         no degrees of freedom for whole-plot error, and the whole-plot factors
         cannot be tested at all.
+    sub_plot_replicates : int, default 1
+        Copies of the sub-plot factorial inside each whole plot. Extra copies
+        add sub-plot error degrees of freedom; they do nothing for the
+        whole-plot factors, whose precision is set by the number of whole plots.
     seed : int, optional
         Reproducible randomization.
     """
@@ -451,6 +459,8 @@ def split_plot_design(
         raise ValueError(f"factors cannot be both whole-plot and sub-plot: {sorted(overlap)}")
     if whole_plot_replicates < 1:
         raise ValueError("whole_plot_replicates must be >= 1")
+    if sub_plot_replicates < 1:
+        raise ValueError("sub_plot_replicates must be >= 1")
     if whole_plot_replicates == 1:
         warnings.warn(
             "whole_plot_replicates=1 leaves no degrees of freedom for whole-plot "
@@ -477,7 +487,8 @@ def split_plot_design(
     rows: list[dict[str, object]] = []
     for w, wp in enumerate(whole_plots):
         subs = [
-            {n: levels[n][c] for n, c in zip(sp_names, code)}
+            {**{n: levels[n][c] for n, c in zip(sp_names, code)}, "sub_replicate": s_rep}
+            for s_rep in range(sub_plot_replicates)
             for code in itertools.product((0, 1), repeat=len(sp_names))
         ]
         rng.shuffle(subs)

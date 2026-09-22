@@ -199,7 +199,9 @@ _SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
     ),
     "aliasing": (
         "AliasStructure",
+        "coded_matrix",
         "alias_structure",
+        "coded_matrix",
     ),
     "mixture": (
         "MixtureBoundsCheck",

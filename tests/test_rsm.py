@@ -228,3 +228,40 @@ def test_overall_desirability_is_a_weighted_geometric_mean() -> None:
     assert overall_desirability([0.0, 1.0]) == pytest.approx(0.0)
     both = overall_desirability([np.array([0.25, 0.0]), np.array([1.0, 1.0])])
     assert both == pytest.approx([0.5, 0.0])
+
+
+def test_ridge_analysis_hard_case_matches_brute_force() -> None:
+    """b orthogonal to the leading canonical axis: the root search cannot reach
+    large radii, so the ridge continues along that axis in closed form."""
+    from discopt.doe import ridge_analysis
+
+    b, B = np.array([1.0, 0.0]), np.diag([-1.0, 2.0])
+    radii = [0.1, 0.3, 1.0, 2.0]
+    r = ridge_analysis(b0=0.0, b=b, B=B, radii=radii)
+    theta = np.linspace(0.0, 2 * np.pi, 400_001)
+    for R, point, resp in zip(radii, r.points, r.response):
+        assert np.linalg.norm(point) == pytest.approx(R, abs=1e-9)
+        circle = R * np.c_[np.cos(theta), np.sin(theta)]
+        best = np.max(circle @ b + np.einsum("ij,jk,ik->i", circle, B, circle))
+        assert resp == pytest.approx(best, abs=1e-6)
+    # b = 0: the ridge is the leading axis itself.
+    r0 = ridge_analysis(b0=0.0, b=[0.0, 0.0], B=B, radii=[1.5])
+    assert np.abs(r0.points[0]) == pytest.approx([0.0, 1.5])
+
+
+def test_stationary_point_ci_in_natural_units() -> None:
+    from discopt.doe import stationary_point_ci
+
+    coef = {"b0": 80.0, "b1": 1.0, "b2": -0.5, "b11": -2.0, "b22": -1.0, "b12": 0.3}
+    cov = np.eye(6) * 0.01
+    coded = stationary_point_ci(coef, cov)
+    nat = stationary_point_ci(coef, cov, center=[90.0, 40.0], half_range=[10.0, 5.0])
+    assert nat.natural_point == pytest.approx([90 + 10 * coded.point[0], 40 + 5 * coded.point[1]])
+    assert nat.natural_std_errors == pytest.approx(
+        [10 * coded.std_errors[0], 5 * coded.std_errors[1]]
+    )
+    assert nat.natural_lower[0] == pytest.approx(90 + 10 * coded.lower[0])
+    assert nat.natural_upper[1] == pytest.approx(40 + 5 * coded.upper[1])
+    assert coded.natural_point is None
+    with pytest.raises(ValueError, match="both"):
+        stationary_point_ci(coef, cov, center=[90.0, 40.0])

@@ -125,10 +125,15 @@ def check_mixture_bounds(
         n: (float(np.round(a, 12)), float(np.round(b, 12)))
         for n, a, b in zip(names, new_lo, new_hi)
     }
+    stated = {n: (float(bounds[n][0]), float(bounds[n][1])) for n in names}
     msg = (
         "consistent: every stated bound is reachable"
         if not adjusted
-        else "tightened unreachable bounds for " + ", ".join(adjusted)
+        else "tightened unreachable bounds: "
+        + "; ".join(
+            f"{n} [{stated[n][0]:g}, {stated[n][1]:g}] -> [{implied[n][0]:g}, {implied[n][1]:g}]"
+            for n in adjusted
+        )
     )
     return MixtureBoundsCheck(True, implied, adjusted, msg)
 

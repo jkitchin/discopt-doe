@@ -50,6 +50,17 @@ def _unit_matrix(
         if np.any(b[:, 1] <= b[:, 0]):
             raise ValueError("every upper bound must exceed its lower bound")
         x = (x - b[:, 0]) / (b[:, 1] - b[:, 0])
+    elif np.any(x < -1e-9) or np.any(x > 1 + 1e-9):
+        # Distances in natural units mix incommensurate scales (kelvin next to
+        # bar) and are not the unit-cube metrics this function reports.
+        import warnings
+
+        warnings.warn(
+            "design matrix has values outside [0, 1] and no bounds were given; the "
+            "metrics assume unit-cube coordinates. Pass bounds=[(lb, ub), ...] to "
+            "scale a matrix in natural units.",
+            stacklevel=3,
+        )
     return x, None
 
 

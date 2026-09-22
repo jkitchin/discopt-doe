@@ -222,6 +222,38 @@ def _roman(r: int | None) -> str:
     return "none" if r is None else table.get(r, str(r))
 
 
+def coded_matrix(
+    design: object, factors: Sequence[str] | None = None
+) -> tuple[np.ndarray, list[str]]:
+    """Return a design's coded run matrix (entries in [-1, 1]) and its factor names.
+
+    Low levels map to -1, high levels to +1, and numeric levels in between
+    (centre points, the middle level of a definitive screening design) to their
+    coded position, e.g. 0 for a midpoint. Two-level text factors
+    (``"A"``/``"B"``) are coded by sorted order.
+
+    Parameters
+    ----------
+    design : FactorialDesign, sequence of dict, or array_like
+        A design object, its run rows, or an already-coded matrix (validated).
+    factors : sequence of str, optional
+        Which factors, in which column order. Defaults to every design factor,
+        skipping bookkeeping columns such as ``run_order`` and ``replicate``.
+
+    Returns
+    -------
+    (numpy.ndarray, list of str)
+        The ``(n_runs, n_factors)`` coded matrix and the column names.
+
+    Examples
+    --------
+    >>> X, names = coded_matrix([{"T": 80, "t": 10}, {"T": 120, "t": 30}, {"T": 100, "t": 20}])
+    >>> X.tolist(), names
+    ([[-1.0, -1.0], [1.0, 1.0], [0.0, 0.0]], ['T', 't'])
+    """
+    return _coded_matrix(design, factors)
+
+
 def _coded_matrix(design: object, factors: Sequence[str] | None) -> tuple[np.ndarray, list[str]]:
     """Coded design matrix in [-1, 1] and the factor names."""
     from discopt.doe.screening import FactorialDesign

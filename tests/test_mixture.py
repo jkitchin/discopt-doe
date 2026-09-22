@@ -174,3 +174,10 @@ def test_sample_simplex_respects_bounds_and_total() -> None:
     a = sample_simplex(names, 2.0, np.random.default_rng(5))
     w = np.random.default_rng(5).dirichlet(np.ones(3))
     assert [a[n] for n in names] == pytest.approx(list(2.0 * w))
+
+
+def test_check_mixture_bounds_message_states_the_new_bounds() -> None:
+    from discopt.doe import check_mixture_bounds
+
+    r = check_mixture_bounds({"A": (0.0, 1.0), "B": (0.0, 0.2), "C": (0.0, 0.2)})
+    assert "A [0, 1] -> [0.6, 1]" in r.message

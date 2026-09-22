@@ -118,6 +118,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   {discrepancy,maximin,none}`. `discopt doe anova` on a two-level design now
   also reports signed effects. On a saturated design it reports them against
   Lenth's PSE instead of failing.
+- Follow-ups from using the new API in worked examples:
+  - `coded_matrix`: a design's coded ±1 run matrix, with centre and middle levels
+    at their coded positions.
+  - `stationary_point_ci(..., center=, half_range=)`: natural units.
+  - `effects_estimates` reports the `df` behind each standard error (residual
+    df, or Lenth's m/3).
+  - `split_plot_design(..., sub_plot_replicates=)`: several copies of the
+    sub-plot factorial per whole plot.
+  - `ridge_analysis` solves the degenerate "hard case" (`b` orthogonal to the
+    leading canonical axis, including `b = 0`) in closed form instead of
+    raising.
+  - `check_mixture_bounds` states the tightened ranges.
+  - `space_filling_metrics` warns when handed a natural-unit matrix without
+    `bounds`.
 - `fit_least_squares(..., level=0.95)`: the confidence level of the reported
   intervals. `initial` is now optional; a model linear in its parameters
   converges from the default start.
