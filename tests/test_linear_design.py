@@ -524,3 +524,27 @@ def test_exchange_never_makes_the_batch_worse() -> None:
     assert refined.criterion_value >= greedy.criterion_value - 1e-12
     assert len(refined.per_round_criterion) == 7
     assert refined.per_round_criterion[-1] == pytest.approx(refined.criterion_value)
+
+
+def test_batch_design_is_invariant_to_parameter_scale() -> None:
+    """D-optimality is invariant to rescaling the parameters, so the design
+    must be too. An isotropic rank-deficiency ridge was swamped when the
+    parameters differed by many orders of magnitude (Arrhenius k0 ~ 1e9 next
+    to Ea ~ 6e4) and put every run at one temperature."""
+    from discopt.doe.linear_design import batch_design_from_basis
+    from discopt.doe.symbolic import SymbolicModel, basis_evaluator
+
+    raw = SymbolicModel(
+        source="k0*exp(-Ea/(8.314*T))", parameter_names=("k0", "Ea"), input_names=("T",)
+    )
+    scaled = SymbolicModel(
+        source="k0*1e9*exp(-Ea*1e4/(8.314*T))", parameter_names=("k0", "Ea"), input_names=("T",)
+    )
+    kw = dict(parameter_names=["k0", "Ea"], input_names=["T"], design_bounds={"T": (300.0, 400.0)})
+    a = batch_design_from_basis(basis_evaluator(raw, {"k0": 1e9, "Ea": 6e4}), 6, **kw)
+    b = batch_design_from_basis(basis_evaluator(scaled, {"k0": 1.0, "Ea": 6.0}), 6, **kw)
+    xa = sorted(d["T"] for d in a.designs)
+    xb = sorted(d["T"] for d in b.designs)
+    assert np.isfinite(a.criterion_value)
+    assert xa == pytest.approx(xb, abs=0.05)
+    assert len({round(x) for x in xa}) == 2  # two support points, not one

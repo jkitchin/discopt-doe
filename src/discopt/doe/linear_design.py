@@ -483,18 +483,23 @@ def _search_one_point(
     equality_constraints: Sequence[Callable[[dict[str, float]], float]],
     inequality_constraints: Sequence[Callable[[dict[str, float]], float]],
     feasible_projection: Callable[[dict[str, float]], dict[str, float]] | None,
-    regularization: float = 0.0,
+    regularization: float | np.ndarray = 0.0,
 ) -> tuple[np.ndarray, float] | None:
     """Multi-start search for the point that best improves ``accumulated``.
 
-    ``regularization`` adds ``ε·I`` to every trial FIM before it is scored. It is
-    only used while ``accumulated`` is rank-deficient, where the unregularized
-    criterion is degenerate (the same ``-inf`` / ``inf`` for every candidate)
-    and the choice of point would otherwise be arbitrary.
+    ``regularization`` adds a diagonal ridge (a scalar ``ε·I`` or a per-parameter
+    vector) to every trial FIM before it is scored. It is only used while
+    ``accumulated`` is rank-deficient, where the unregularized criterion is
+    degenerate (the same ``-inf`` / ``inf`` for every candidate) and the choice
+    of point would otherwise be arbitrary.
     """
     maximize = is_maximized(criterion)
     inv_var = 1.0 / (float(sigma) ** 2)
-    ridge = float(regularization) * np.eye(accumulated.shape[0]) if regularization else 0.0
+    reg = np.asarray(regularization, dtype=np.float64)
+    if reg.ndim == 0:
+        ridge = float(reg) * np.eye(accumulated.shape[0]) if float(reg) else 0.0
+    else:
+        ridge = np.diag(reg)
 
     def to_design(x: np.ndarray) -> dict[str, float]:
         return {n: float(v) for n, v in zip(input_names, x)}
@@ -875,11 +880,26 @@ def batch_design_from_basis(
             ],
             dtype=np.float64,
         )
-    typical = float(np.mean([np.dot(basis(u), basis(u)) for u in samples])) * inv_var
-    eps = _RANK_RIDGE * (typical if np.isfinite(typical) and typical > 0 else 1.0)
+    # Per-parameter ridge: a tiny fraction of each parameter's own typical
+    # single-run information. An isotropic ridge is swamped when parameters
+    # differ in scale by many orders of magnitude (an Arrhenius k0 ~ 1e9 next
+    # to Ea ~ 1e4 gives information 1e-18 vs 1e-7), and every run then
+    # collapsed onto one point.
+    rows_f = np.array([basis(u) for u in samples], dtype=np.float64)
+    typical = np.mean(rows_f**2, axis=0) * inv_var
+    fallback = float(np.max(typical)) if np.any(typical > 0) else 1.0
+    typical = np.where(np.isfinite(typical) & (typical > 0), typical, fallback)
+    eps = _RANK_RIDGE * typical
 
     def full_rank(m: np.ndarray) -> bool:
-        return bool(m.any()) and int(np.linalg.matrix_rank(m)) >= n_p
+        # Test rank on the correlation-scaled matrix, so a full-rank FIM with a
+        # huge scale spread is not mistaken for a singular one.
+        if not m.any():
+            return False
+        d = np.sqrt(np.clip(np.diag(m), 0.0, None))
+        if np.any(d == 0):
+            return False
+        return int(np.linalg.matrix_rank(m / np.outer(d, d))) >= n_p
 
     def pick(base: np.ndarray, round_seed_rng: np.random.Generator):
         # While ``base`` is rank-deficient every criterion is degenerate; rank
