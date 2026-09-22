@@ -307,3 +307,37 @@ def test_split_plot_with_sub_plot_replicates() -> None:
     assert by["Whole-plot error"].df == 4
     assert by["Sub-plot error"].df == 48 - 1 - 1 - 4 - 2
     assert np.mean(est) == pytest.approx(1.0, abs=0.25)
+
+
+def test_split_plot_anova_tolerates_a_constant_whole_plot_factor() -> None:
+    """A whole-plot factor held at one level contributes 0 df.
+
+    It is constant, not aliased, so the aliasing check does not fire; the mean
+    square used to be computed as ss / 0 and raised a bare ZeroDivisionError.
+    """
+    values = {
+        ("w1", "s1"): 10.0,
+        ("w1", "s2"): 12.0,
+        ("w2", "s1"): 11.0,
+        ("w2", "s2"): 13.5,
+        ("w3", "s1"): 10.5,
+        ("w3", "s2"): 12.4,
+        ("w4", "s1"): 11.2,
+        ("w4", "s2"): 13.0,
+    }
+    rows = [
+        {"plot": w, "T": "hot", "S": s, "y": values[(w, s)]}
+        for w in ("w1", "w2", "w3", "w4")
+        for s in ("s1", "s2")
+    ]
+    table = split_plot_anova(
+        rows, whole_plot="plot", whole_plot_factors=["T"], sub_plot_factors=["S"], response="y"
+    )
+
+    by_source = {r.source: r for r in table.rows}
+    assert by_source["T"].df == 0
+    assert by_source["T"].ss == pytest.approx(0.0)
+    assert by_source["T"].f is None
+    # The sub-plot factor is still tested normally.
+    assert by_source["S"].df == 1
+    assert by_source["S"].f is not None

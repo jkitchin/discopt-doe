@@ -736,6 +736,10 @@ def split_plot_anova(
         )
 
     def tested(name: str, ss: float, df: int, ms_err: float, df_err: int) -> AnovaEffect:
+        # A factor constant across the whole experiment contributes no degrees
+        # of freedom; report the 0-df row rather than dividing by zero.
+        if df <= 0:
+            return AnovaEffect(name, ss, df, 0.0, None, None)
         ms = ss / df
         if df_err > 0 and ms_err > 0:
             f_stat = ms / ms_err
