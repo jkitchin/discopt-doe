@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   known D-optimal designs: 3 + 3 at the ends for a line, 2 + 2 + 2 at the ends
   and midpoint for a quadratic, and the 3² factorial for a 9-run two-factor
   quadratic.
+  The ridge is scaled per parameter, and the rank test runs on the
+  correlation-scaled FIM, so parameters on wildly different scales (an
+  Arrhenius k0 ~ 1e9 next to Ea ~ 6e4) get the same design as a well-scaled
+  model instead of collapsing every run onto one point.
 - **Flat optimal-design criteria converge.** The linear-design search now uses
   tight L-BFGS-B/SLSQP tolerances. The default ones stopped a quadratic's center
   points at 4.86 and 5.05 instead of 5.0.
