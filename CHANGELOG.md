@@ -115,6 +115,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of a misleading `0.0000`.
 
 ### Added
+- **I- and G-optimality for nonlinear and dynamic models.** The prediction
+  criteria existed only for models linear in their parameters; the FIM path had
+  D, A, E and ME, all of which are about the *parameters*. Now
+  `DesignCriterion.I_OPTIMAL` ("average_variance") and `G_OPTIMAL`
+  ("max_variance") work in `optimal_experiment` and `batch_optimal_experiment`
+  for any `Experiment`, including `ODEExperiment`.
+  - For a model nonlinear in its parameters the row the prediction variance is
+    built from is the *sensitivity* row `dy/dtheta`, which is what the FIM is
+    assembled from anyway. `experiment_region(experiment, theta, bounds=...)`
+    computes those rows once for the whole region; they depend on the nominals
+    and the region, never on the design being searched, so each candidate costs
+    one solve against a precomputed matrix.
+  - The region defaults to the design bounds, sampled at `n_prediction_points`;
+    `prediction_points` names explicit points and `prediction_region` reuses a
+    region across calls.
+  - An experiment with several responses (a dynamic experiment measuring a
+    state at four times has four) contributes one row per response per point,
+    so I averages over points *and* responses and G takes the worst of them.
+  - The values are variances of the fitted response in its own units, since the
+    FIM carries `1/sigma**2`. They agree exactly with the linear path's
+    `evaluate_criterion(fim, "I"|"G", region=...)` on a model that is linear in
+    its parameters, which is what the tests pin.
 - **Campaigns: runs with conditions.**
   - `campaign_experiment(model, runs)` turns a per-run model (a `SymbolicModel`,
     an `ODEExperiment` or an `Experiment` with design inputs) plus a list of run
