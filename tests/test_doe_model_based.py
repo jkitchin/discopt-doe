@@ -199,20 +199,32 @@ def _make_workbook_polynomial(tmp_path: Path, init_xs, truth_fn, sigma=0.05) -> 
     wb.save()
     book = _lwb(path)
     sh = book["runs"]
+    col = _response_column(sh, "y")
     for i, x in enumerate(init_xs, start=2):
-        sh.cell(row=i, column=4, value=float(truth_fn(x)))
+        sh.cell(row=i, column=col, value=float(truth_fn(x)))
     book.save(path)
     return path
+
+
+def _response_column(sheet, name: str) -> int:
+    """1-based index of a column, by header name.
+
+    Locating it by position breaks whenever the runs sheet grows a column
+    (``run_order`` did exactly that).
+    """
+    header = [c.value for c in sheet[1]]
+    return header.index(name) + 1
 
 
 def _fill_responses(path, run_ids, designs, truth_fn):
     book = _lwb(path)
     sh = book["runs"]
     by_id = {rid: d for rid, d in zip(run_ids, designs)}
+    col = _response_column(sh, "y")
     for row in sh.iter_rows(min_row=2):
         rid = row[0].value
         if rid in by_id:
-            row[3].value = float(truth_fn(by_id[rid]["x"]))
+            row[col - 1].value = float(truth_fn(by_id[rid]["x"]))
     book.save(path)
 
 
@@ -407,8 +419,9 @@ def test_model_based_optimize_round_2d(tmp_path):
     wb.save()
     book = _lwb(path)
     sh = book["runs"]
+    col = _response_column(sh, "y")
     for i, r in enumerate(init_xs, start=2):
-        sh.cell(row=i, column=5, value=float(truth(r[0], r[1])))
+        sh.cell(row=i, column=col, value=float(truth(r[0], r[1])))
     book.save(path)
 
     result = model_based_optimize_round(

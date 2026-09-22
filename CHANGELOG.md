@@ -115,6 +115,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of a misleading `0.0000`.
 
 ### Added
+- **The workbook records the order the runs were actually executed in.** A
+  design is randomized so drift cannot bias the factor estimates, and the order
+  is stored so drift can be *looked for*. The second half of that bargain broke
+  the moment a bench ran #7 before #3, because there was nowhere to say so.
+  - The runs sheet now carries a `run_order` column next to the response -- the
+    two columns the bench writes. Blank means that run went in `run_id` order,
+    which is the randomized order the design was written in; a number records
+    what actually happened.
+  - `Workbook.run_order()` returns `{run_id: position}`, filling the blanks from
+    `run_id`. Two runs claiming the same position is an error rather than an
+    ambiguous order, and a non-numeric entry names the run it is on. A workbook
+    written before the column existed still reads, as `run_id` order.
+  - `NewParams.extra_columns` and `discopt doe new --extra-column NAME`
+    (repeatable) add bookkeeping columns of your own -- operator, lot,
+    instrument. They sit between the factors and the response, where
+    `anova_report` looks for blocking factors, and a name clashing with a
+    built-in column is refused.
 - **Campaigns: runs with conditions.**
   - `campaign_experiment(model, runs)` turns a per-run model (a `SymbolicModel`,
     an `ODEExperiment` or an `Experiment` with design inputs) plus a list of run

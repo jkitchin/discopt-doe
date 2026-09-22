@@ -283,11 +283,17 @@ class Workbook:
         # for factorial/latin designs) sit between the design inputs and the
         # response so ``anova_report`` can pick them up as blocking factors.
         runs_sheet = wb[SHEET_RUNS]
+        # "run_order" sits next to the response because they are the two columns
+        # the bench writes. Blank means the runs were executed in run_id order,
+        # which is the randomized order the design was written in; a number
+        # there records what actually happened when the bench deviated. Without
+        # somewhere to put that, a deviation is simply lost, and the drift check
+        # the randomization pays for is then run against the wrong order.
         header = (
             ["run_id", "batch"]
             + [s.name for s in input_specs]
             + list(extra_columns)
-            + [response_name, "measured_at"]
+            + ["run_order", response_name, "measured_at"]
         )
         runs_sheet.append(header)
 
@@ -469,6 +475,47 @@ class Workbook:
             new_ids.append(next_id)
             next_id += 1
         return new_ids
+
+    def run_order(self) -> dict[int, int]:
+        """The order the runs were executed in, ``{run_id: position}``.
+
+        A blank ``run_order`` cell means that run went in ``run_id`` order,
+        which is the randomized order the design was written in. A number
+        overrides it, so a bench that ran #7 before #3 can say so and the drift
+        check still sees the truth.
+
+        Raises
+        ------
+        ValueError
+            If the filled-in positions repeat, which would make the order
+            ambiguous. Partial completion is fine: the runs left blank keep
+            their ``run_id`` position.
+        """
+        headers = self._runs_headers()
+        if "run_order" not in headers:  # written before the column existed
+            return {int(r["run_id"]): int(r["run_id"]) for r in self.all_runs()}
+        out: dict[int, int] = {}
+        stated: dict[int, int] = {}
+        for row in self.all_runs():
+            run_id = int(row["run_id"])
+            raw = row.get("run_order")
+            if raw is None or (isinstance(raw, str) and not raw.strip()):
+                out[run_id] = run_id
+                continue
+            try:
+                position = int(float(raw))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"run {run_id} has run_order {raw!r}, which is not a number"
+                ) from exc
+            if position in stated:
+                raise ValueError(
+                    f"runs {stated[position]} and {run_id} both claim run_order {position}; "
+                    "the executed order has to be unambiguous"
+                )
+            stated[position] = run_id
+            out[run_id] = position
+        return out
 
     def _cached_runs_rows(self) -> list[list[Any]]:
         """On-disk *computed* values of the runs sheet (Excel formula results).

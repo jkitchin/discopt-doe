@@ -208,6 +208,12 @@ def test_resolve_acquisition_unknown_raises():
 # ──────────────────────────────────────────────────────────────────
 
 
+def _response_column(sheet, name: str) -> int:
+    """1-based index of a column, by header name, not by position."""
+    header = [c.value for c in sheet[1]]
+    return header.index(name) + 1
+
+
 def _make_seeded_workbook(tmp_path: Path, init_xs, truth_fn):
     path = tmp_path / "opt.xlsx"
     Workbook.create(
@@ -226,7 +232,7 @@ def _make_seeded_workbook(tmp_path: Path, init_xs, truth_fn):
     book = _lwb(path)
     sh = book["runs"]
     for i, x in enumerate(init_xs, start=2):
-        sh.cell(row=i, column=4, value=float(truth_fn(x)))
+        sh.cell(row=i, column=_response_column(sh, "y"), value=float(truth_fn(x)))
     book.save(path)
     return path
 
@@ -238,7 +244,7 @@ def _fill_responses(path, run_ids, designs, truth_fn):
     for row in sh.iter_rows(min_row=2):
         rid = row[0].value
         if rid in by_id:
-            row[3].value = float(truth_fn(by_id[rid]["x"]))
+            row[_response_column(sh, "y") - 1].value = float(truth_fn(by_id[rid]["x"]))
     book.save(path)
 
 

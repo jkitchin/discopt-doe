@@ -322,6 +322,11 @@ class NewParams:
     optimize_acquisition: str = "expected_improvement"
     # Overwrite an existing output workbook (the CLI maps --force here).
     force: bool = False
+    # Extra bookkeeping columns on the runs sheet, beyond the design inputs:
+    # somewhere to write the operator, the lot number, the instrument. They
+    # travel with the runs and `anova_report` can pick them up as blocking
+    # factors. "replicate" is added automatically by the designs that need it.
+    extra_columns: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -679,6 +684,18 @@ def _validate_new_column_names(params: NewParams) -> None:
         seen.add(name)
 
 
+def _extra_columns(params: Any) -> list[str]:
+    """Validated ``extra_columns`` from the params, if it carries any."""
+    names = [str(n).strip() for n in getattr(params, "extra_columns", None) or []]
+    bad = [n for n in names if not n or n in ("run_id", "batch", "run_order", "measured_at")]
+    if bad:
+        raise DoEError(
+            f"extra column name(s) {bad} clash with the workbook's own columns "
+            "(run_id, batch, run_order, measured_at) or are blank"
+        )
+    return names
+
+
 def do_new(params: NewParams) -> dict[str, Any]:
     # batch_optimal_experiment is imported at its use site below, not here: it
     # reaches jax through discopt.doe.fim, and the combinatorial, classical, and
@@ -785,6 +802,7 @@ def do_new(params: NewParams) -> dict[str, Any]:
         response_name=params.response_name,
         module_callable=params.module_callable,
         param_initial_guess=params.param_initial_guess or None,
+        extra_columns=_extra_columns(params),
     )
     new_ids = wb.append_runs(1, designs)
     wb.log(
@@ -916,7 +934,7 @@ def _do_new_factorial(params: NewParams) -> dict[str, Any]:
         response_name=params.response_name,
         module_callable=None,
         param_initial_guess=None,
-        extra_columns=["replicate"],
+        extra_columns=["replicate", *_extra_columns(params)],
     )
 
     designs = [
@@ -1232,6 +1250,7 @@ def _do_new_symbolic(params: NewParams) -> dict[str, Any]:
         response_name=params.response_name,
         module_callable=None,
         param_initial_guess=nominal,
+        extra_columns=_extra_columns(params),
     )
     new_ids = wb.append_runs(1, designs)
     wb.log(
@@ -1348,6 +1367,7 @@ def _do_new_linear(params: NewParams) -> dict[str, Any]:
         response_name=params.response_name,
         module_callable=None,
         param_initial_guess=None,
+        extra_columns=_extra_columns(params),
     )
     new_ids = wb.append_runs(1, designs)
     wb.log(
@@ -1484,6 +1504,7 @@ def _do_new_classical(params: NewParams) -> dict[str, Any]:
         response_name=params.response_name,
         module_callable=None,
         param_initial_guess=None,
+        extra_columns=_extra_columns(params),
     )
 
     designs = dsd_rows if template == "definitive-screening" else design.design_rows()
@@ -1568,6 +1589,7 @@ def _do_new_optimize(params: NewParams) -> dict[str, Any]:
         response_name=params.response_name,
         module_callable=None,
         param_initial_guess=None,
+        extra_columns=_extra_columns(params),
     )
     new_ids = wb.append_runs(1, designs)
     wb.log(
@@ -1781,7 +1803,7 @@ def _do_new_latin(params: NewParams) -> dict[str, Any]:
         response_name=params.response_name,
         module_callable=None,
         param_initial_guess=None,
-        extra_columns=["replicate"],
+        extra_columns=["replicate", *_extra_columns(params)],
     )
 
     designs = [
@@ -1879,6 +1901,7 @@ def _cmd_new(args) -> int:
         resolution=int(getattr(args, "resolution", 3) or 3),
         fake_factors=int(getattr(args, "fake_factors", 0) or 0),
         lhs_optimize=getattr(args, "lhs_optimize", "discrepancy") or "discrepancy",
+        extra_columns=list(getattr(args, "extra_column", None) or []),
         optimize_criterion=getattr(args, "optimize_criterion", "maximize") or "maximize",
         optimize_surrogate=getattr(args, "optimize_surrogate", "gp") or "gp",
         optimize_acquisition=(
@@ -3207,6 +3230,16 @@ def _add_common_new_options(sp) -> None:
     )
     sp.add_argument("--seed", type=int, default=42, help="Random seed (default 42).")
     sp.add_argument("--force", action="store_true", help="Overwrite existing output file.")
+    sp.add_argument(
+        "--extra-column",
+        action="append",
+        metavar="NAME",
+        help=(
+            "Add a bookkeeping column to the runs sheet (repeatable): operator, "
+            "lot, instrument. It travels with the runs and `doe anova` can use it "
+            "as a blocking factor."
+        ),
+    )
     _add_json(sp)
 
 
