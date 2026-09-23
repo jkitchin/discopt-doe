@@ -192,6 +192,7 @@ _SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
         "linear_fim",
         "linear_optimal_design",
     ),
+    "card": ("ModelCard",),
     "symbolic": (
         "ModelSyntaxError",
         "check_jacobian_rank",
@@ -412,6 +413,7 @@ __all__ = [
     "LinearBatchDesignResult",
     "LinearDesignResult",
     "ModelBasedRoundResult",
+    "ModelCard",
     "ModelSyntaxError",
     "ModelSelectionResult",
     "OptimizationCriterion",

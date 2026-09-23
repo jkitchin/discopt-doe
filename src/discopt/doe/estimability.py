@@ -314,6 +314,105 @@ def estimability_rank(
     )
 
 
+def _subset_deviances(
+    experiment: Experiment,
+    data: Mapping[str, Any],
+    nominal: dict[str, float],
+    ranking: Sequence[str],
+    *,
+    design_values: Mapping[str, float] | None,
+    n_starts: int,
+    extra: Mapping[str, Any],
+) -> np.ndarray:
+    """Minimized deviance with the top ``k`` of ``ranking`` free, for every ``k``.
+
+    Uses the compiled deviance where the experiment has one, and the base
+    estimator otherwise, so an experiment that needs a solve still works.
+    """
+    from scipy.optimize import minimize
+
+    from discopt.doe._estimation import DevianceFunction, estimate_parameters, parameter_bounds
+
+    p = len(ranking)
+    J = np.zeros(p)
+
+    dev: DevianceFunction | None = None
+    try:
+        dev = DevianceFunction(experiment, data, nominal, design=design_values)
+    except Exception:  # noqa: BLE001 - any build problem: use the estimator
+        dev = None
+    if dev is not None and dev.path == "fallback":
+        # The fallback path evaluates through the estimator anyway, so it would
+        # be the same work with a worse optimizer.
+        dev = None
+
+    if dev is None:
+        for k in range(1, p + 1):
+            fixed = {name: nominal[name] for name in ranking[k:]}
+            res = estimate_parameters(
+                experiment,
+                data,
+                initial_guess=nominal,
+                fixed_parameters=fixed or None,
+                n_starts=n_starts,
+                **dict(extra),
+            )
+            J[k - 1] = float(res.objective)
+        return J
+
+    names = list(dev.names)
+    base = dev.vector(nominal)
+    bounds_map = parameter_bounds(experiment, nominal)
+    rng = np.random.default_rng(0)
+
+    for k in range(1, p + 1):
+        free = [names.index(n) for n in ranking[:k] if n in names]
+        if not free:
+            J[k - 1] = float(dev(base))
+            continue
+        box = [bounds_map.get(names[i], (-np.inf, np.inf)) for i in free]
+
+        def value(z: np.ndarray, free=free) -> float:
+            full = base.copy()
+            full[free] = z
+            out = float(dev(full))
+            return out if np.isfinite(out) else 1e300
+
+        def gradient(z: np.ndarray, free=free) -> np.ndarray | None:
+            full = base.copy()
+            full[free] = z
+            g = dev.gradient(full)
+            return None if g is None else np.asarray(g)[free]
+
+        jac = gradient if dev.gradient(base) is not None else None
+        starts = [base[free].copy()]
+        for _ in range(max(0, int(n_starts) - 1)):
+            starts.append(
+                np.array(
+                    [
+                        rng.uniform(
+                            max(lo, -abs(v) * 10 - 1.0) if np.isfinite(lo) else -abs(v) * 10 - 1.0,
+                            min(hi, abs(v) * 10 + 1.0) if np.isfinite(hi) else abs(v) * 10 + 1.0,
+                        )
+                        for (lo, hi), v in zip(box, base[free])
+                    ]
+                )
+            )
+        best = np.inf
+        for z0 in starts:
+            res = minimize(
+                value,
+                z0,
+                jac=jac,
+                method="L-BFGS-B",
+                bounds=[(lo, hi) for lo, hi in box],
+                options={"ftol": 1e-14, "gtol": 1e-10, "maxiter": 500},
+            )
+            best = min(best, float(res.fun))
+        J[k - 1] = best
+    return J
+
+
 def mse_subset_selection(
     experiment: Experiment,
     data: Mapping[str, Any],
@@ -357,8 +456,6 @@ def mse_subset_selection(
     Development of a model selection criterion based on mean squared error.
     *Can. J. Chem. Eng.* 89, 325-336 (2011).
     """
-    from discopt.doe._estimation import estimate_parameters
-
     if ranking is None:
         ranking = estimability_rank(experiment, dict(param_values), design_values).ranking
     ranking = list(ranking)
@@ -369,18 +466,20 @@ def mse_subset_selection(
     nominal = {k: float(v) for k, v in param_values.items()}
     n_obs = int(sum(np.atleast_1d(np.asarray(v)).size for v in data.values()))
 
-    J = np.zeros(p)
-    for k in range(1, p + 1):
-        fixed = {name: nominal[name] for name in ranking[k:]}
-        res = estimate_parameters(
-            experiment,
-            data,
-            initial_guess=nominal,
-            fixed_parameters=fixed or None,
-            n_starts=n_starts,
-            **extra,
-        )
-        J[k - 1] = float(res.objective)
+    # Every one of the p fits minimizes the *same* deviance over a different
+    # subset of its coordinates, so the function is built once and reused. On a
+    # compiled path that turns p full estimator solves -- each rebuilding the
+    # model and going through the base solver -- into p bounded minimizations of
+    # an already-jitted objective with an exact gradient.
+    J = _subset_deviances(
+        experiment,
+        data,
+        nominal,
+        ranking,
+        design_values=design_values,
+        n_starts=n_starts,
+        extra=extra,
+    )
 
     Jp = J[-1]
     k_arr = np.arange(1, p + 1)
