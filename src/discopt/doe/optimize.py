@@ -153,7 +153,7 @@ import warnings
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -187,6 +187,213 @@ class OptimizationRoundResult:
     feasibility: list[float] | None = None
     """Estimated probability of feasibility of each recommended run, when
     failed runs were marked; otherwise None."""
+    pareto_front: list[dict[str, Any]] | None = None
+    """With several objectives, the non-dominated completed runs: the set where
+    no other run is at least as good on every objective and better on one.
+    Choosing a point on it is a judgement about value, not about data."""
+    scalarization_weights: list[list[float]] | None = None
+    """The objective weights drawn for each recommended run (ParEGO)."""
+
+
+def _candidate_rows(
+    *,
+    candidates: Any,
+    candidate_sampler: Any,
+    n_candidates: int,
+    names: Sequence[str],
+    bounds_arr: np.ndarray,
+    encoder: "_InputEncoder",
+    rng: np.random.Generator,
+) -> list[dict[str, Any]]:
+    """The candidate pool as run dicts, in natural units and with level labels.
+
+    With categorical factors the pool is the product of their levels with the
+    continuous box: the same continuous points are offered at every level, so a
+    level is never passed over because it happened to be sampled at worse
+    conditions than another.
+    """
+    if candidates is not None:
+        rows = _rows_from_candidates(candidates, names)
+        missing = [n for n in names if any(n not in r for r in rows)]
+        if missing:
+            raise ValueError(f"candidate rows are missing input(s) {missing}")
+        return rows
+
+    if not encoder.has_categorical:
+        if callable(candidate_sampler):
+            matrix = _as_matrix(candidate_sampler(n_candidates, rng), names)
+        else:
+            matrix = _sample_candidates(bounds_arr, n_candidates, candidate_sampler, rng)
+        return [{n: float(row[j]) for j, n in enumerate(names)} for row in matrix]
+
+    combos: list[dict[str, Any]] = [{}]
+    for name, levels in encoder.categorical.items():
+        combos = [{**combo, name: level} for combo in combos for level in levels]
+    per_combo = max(1, n_candidates // max(1, len(combos)))
+
+    continuous = encoder.continuous
+    if continuous:
+        idx = [names.index(n) for n in continuous]
+        box = bounds_arr[idx]
+        if callable(candidate_sampler):
+            matrix = _as_matrix(candidate_sampler(per_combo, rng), names)[:, idx]
+        else:
+            matrix = _sample_candidates(box, per_combo, candidate_sampler, rng)
+    else:
+        matrix = np.zeros((1, 0))
+
+    rows: list[dict[str, Any]] = []
+    for combo in combos:
+        for row in matrix:
+            rows.append({**{n: float(row[j]) for j, n in enumerate(continuous)}, **combo})
+    return rows
+
+
+def _rows_from_candidates(candidates: Any, names: Sequence[str]) -> list[dict[str, Any]]:
+    """Explicit candidates as run dicts, keeping any non-numeric level labels."""
+    if isinstance(candidates, np.ndarray):
+        return [{n: float(v) for n, v in zip(names, row)} for row in np.atleast_2d(candidates)]
+    rows = []
+    for item in candidates:
+        if isinstance(item, Mapping):
+            rows.append(dict(item))
+        else:
+            rows.append({n: v for n, v in zip(names, item)})
+    return rows
+
+
+def _pareto_mask(values: np.ndarray) -> np.ndarray:
+    """``True`` where a row is not dominated, with every column "larger is better".
+
+    A row is dominated when another is at least as good everywhere and strictly
+    better somewhere.
+    """
+    n = len(values)
+    keep = np.ones(n, dtype=bool)
+    for i in range(n):
+        if not keep[i]:
+            continue
+        better_or_equal = np.all(values >= values[i], axis=1)
+        strictly_better = np.any(values > values[i], axis=1)
+        dominated_by = better_or_equal & strictly_better
+        if np.any(dominated_by):
+            keep[i] = False
+    return keep
+
+
+def _chebyshev_scalarization(
+    values: np.ndarray, weights: np.ndarray, rho: float = 0.05
+) -> np.ndarray:
+    """ParEGO's augmented Chebyshev scalarization, "larger is better".
+
+    Each objective is first put on a 0-1 scale from what has been observed, so
+    a yield in percent and an impurity in ppm can be weighed against each other
+    at all. The Chebyshev form ``min_j w_j y_j`` is what lets a scalarized
+    search reach the *concave* parts of a Pareto front, which a weighted sum
+    cannot; the small augmentation term keeps it from stopping on a weakly
+    dominated point (Knowles 2006).
+    """
+    lo = values.min(axis=0)
+    hi = values.max(axis=0)
+    span = np.where(hi > lo, hi - lo, 1.0)
+    # ParEGO is written for minimization, and the direction matters: the
+    # weighted *cost* that is largest is the one the max picks up, so a bigger
+    # weight means that objective is emphasized. Scalarizing the rewards
+    # instead inverts it -- a big weight on yield would then buy low yield.
+    cost = 1.0 - (values - lo) / span
+    weighted = cost * weights
+    return -(np.max(weighted, axis=1) + rho * np.sum(weighted, axis=1))
+
+
+def _objective_matrix(
+    rows: Sequence[Mapping[str, Any]],
+    objectives: Mapping[str, str],
+) -> np.ndarray:
+    """``(n, m)`` objective values, signed so that larger is always better."""
+    columns = []
+    for name, sense in objectives.items():
+        sign = 1.0 if str(sense).lower().startswith("max") else -1.0
+        try:
+            columns.append(sign * np.array([float(r[name]) for r in rows], dtype=float))
+        except (KeyError, TypeError) as exc:
+            raise ValueError(
+                f"objective column {name!r} is missing or not numeric in the completed runs"
+            ) from exc
+    return np.column_stack(columns)
+
+
+class _InputEncoder:
+    """Turns run dicts into the numeric matrix a surrogate sees, and back.
+
+    A GP measures distance between runs, so a categorical factor has to be
+    encoded before it can be modelled at all. Coding levels as 0, 1, 2 invents
+    an ordering and a spacing that the chemistry does not have -- it asserts
+    that level 1 lies between the other two and is equally far from each. The
+    honest encoding is **one-hot**: one indicator column per level, so every
+    pair of levels is the same distance apart and none is between any others.
+
+    Continuous inputs are standardized (mean 0, sd 1) when asked; the indicator
+    columns are left alone, since their scale already is the distance between
+    two levels.
+    """
+
+    def __init__(
+        self,
+        names: Sequence[str],
+        categorical: Mapping[str, Sequence[Any]] | None,
+        standardize: bool,
+    ) -> None:
+        self.names = list(names)
+        self.categorical = {str(k): list(v) for k, v in (categorical or {}).items()}
+        unknown = [k for k in self.categorical if k not in self.names]
+        if unknown:
+            raise ValueError(f"categorical factor(s) {unknown} are not inputs {self.names}")
+        for name, levels in self.categorical.items():
+            if len(levels) < 2:
+                raise ValueError(f"categorical factor {name!r} needs at least two levels")
+            if len(set(map(str, levels))) != len(levels):
+                raise ValueError(f"categorical factor {name!r} has repeated levels")
+        self.continuous = [n for n in self.names if n not in self.categorical]
+        self.standardize = bool(standardize)
+        self._mu: np.ndarray | None = None
+        self._sd: np.ndarray | None = None
+
+    @property
+    def has_categorical(self) -> bool:
+        return bool(self.categorical)
+
+    def fit(self, rows: Sequence[Mapping[str, Any]]) -> "_InputEncoder":
+        """Learn the standardization from the completed runs."""
+        if self.continuous and self.standardize:
+            values = np.array([[float(r[n]) for n in self.continuous] for r in rows], dtype=float)
+            mu = values.mean(axis=0)
+            sd = values.std(axis=0, ddof=0)
+            self._mu, self._sd = mu, np.where(sd > 0.0, sd, 1.0)
+        else:
+            self._mu = np.zeros(len(self.continuous))
+            self._sd = np.ones(len(self.continuous))
+        return self
+
+    def encode(self, rows: Sequence[Mapping[str, Any]]) -> np.ndarray:
+        """``(n, d)`` features: standardized continuous columns, then indicators."""
+        if self._mu is None:
+            raise RuntimeError("encoder used before fit")
+        blocks = []
+        if self.continuous:
+            values = np.array([[float(r[n]) for n in self.continuous] for r in rows], dtype=float)
+            blocks.append((values - self._mu) / self._sd)
+        for name, levels in self.categorical.items():
+            keys = [str(level) for level in levels]
+            indicator = np.zeros((len(rows), len(levels)), dtype=float)
+            for i, row in enumerate(rows):
+                value = str(row[name])
+                if value not in keys:
+                    raise ValueError(
+                        f"run has {name}={row[name]!r}, which is not one of its levels {levels}"
+                    )
+                indicator[i, keys.index(value)] = 1.0
+            blocks.append(indicator)
+        return np.hstack(blocks) if blocks else np.zeros((len(rows), 0))
 
 
 def optimize_round(
@@ -206,6 +413,8 @@ def optimize_round(
     acquisition_kwargs: dict[str, Any] | None = None,
     infeasible_runs: Sequence[int] | None = None,
     feasibility_column: str | None = None,
+    categorical: Mapping[str, Sequence[Any]] | None = None,
+    objectives: Sequence[str] | Mapping[str, str] | None = None,
 ) -> OptimizationRoundResult:
     """Propose the next batch of experiments using an active-learning surrogate.
 
@@ -252,6 +461,26 @@ def optimize_round(
         run_ids of runs that failed (no usable response). With
         ``feasibility_column`` they train a classifier whose probability of
         feasibility weights the acquisition; they never enter the surrogate.
+    objectives : sequence of column names, or mapping name -> sense, optional
+        Optimize several responses at once (ParEGO; Knowles 2006). Each round
+        draws a random weight vector, scalarizes the objectives with an
+        augmented Chebyshev function and runs the ordinary single-objective
+        acquisition on it -- one weight vector per requested run, which is what
+        makes a batch spread along the trade-off rather than crowd one end of
+        it. A sequence uses ``criterion`` for every objective; a mapping gives
+        each its own ``"maximize"``/``"minimize"``.
+
+        The result then carries ``pareto_front`` (the non-dominated completed
+        runs) instead of a single incumbent, because with several objectives
+        there is no single best run. Which point on the front to take is a
+        judgement about value, not about data.
+    categorical : mapping name -> levels, optional
+        Factors that take one of a fixed set of values (a catalyst, a solvent).
+        They are one-hot encoded for the surrogate, and the candidate pool is
+        the product of the levels with the continuous box, so every level is
+        proposed on its merits. Coding them as 0, 1, 2 instead would assert an
+        ordering and a spacing the chemistry does not have. The levels are
+        written back to the workbook as given, not as numbers.
     feasibility_column : str, optional
         A workbook column marking each finished run as feasible (1, True,
         "yes") or not (0, False, "no", "fail", "infeasible").
@@ -261,12 +490,37 @@ def optimize_round(
     acq_fn = resolve_acquisition(acquisition)
     acq_kwargs = dict(acquisition_kwargs or {})
 
+    if objectives is None:
+        objective_senses: dict[str, str] = {}
+    elif isinstance(objectives, Mapping):
+        objective_senses = {str(k): str(v) for k, v in objectives.items()}
+    else:
+        objective_senses = {str(name): crit.value for name in objectives}
+    if len(objective_senses) == 1:
+        raise ValueError("objectives needs at least two columns; for one response use criterion=")
+
     wb = workbook if isinstance(workbook, Workbook) else Workbook.open(Path(workbook))
 
     specs = wb.input_specs()
     names = list(input_names) if input_names is not None else [s.name for s in specs]
+    categorical_names = set(categorical or {})
     if bounds is None:
-        bounds_arr = np.array([(s.lb, s.ub) for s in specs], dtype=float)
+        # A categorical factor has levels, not a range, so it needs no bounds --
+        # and it may be a plain column rather than a declared input. Its row is
+        # a placeholder the encoder never reads.
+        spec_by_name = {s.name: s for s in specs}
+        rows = []
+        for name in names:
+            if name in categorical_names:
+                rows.append((0.0, 1.0))
+            elif name in spec_by_name:
+                rows.append((spec_by_name[name].lb, spec_by_name[name].ub))
+            else:
+                raise ValueError(
+                    f"no bounds for input {name!r}: it is not in the workbook's input specs "
+                    f"{sorted(spec_by_name)}, so pass bounds= or declare it categorical"
+                )
+        bounds_arr = np.array(rows, dtype=float)
     else:
         bounds_arr = np.asarray(list(bounds), dtype=float)
     if bounds_arr.shape != (len(names), 2):
@@ -289,56 +543,86 @@ def optimize_round(
             "column before calling optimize_round"
         )
 
-    X_raw = np.array([[float(r[n]) for n in names] for r in completed], dtype=float)
-    y = np.array([float(r[response]) for r in completed], dtype=float)
-
-    if standardize_inputs:
-        mu_x = X_raw.mean(axis=0)
-        sd_x = X_raw.std(axis=0, ddof=0)
-        sd_x = np.where(sd_x > 0.0, sd_x, 1.0)
-        X = (X_raw - mu_x) / sd_x
+    encoder = _InputEncoder(names, categorical, standardize_inputs).fit(completed)
+    X = encoder.encode(completed)
+    if objective_senses:
+        Y = _objective_matrix(completed, objective_senses)
+        y = _chebyshev_scalarization(Y, np.full(Y.shape[1], 1.0 / Y.shape[1]))
     else:
-        mu_x = np.zeros(len(names))
-        sd_x = np.ones(len(names))
-        X = X_raw
+        Y = None
+        y = np.array([float(r[response]) for r in completed], dtype=float)
 
     s = coerce_surrogate(surrogate, random_state=seed)
     s.fit(X, y)
 
     rng = np.random.default_rng(seed)
-    if candidates is not None:
-        candidates_raw = _as_matrix(candidates, names)
-    elif callable(candidate_sampler):
-        candidates_raw = _as_matrix(candidate_sampler(int(n_candidates), rng), names)
-    else:
-        candidates_raw = _sample_candidates(bounds_arr, n_candidates, candidate_sampler, rng)
-    if len(candidates_raw) == 0:
+    candidate_rows = _candidate_rows(
+        candidates=candidates,
+        candidate_sampler=candidate_sampler,
+        n_candidates=int(n_candidates),
+        names=names,
+        bounds_arr=bounds_arr,
+        encoder=encoder,
+        rng=rng,
+    )
+    if not candidate_rows:
         raise ValueError("the candidate pool is empty")
-    candidates_std = (candidates_raw - mu_x) / sd_x if standardize_inputs else candidates_raw
+    candidates_std = encoder.encode(candidate_rows)
 
     # Unknown constraints: P(feasible) from a classifier on feasible vs failed runs.
     p_feasible: np.ndarray | None = None
     if failed:
-        X_fail = np.array([[float(r[n]) for n in names] for r in failed], dtype=float)
-        X_fail = (X_fail - mu_x) / sd_x if standardize_inputs else X_fail
+        X_fail = encoder.encode(failed)
         p_feasible = _feasibility_probability(X, X_fail, candidates_std, seed)
 
-    incumbent_idx = int(np.argmax(direction * y))
-    incumbent_y = float(y[incumbent_idx])
-    incumbent_x = {n: float(X_raw[incumbent_idx, i]) for i, n in enumerate(names)}
+    def _natural(row: Mapping[str, Any]) -> dict[str, Any]:
+        return {n: (row[n] if n in encoder.categorical else float(row[n])) for n in names}
+
+    pareto_front: list[dict[str, Any]] | None = None
+    weights_used: list[list[float]] | None = None
+    if Y is not None:
+        # With several objectives there is no single best run, so the incumbent
+        # is a *set*: the runs nothing else beats on every objective at once.
+        mask = _pareto_mask(Y)
+        pareto_front = [
+            {**_natural(completed[i]), **{n: float(completed[i][n]) for n in objective_senses}}
+            for i in np.flatnonzero(mask)
+        ]
+        weights_used = []
+        incumbent_x = None
+        incumbent_y = None
+    else:
+        incumbent_idx = int(np.argmax(direction * y))
+        incumbent_y = float(y[incumbent_idx])
+        incumbent_x = _natural(completed[incumbent_idx])
 
     chosen_idx: list[int] = []
     chosen_scores: list[float] = []
     X_fantasy = X.copy()
     y_fantasy = y.copy()
-    incumbent_for_acq = incumbent_y
+    incumbent_for_acq = incumbent_y if incumbent_y is not None else float(np.max(y))
 
     for _ in range(int(batch_size)):
+        if Y is not None:
+            # ParEGO: a fresh weight vector per requested run. The spread of a
+            # batch comes from the spread of the weights, so the fantasy
+            # refitting the single-objective path uses is neither needed nor
+            # meaningful here -- a mean imputed under one scalarization says
+            # nothing about the next one.
+            w = rng.dirichlet(np.ones(Y.shape[1]))
+            weights_used.append([float(v) for v in w])
+            y_round = _chebyshev_scalarization(Y, w)
+            s = coerce_surrogate(surrogate, random_state=seed)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="the fitted GP noise sits on its floor")
+                s.fit(X, y_round)
+            incumbent_for_acq = float(np.max(y_round))
+
         scores = call_acquisition(
             acq_fn,
             s,
             candidates_std,
-            direction=direction,
+            direction=1.0 if Y is not None else direction,
             y_best=incumbent_for_acq,
             acq_kwargs=acq_kwargs,
         )
@@ -353,6 +637,9 @@ def optimize_round(
         pick = int(np.argmax(scores))
         chosen_idx.append(pick)
         chosen_scores.append(float(scores[pick]))
+
+        if Y is not None:
+            continue  # the next weight vector, not a fantasy, diversifies here
 
         # Mean-imputation: pretend the chosen point's response is the
         # surrogate's mean. Re-fit so the next pick sees lower
@@ -369,9 +656,7 @@ def optimize_round(
             warnings.filterwarnings("ignore", message="the fitted GP noise sits on its floor")
             s.fit(X_fantasy, y_fantasy)
 
-    next_designs = [
-        {n: float(candidates_raw[i, j]) for j, n in enumerate(names)} for i in chosen_idx
-    ]
+    next_designs = [dict(candidate_rows[i]) for i in chosen_idx]
     batch_idx = wb.next_batch_index()
     new_run_ids = wb.append_runs(batch_idx, next_designs)
     wb.log(
@@ -396,6 +681,8 @@ def optimize_round(
         n_completed=len(completed),
         workbook_path=str(wb.path),
         feasibility=None if p_feasible is None else [float(p_feasible[i]) for i in chosen_idx],
+        pareto_front=pareto_front,
+        scalarization_weights=weights_used,
     )
 
 
