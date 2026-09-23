@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`mse_subset_selection` is fast enough to use.** It fits the model once per
+  subset size, and each fit went through the base estimator: a model rebuild and
+  a solver call every time, about 7 s for 7 parameters and worse from there. All
+  `p` fits minimize the *same* deviance over different subsets of its
+  coordinates, so the deviance is now built once and each fit is a bounded
+  minimization of an already-compiled objective with an exact gradient. Seven
+  parameters dropped from 7.3 s to 0.8 s, with the deviances, the critical
+  ratios and the recommended subset unchanged (tests pin them against the
+  estimator path). An experiment with no compiled path -- one that needs a solve
+  -- still goes through the estimator.
 - **`profile_likelihood` no longer reports a flat profile for a dynamic model.**
   Asking for a combination (`expression=` or `function=`) on an `ODEExperiment`
   returned `shape="flat"` and no interval, where the same quantity asked for as
