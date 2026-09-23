@@ -291,3 +291,49 @@ def test_parametric_surrogate_from_symbolic():
     )
     assert s.parameters_["b"] == pytest.approx(0.7, rel=1e-6)
     assert np.all(sd > 0)
+
+
+# ---------------------------------------------------------------------------
+# Deviance-based tools on a campaign
+# ---------------------------------------------------------------------------
+
+
+def test_deviance_of_a_campaign_uses_its_own_sigma():
+    """A campaign spells sigma nowhere an attribute lookup can see it.
+
+    It keeps the errors on the per-run model and states them only when it
+    builds the campaign model, so a deviance that reads attributes alone fell
+    back to sigma = 1 -- a factor of 1/0.1**2 = 100 on this campaign, and
+    10,000 on one measured to 0.01. Every deviance-based answer moves with it.
+    """
+    from discopt.doe._estimation import DevianceFunction
+
+    sigma = 0.1
+    camp = campaign_experiment(decay(sigma), RUNS)
+    clean = camp.predict(THETA)
+    rng = np.random.default_rng(0)
+    data = {k: float(v) + rng.normal(0, sigma) for k, v in clean.items()}
+
+    dev = DevianceFunction(camp, data, THETA)
+    by_hand = sum(((data[k] - clean[k]) / sigma) ** 2 for k in clean)
+    assert dev(dev.vector(THETA)) == pytest.approx(by_hand, rel=1e-9)
+
+
+def test_profile_of_a_combination_works_on_a_campaign():
+    """Only this path builds a DevianceFunction, and it called predict(theta, design).
+
+    A campaign's conditions live in its runs, so its predict takes theta alone
+    and the two-argument call raised TypeError. Profiling a *parameter* never
+    reaches that code, which is why the existing campaign profile test passed
+    while a combination could not be profiled at all.
+    """
+    sigma = 0.05
+    m = decay(sigma)
+    runs = RUNS * 3
+    camp = campaign_experiment(m, runs)
+    rng = np.random.default_rng(3)
+    data = camp.data_from_runs([{"y": m.predict(THETA, r) + rng.normal(0, sigma)} for r in runs])
+
+    combination = profile_likelihood(camp, data, expression="a*b", name="a*b")
+    assert combination.shape == "bounded"
+    assert combination.ci_lower < THETA["a"] * THETA["b"] < combination.ci_upper
