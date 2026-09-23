@@ -304,6 +304,25 @@ def _distinct(a: Mapping[str, float], b: Mapping[str, float], rtol: float = 1e-2
 # --------------------------------------------------------------------------
 
 
+def _design_caller(fn: Callable) -> Callable:
+    """Wrap ``fn`` so it can be called as ``fn(theta, design)`` either way.
+
+    An experiment built from design inputs takes ``predict(theta, design)``; a
+    campaign has its conditions baked into its runs and takes ``predict(theta)``.
+    Calling the second with two arguments is a TypeError, which is how this was
+    found.
+    """
+    try:
+        import inspect
+
+        takes_design = len(inspect.signature(fn).parameters) >= 2
+    except (TypeError, ValueError):  # a builtin or C callable: assume the pair
+        takes_design = True
+    if takes_design:
+        return lambda theta, design: fn(theta, design)
+    return lambda theta, design: fn(theta)
+
+
 class DevianceFunction:
     """``D(theta) = sum ((y - yhat(theta)) / sigma)^2`` for fixed data.
 
@@ -348,9 +367,10 @@ class DevianceFunction:
 
     def _setup_predict(self, predict: Callable) -> None:
         sig = self._sigmas_from_experiment()
+        call = _design_caller(predict)
 
         def value(theta: np.ndarray) -> float:
-            y = predict(dict(zip(self.names, map(float, theta))), self.design)
+            y = call(dict(zip(self.names, map(float, theta))), self.design)
             return float(
                 sum(np.sum(((obs - float(y[k])) / sig[k]) ** 2) for k, obs in self.data.items())
             )
@@ -368,6 +388,7 @@ class DevianceFunction:
         differences, which is correct but much slower.
         """
         jacobian = getattr(self.experiment, "jacobian", None)
+        jac_call = _design_caller(jacobian) if callable(jacobian) else None
         rows = list(getattr(self.experiment, "response_names", []))
         cols = list(getattr(self.experiment, "parameter_names", []))
         if not callable(jacobian) or set(self.names) - set(cols) or not rows:
@@ -378,10 +399,12 @@ class DevianceFunction:
             return
         ridx = [rows.index(k) for k in keys]
 
+        call = _design_caller(predict)
+
         def gradient(theta: np.ndarray) -> np.ndarray:
             th = dict(zip(self.names, map(float, theta)))
-            y = predict(th, self.design)
-            J = np.asarray(jacobian(th, self.design), dtype=float)[np.ix_(ridx, take)]
+            y = call(th, self.design)
+            J = np.asarray(jac_call(th, self.design), dtype=float)[np.ix_(ridx, take)]
             resid = np.array(
                 [np.sum(self.data[k] - float(y[k])) / sig[k] ** 2 for k in keys], dtype=float
             )
@@ -403,6 +426,7 @@ class DevianceFunction:
         for source in (
             getattr(self.experiment, "measurement_error", None),
             getattr(self.experiment, "sigma", None),
+            self._model_measurement_error(),
         ):
             if source is None:
                 continue
@@ -415,7 +439,7 @@ class DevianceFunction:
                 }
             except (KeyError, TypeError, ValueError):
                 continue
-        warnings.warn(
+        warnings.warn(  # pragma: no cover - every Experiment builds a model
             f"{type(self.experiment).__name__} reports no measurement error; using sigma = 1 "
             "for every response. Deviance-based intervals (profile likelihood) are only "
             "meaningful if that is the true measurement scale.",
@@ -423,6 +447,23 @@ class DevianceFunction:
             stacklevel=3,
         )
         return {k: 1.0 for k in self.data}
+
+    def _model_measurement_error(self) -> Mapping[str, float] | None:
+        """The errors the built model declares, keyed by response name.
+
+        The authority of last resort, and the only one a campaign has: it keeps
+        its errors on the per-run model and spells them out only when it builds
+        the campaign model. Getting this wrong is not a small error -- sigma = 1
+        against a true 0.01 scales the deviance by 10,000 and silently moves
+        every deviance-based answer built on it.
+        """
+        create = getattr(self.experiment, "create_model", None)
+        if not callable(create):
+            return None
+        try:
+            return getattr(create(**self.theta0), "measurement_error", None)
+        except Exception:  # noqa: BLE001 - an unbuildable model is simply no source
+            return None
 
     def _setup_compiled(self) -> bool:
         try:
