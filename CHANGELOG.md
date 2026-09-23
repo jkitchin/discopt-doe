@@ -138,6 +138,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of a misleading `0.0000`.
 
 ### Added
+- **Ratio bounds on a mixture region.** Formulations are stated in ratios far
+  more often than in component bounds -- an emulsifier that has to be two to
+  three times the oil, a solvent-to-solids ratio a coating has to hold -- and
+  neither the classical design nor a search could express one.
+  - `extreme_vertices(bounds, ratios={("emulsifier", "oil"): (2.0, 3.0)})` and
+    `extreme_vertices_design(..., ratios=...)` take them. A ratio is linear once
+    multiplied through by the denominator, so it cuts the region with a straight
+    face like any other constraint -- but the region stops being a slice of a
+    box, so the corners come from general constraint enumeration rather than the
+    McLean-Anderson rule. Edges, faces and centroids follow the new geometry,
+    and an unsatisfiable ratio says that the ratios, not the bounds, closed the
+    region.
+  - `ratio_constraints(numerator, denominator, low, high)` gives the same
+    statement as `h(design) >= 0` callables, for `optimal_experiment`,
+    `robust_optimal_experiment` or any other search that takes constraints. They
+    stay finite where the ratio itself is undefined, at a zero denominator.
 - **`quadratic_from_fit`: a quadratic fitted elsewhere, in this package's
   convention.** A model fitted through a formula interface names its terms after
   the formula (`Intercept`, `I(x1 ** 2)`, `x1:x2`) while the RSM tools speak

@@ -52,6 +52,70 @@ def sum_constraint(variables: Sequence[str], total: float = 1.0) -> DesignConstr
     return _g
 
 
+def ratio_constraints(
+    numerator: str,
+    denominator: str,
+    low: float | None = None,
+    high: float | None = None,
+) -> list[DesignConstraint]:
+    """Inequality constraints holding ``numerator / denominator`` within bounds.
+
+    Formulations are specified in ratios far more often than in component
+    bounds: an emulsifier that has to be two to three times the oil, a
+    solvent-to-solids ratio a coating has to keep. The ratio itself is not
+    linear, but every blend has a non-negative denominator, so multiplying
+    through gives the linear pair ``x_num - low * x_den >= 0`` and
+    ``high * x_den - x_num >= 0`` -- which is what lets an optimizer treat it
+    as an ordinary face of the region.
+
+    Parameters
+    ----------
+    numerator, denominator : str
+        Design variable names.
+    low, high : float, optional
+        Bounds on the ratio. Give at least one; either may be omitted for a
+        one-sided bound.
+
+    Returns
+    -------
+    list of callable
+        One or two ``h(design) >= 0`` constraints, to pass to
+        ``optimal_experiment(..., inequality_constraints=[...])`` or any other
+        search that takes them. For the *classical* design on such a region,
+        :func:`~discopt.doe.mixture.extreme_vertices_design` takes the same
+        ratios directly.
+
+    Notes
+    -----
+    The constraints stay well behaved as the denominator approaches zero,
+    where the ratio itself is undefined: both reduce to a statement about
+    ``x_num`` alone. A region where the denominator can *be* zero is one where
+    the ratio is meaningless, so bound that component away from zero as well.
+    """
+    if low is None and high is None:
+        raise ValueError("give low, high, or both")
+    if low is not None and high is not None and float(low) > float(high):
+        raise ValueError(f"ratio bounds are back to front: low {low} exceeds high {high}")
+    if numerator == denominator:
+        raise ValueError("a component's ratio to itself is not a bound")
+    out: list[DesignConstraint] = []
+    if low is not None:
+        lo = float(low)
+
+        def _at_least(design: dict[str, float], lo: float = lo) -> float:
+            return float(design[numerator] - lo * design[denominator])
+
+        out.append(_at_least)
+    if high is not None:
+        hi = float(high)
+
+        def _at_most(design: dict[str, float], hi: float = hi) -> float:
+            return float(hi * design[denominator] - design[numerator])
+
+        out.append(_at_most)
+    return out
+
+
 def sample_simplex(
     variables: Sequence[str],
     total: float,
@@ -189,6 +253,7 @@ def _project_bounded(v: np.ndarray, lo: np.ndarray, hi: np.ndarray, total: float
 
 
 __all__ = [
+    "ratio_constraints",
     "DesignConstraint",
     "project_to_simplex",
     "sample_simplex",
