@@ -121,9 +121,10 @@ def test_a_workbook_written_before_the_column_existed_still_reads(tmp_path) -> N
 def test_extra_columns_reach_the_runs_sheet(tmp_path) -> None:
     wb = _campaign(tmp_path, extra_columns=["operator", "lot"])
     headers = wb._runs_headers()
-    assert headers == ["run_id", "batch", "x", "operator", "lot", "run_order", "y", "measured_at"]
+    assert headers == ["run_id", "batch", "x", "operator", "lot", "y", "measured_at", "run_order"]
     # They sit between the factors and the response, where anova_report looks
-    # for blocking factors, and they come back on every run.
+    # for blocking factors; run_order is appended last so the response keeps
+    # the column index existing scripts assume. They come back on every run.
     assert all("operator" in r for r in wb.all_runs())
 
 
@@ -139,10 +140,23 @@ def test_a_design_that_needs_replicate_keeps_it(tmp_path) -> None:
     )
     headers = wb._runs_headers()
     assert "replicate" in headers and "operator" in headers
-    assert headers.index("replicate") < headers.index("run_order")
+    # Both sit before the response, where anova_report looks for them.
+    assert headers.index("replicate") < headers.index("y")
+    assert headers.index("operator") < headers.index("y")
 
 
 def test_a_column_that_clashes_with_a_built_in_is_refused(tmp_path) -> None:
     for name in ("run_id", "batch", "run_order", "measured_at", " "):
         with pytest.raises(DoEError, match="clash|blank"):
             _campaign(tmp_path, extra_columns=[name])
+
+
+def test_the_response_keeps_its_column_position(tmp_path) -> None:
+    """Scripts index this file by position -- two of this package's own
+    notebooks write the response as column 4 of a one-input campaign. A new
+    column that shifts it turns every such write into a silently pending run.
+    """
+    wb = _campaign(tmp_path)
+    headers = wb._runs_headers()
+    assert headers[:4] == ["run_id", "batch", "x", "y"]
+    assert headers.index("run_order") == len(headers) - 1
