@@ -9,7 +9,6 @@ the wrong direction quietly optimizes the objective you down-weighted.
 from __future__ import annotations
 
 import numpy as np
-import openpyxl
 import pytest
 from discopt.doe.cli import NewParams, do_new
 from discopt.doe.optimize import (
@@ -19,6 +18,11 @@ from discopt.doe.optimize import (
     optimize_round,
 )
 from discopt.doe.workbook import Workbook
+
+# The default surrogate is the GP preset, which lives in the optional 'ml'
+# extra. Skip the module on a core install rather than failing on the import.
+pytest.importorskip("sklearn")
+openpyxl = pytest.importorskip("openpyxl")
 
 LEVELS = ["A", "B", "C"]
 

@@ -359,6 +359,43 @@ class SymbolicModel:
             measurement_error=float(measurement_error),
         )
 
+    def to_dict(self) -> dict[str, Any]:
+        """The whole model as JSON-able data, including response name and sigma.
+
+        :meth:`to_metadata` is the workbook's form, which carries only the
+        expression and the name lists because a workbook already records the
+        response and the measurement error in its own metadata. A model written
+        on its own -- into a :class:`~discopt.doe.card.ModelCard`, or any other
+        file -- has to carry them itself.
+        """
+        return {
+            **self.to_metadata(),
+            "response": self.response_name,
+            "measurement_error": float(self.measurement_error),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "SymbolicModel":
+        """Rebuild a model written by :meth:`to_dict`. Parsed, never executed."""
+        return cls.from_metadata(
+            payload,
+            response_name=str(payload.get("response", "y")),
+            measurement_error=float(payload.get("measurement_error", 1.0)),
+        )
+
+    def to_json(self, *, indent: int = 2) -> str:
+        """The model as JSON text."""
+        import json
+
+        return json.dumps(self.to_dict(), indent=indent)
+
+    @classmethod
+    def from_json(cls, text: str) -> "SymbolicModel":
+        """Read a model from JSON text written by :meth:`to_json`."""
+        import json
+
+        return cls.from_dict(json.loads(text))
+
     def pretty(self) -> str:
         """A readable one-line rendering of the model and its derivatives."""
         lines = [f"{self.response_name} = {self.expression}"]

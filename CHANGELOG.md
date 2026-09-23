@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Deviance-based tools work on a campaign.** `DevianceFunction` called
+  `predict(theta, design)`, but a campaign's conditions live in its runs, so its
+  `predict` takes `theta` alone and the call raised `TypeError`. It now adapts
+  to either signature. Profiling a *parameter* never reaches that code, which is
+  why this went unseen: only a combination (`expression=`/`function=`) on a
+  campaign hit it.
+- **A campaign's deviance uses its own sigma.** A campaign keeps its
+  measurement errors on the per-run model and spells them out only when it
+  builds the campaign model, so an attribute lookup found nothing and fell back
+  to sigma = 1 -- a factor of 10,000 on a campaign measured to 0.01, and every
+  deviance-based answer moves with it. The built model's `measurement_error` is
+  now consulted as the authority of last resort, which every `Experiment`
+  provides.
+- **`mse_subset_selection` is fast enough to use.** It fits the model once per
+  subset size, and each fit went through the base estimator: a model rebuild and
+  a solver call every time, about 7 s for 7 parameters and worse from there. All
+  `p` fits minimize the *same* deviance over different subsets of its
+  coordinates, so the deviance is now built once and each fit is a bounded
+  minimization of an already-compiled objective with an exact gradient. Seven
+  parameters dropped from 7.3 s to 0.8 s, with the deviances, the critical
+  ratios and the recommended subset unchanged (tests pin them against the
+  estimator path). An experiment with no compiled path -- one that needs a solve
+  -- still goes through the estimator.
 - **`profile_likelihood` no longer reports a flat profile for a dynamic model.**
   Asking for a combination (`expression=` or `function=`) on an `ODEExperiment`
   returned `shape="flat"` and no interval, where the same quantity asked for as
@@ -133,6 +156,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   completed runs, and `scalarization_weights`, in place of a single incumbent:
   with several objectives there is no single best run, and choosing a point on
   the front is a judgement about value, not about data.
+- **A fitted model is a file now: `ModelCard`.** A model is only reusable if
+  everything a prediction needs travels with it — the model form, the estimates,
+  their covariance, and the noise estimate behind that covariance. `ModelCard`
+  is that bundle as JSON:
+  - `ModelCard.from_fit(model, fit, design_region=..., rows=...)` builds one from
+    a `fit_least_squares` result; `save`/`load` and `to_json`/`from_json` move it
+    between sessions. The expression is *parsed* on the way back in, never
+    executed, so opening a card someone sent you runs none of their code.
+  - `predict`, `standard_error` (the delta method) and `interval(kind="mean" |
+    "prediction")` come with it, so a reloaded model answers *how well* and not
+    only *what*. The critical value is t with the fit's degrees of freedom when
+    sigma was estimated, normal when it was declared.
+  - The card records the `design_region` it was fitted over, because that is the
+    only thing that lets a later reader tell interpolation from extrapolation
+    (`inside_design_region`), plus a digest of the runs, a timestamp and the
+    package version. It deliberately does not carry the data.
+  - `SymbolicModel.to_json`/`from_json` (and `to_dict`/`from_dict`) serialize a
+    model on its own, carrying the response name and measurement error that
+    `to_metadata` leaves to the workbook.
+- **A workbook records the sigma behind its standard errors.** The stored
+  information matrix is on the *declared*-sigma scale, which is what `extend`
+  needs, so turning it back into the covariance the standard errors came from
+  meant recovering the scale by hand from a stored standard error. `fit` now
+  writes `sigma_hat`/`sigma_source` as well, `Workbook.fitted_sigma()` reads them
+  back, and `Workbook.read_covariance()` does the rescaling. `do_fit` reports
+  `sigma`, `sigma_source` and `degrees_of_freedom` in its result, on both the
+  linear and the user-defined-model paths. Workbooks written before this return
+  `(None, None)` and `None`.
 - **Campaigns: runs with conditions.**
   - `campaign_experiment(model, runs)` turns a per-run model (a `SymbolicModel`,
     an `ODEExperiment` or an `Experiment` with design inputs) plus a list of run
