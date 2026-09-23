@@ -283,11 +283,22 @@ class Workbook:
         # for factorial/latin designs) sit between the design inputs and the
         # response so ``anova_report`` can pick them up as blocking factors.
         runs_sheet = wb[SHEET_RUNS]
+        # "run_order" is blank unless the bench deviated from the order the
+        # rows are written in -- the randomized order the design was created in.
+        # A number there records what actually happened, without which the
+        # deviation is lost and the drift check the randomization pays for runs
+        # against an order that never happened.
+        #
+        # It goes *after* measured_at rather than next to the response, which
+        # would read better on the sheet, because the response's column index is
+        # part of this file's contract in practice: two of this package's own
+        # notebooks write it by position, and so will other people's scripts.
+        # New columns are appended; they do not shift the old ones.
         header = (
             ["run_id", "batch"]
             + [s.name for s in input_specs]
             + list(extra_columns)
-            + [response_name, "measured_at"]
+            + [response_name, "measured_at", "run_order"]
         )
         runs_sheet.append(header)
 
@@ -434,11 +445,12 @@ class Workbook:
     def append_runs(self, batch_idx: int, runs: Sequence[Mapping[str, object]]) -> list[int]:
         """Append a batch of pending runs to the workbook. Returns the new run_ids."""
         sheet = self._wb[SHEET_RUNS]
-        # Header layout is run_id, batch, <inputs...>, <extra...>, response,
-        # measured_at. The middle columns (inputs plus any extra bookkeeping
-        # columns such as "replicate") are written from each run mapping.
+        # Built from the header names rather than from slice positions: the
+        # layout has grown a column before (run_order) and slicing is how that
+        # kind of change turns into a silently misplaced value.
         headers = self._runs_headers()
-        middle = headers[2:-2] if len(headers) >= 4 else self._input_column_names()
+        automatic = {"run_id", "batch", self.response_name(), "measured_at", "run_order"}
+        middle = [h for h in headers[2:] if h not in automatic] or self._input_column_names()
         # Determine next run_id
         existing_ids = []
         for row in sheet.iter_rows(min_row=2, values_only=True):
@@ -450,16 +462,16 @@ class Workbook:
         next_id = (max(existing_ids) + 1) if existing_ids else 1
         new_ids: list[int] = []
         for run in runs:
-            row = [next_id, int(batch_idx)]
+            values: dict[str, Any] = {"run_id": next_id, "batch": int(batch_idx)}
             for nm in middle:
                 v = run.get(nm)
-                if isinstance(v, (int, float)) and not isinstance(v, bool):
-                    row.append(float(v))
-                else:
-                    row.append(v)
-            row.append(None)  # response (blank => pending)
-            row.append(None)  # measured_at
-            sheet.append(row)
+                values[nm] = (
+                    float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
+                )
+            # response, measured_at and run_order stay blank: the first two are
+            # what marks a run pending, and the third is only written when the
+            # bench departs from the order below.
+            sheet.append([values.get(h) for h in headers])
             # A string level like "=A" would be stored by openpyxl as a live
             # formula (spreadsheet-injection). Force such cells to plain text.
             written = sheet[sheet.max_row]
@@ -469,6 +481,47 @@ class Workbook:
             new_ids.append(next_id)
             next_id += 1
         return new_ids
+
+    def run_order(self) -> dict[int, int]:
+        """The order the runs were executed in, ``{run_id: position}``.
+
+        A blank ``run_order`` cell means that run went in ``run_id`` order,
+        which is the randomized order the design was written in. A number
+        overrides it, so a bench that ran #7 before #3 can say so and the drift
+        check still sees the truth.
+
+        Raises
+        ------
+        ValueError
+            If the filled-in positions repeat, which would make the order
+            ambiguous. Partial completion is fine: the runs left blank keep
+            their ``run_id`` position.
+        """
+        headers = self._runs_headers()
+        if "run_order" not in headers:  # written before the column existed
+            return {int(r["run_id"]): int(r["run_id"]) for r in self.all_runs()}
+        out: dict[int, int] = {}
+        stated: dict[int, int] = {}
+        for row in self.all_runs():
+            run_id = int(row["run_id"])
+            raw = row.get("run_order")
+            if raw is None or (isinstance(raw, str) and not raw.strip()):
+                out[run_id] = run_id
+                continue
+            try:
+                position = int(float(raw))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"run {run_id} has run_order {raw!r}, which is not a number"
+                ) from exc
+            if position in stated:
+                raise ValueError(
+                    f"runs {stated[position]} and {run_id} both claim run_order {position}; "
+                    "the executed order has to be unambiguous"
+                )
+            stated[position] = run_id
+            out[run_id] = position
+        return out
 
     def _cached_runs_rows(self) -> list[list[Any]]:
         """On-disk *computed* values of the runs sheet (Excel formula results).
