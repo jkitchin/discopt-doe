@@ -133,6 +133,7 @@ _SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
         "experiment_region",
         "optimal_experiment",
         "project_to_simplex",
+        "ratio_constraints",
         "sample_simplex",
         "sum_constraint",
     ),
@@ -293,6 +294,7 @@ _SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
     "simplex": (
         "DesignConstraint",
         "project_to_simplex",
+        "ratio_constraints",
         "sample_simplex",
         "sum_constraint",
     ),
@@ -473,6 +475,7 @@ __all__ = [
     "parse_expression",
     "polynomial_1d_template",
     "project_to_simplex",
+    "ratio_constraints",
     "response_surface_template",
     "profile_all",
     "profile_likelihood",
