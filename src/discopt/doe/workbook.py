@@ -658,7 +658,23 @@ class Workbook:
         estimates: dict[str, float],
         std_errors: dict[str, float],
         confidence_intervals: dict[str, tuple[float, float]],
+        *,
+        sigma: float | None = None,
+        sigma_source: str | None = None,
     ) -> None:
+        """Record the fit. ``sigma`` is the noise level behind ``std_errors``.
+
+        The FIM sheet is written on the *declared* sigma scale, because that is
+        what ``extend`` adds the next runs' information to and a design does not
+        care about the overall scale. Storing the fitted sigma alongside it is
+        what lets :meth:`read_covariance` turn that matrix back into the
+        covariance the standard errors came from, instead of leaving a reader to
+        recover the scale from a stored standard error.
+        """
+        if sigma is not None:
+            self._set_metadata("sigma_hat", float(sigma))
+        if sigma_source is not None:
+            self._set_metadata("sigma_source", str(sigma_source))
         sheet = self._wb[SHEET_PARAMETERS]
         # Clear existing data rows, keep header.
         if sheet.max_row > 1:
@@ -772,6 +788,53 @@ class Workbook:
                 c.font = body
                 c.alignment = right
             r += 1
+
+    def _set_metadata(self, key: str, value: Any) -> None:
+        """Upsert one key in the metadata sheet."""
+        sheet = self._wb[SHEET_METADATA]
+        for row in sheet.iter_rows(min_row=2):
+            if row[0].value is not None and str(row[0].value) == key:
+                row[1].value = value
+                return
+        sheet.append([key, value])
+
+    def fitted_sigma(self) -> tuple[float | None, str | None]:
+        """The noise level behind the stored standard errors, and where it came from.
+
+        ``(None, None)`` for a workbook written before this was recorded, or one
+        that has not been fitted.
+        """
+        meta = self.metadata()
+        raw = meta.get("sigma_hat")
+        if raw is None or raw == "":
+            return None, None
+        source = meta.get("sigma_source")
+        return float(raw), (None if source is None or source == "" else str(source))
+
+    def read_covariance(self) -> tuple[np.ndarray, list[str]] | None:
+        """The parameter covariance behind the stored standard errors.
+
+        The stored information matrix is on the declared-sigma scale, so this is
+        ``inv(F) * (sigma_hat / sigma_declared)**2``. Returns ``None`` when the
+        workbook has no FIM, or was written before the fitted sigma was
+        recorded -- in which case the standard errors themselves are still in
+        the parameters sheet.
+        """
+        read = self.read_fim()
+        if read is None:
+            return None
+        fim, names = read
+        sigma_hat, _ = self.fitted_sigma()
+        if sigma_hat is None:
+            return None
+        declared = self.measurement_error()
+        if declared <= 0.0:
+            return None
+        try:
+            cov = np.linalg.inv(fim)
+        except np.linalg.LinAlgError:
+            cov = np.linalg.pinv(fim)
+        return cov * (sigma_hat / declared) ** 2, names
 
     def read_parameters(self) -> list[dict[str, Any]]:
         sheet = self._wb[SHEET_PARAMETERS]
