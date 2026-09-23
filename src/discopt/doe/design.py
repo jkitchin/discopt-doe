@@ -8,7 +8,7 @@ Information Matrix.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Sequence
+from typing import TYPE_CHECKING, Callable, Mapping, Sequence
 
 import numpy as np
 from scipy.optimize import minimize
@@ -32,16 +32,28 @@ from discopt.doe.simplex import (
 )
 from discopt.estimate import Experiment
 
+if TYPE_CHECKING:  # DesignRegion is imported lazily where it is built
+    from discopt.doe.linear_design import DesignRegion
+
 _SINGULAR_SENTINEL = 1e12
 
 
 class DesignCriterion:
-    """Design optimality criteria constants."""
+    """Design optimality criteria constants.
+
+    The first four are about the *parameters*: how small the confidence
+    ellipsoid is (D), the total variance (A), the worst-determined direction
+    (E), how spherical it is (ME). The last two are about *predictions* over a
+    region you name, and need one: I is the average variance of the fitted
+    response over the region, G its maximum.
+    """
 
     D_OPTIMAL = "determinant"
     A_OPTIMAL = "trace"
     E_OPTIMAL = "min_eigenvalue"
     ME_OPTIMAL = "condition_number"
+    I_OPTIMAL = "average_variance"
+    G_OPTIMAL = "max_variance"
 
 
 class BatchStrategy:
@@ -220,8 +232,32 @@ def _metrics_from_fim(fim: np.ndarray) -> dict[str, float]:
     }
 
 
-def _criterion_from_fim(fim: np.ndarray, criterion: str) -> float:
-    """Evaluate a design criterion directly on a FIM matrix."""
+PREDICTION_CRITERIA = (DesignCriterion.I_OPTIMAL, DesignCriterion.G_OPTIMAL)
+
+
+def _criterion_from_fim(
+    fim: np.ndarray,
+    criterion: str,
+    region: "DesignRegion | None" = None,
+    *,
+    smooth: bool = False,
+) -> float:
+    """Evaluate a design criterion directly on a FIM matrix.
+
+    ``region`` is required for the prediction criteria and ignored by the
+    others. ``smooth=True`` asks G for its soft maximum, a differentiable
+    stand-in the local optimizer can follow; the exact maximum is piecewise and
+    a gradient search stalls on its kinks. Report the exact one.
+    """
+    if criterion in PREDICTION_CRITERIA:
+        if region is None:
+            raise ValueError(
+                f"criterion {criterion!r} predicts over a region, so it needs one: pass "
+                "prediction_bounds or prediction_points (see experiment_region)"
+            )
+        if criterion == DesignCriterion.I_OPTIMAL:
+            return region.average_variance(fim)
+        return region.soft_max_variance(fim) if smooth else region.max_variance(fim)
     metrics = _metrics_from_fim(fim)
     if criterion == DesignCriterion.D_OPTIMAL:
         return metrics["log_det_fim"]
@@ -235,6 +271,64 @@ def _criterion_from_fim(fim: np.ndarray, criterion: str) -> float:
         raise ValueError(f"Unknown criterion: {criterion!r}")
 
 
+def experiment_region(
+    experiment: Experiment,
+    param_values: Mapping[str, float],
+    *,
+    bounds: Mapping[str, tuple[float, float]] | None = None,
+    points: Sequence[Mapping[str, float]] | None = None,
+    n_points: int = 256,
+    seed: int = 0,
+) -> "DesignRegion":
+    """Where a design has to predict well, for the I and G criteria.
+
+    For a model nonlinear in its parameters the row ``f(x)`` that the
+    prediction variance is built from is the *sensitivity* row
+    ``dy/dtheta`` at ``x``, evaluated at the nominal parameters -- the same
+    rows the FIM is assembled from. This computes them once for every point in
+    the region, which is what makes an I- or G-optimal search affordable: they
+    depend on the nominals and the region, never on the design being searched,
+    so each candidate costs one solve against a precomputed matrix.
+
+    An experiment with several responses (a dynamic experiment measuring a
+    state at four times has four) contributes one row per response per point,
+    so I averages over points *and* responses, and G takes the worst of them.
+
+    Parameters
+    ----------
+    experiment, param_values
+        The experiment and the nominal parameters the sensitivities are taken
+        at, as for :func:`~discopt.doe.compute_fim`.
+    bounds : mapping, optional
+        Box to sample the region from, usually the design bounds.
+    points : sequence of mapping, optional
+        Explicit points, used as given instead of sampling.
+    n_points, seed
+        Sample size and seed when sampling from ``bounds``.
+    """
+    from discopt.doe.linear_design import DesignRegion
+    from discopt.doe.prediction import region_points
+
+    if points is None:
+        if not bounds:
+            raise ValueError("give either bounds to sample the region from, or points")
+        names = list(bounds)
+        points = region_points(names, int(n_points), bounds=bounds, seed=seed)
+    rows = [dict(r) for r in points]
+    if not rows:
+        raise ValueError("the prediction region has no points")
+    names = list(rows[0])
+
+    results = compute_fim_batch(experiment, dict(param_values), rows)
+    jac = np.stack([np.atleast_2d(np.asarray(r.jacobian, dtype=float)) for r in results])
+    n_points_actual, n_responses, n_par = jac.shape
+    flat = jac.reshape(n_points_actual * n_responses, n_par)
+    coords = np.array([[float(r[n]) for n in names] for r in rows], dtype=float)
+    repeated = np.repeat(coords, n_responses, axis=0)
+    weights = np.full(flat.shape[0], 1.0 / flat.shape[0])
+    return DesignRegion(flat, weights, flat, repeated, repeated, "sensitivity")
+
+
 def optimal_experiment(
     experiment: Experiment,
     param_values: dict[str, float],
@@ -245,6 +339,9 @@ def optimal_experiment(
     equality_constraints: Sequence[DesignConstraint] | None = None,
     inequality_constraints: Sequence[DesignConstraint] | None = None,
     feasible_projection: Callable[[dict[str, float]], dict[str, float]] | None = None,
+    prediction_region: "DesignRegion | None" = None,
+    prediction_points: Sequence[Mapping[str, float]] | None = None,
+    n_prediction_points: int = 256,
     n_starts: int = 10,
     local_refine: bool = True,
     seed: int = 42,
@@ -265,7 +362,19 @@ def optimal_experiment(
         Bounds on each design input variable.
     criterion : str, default DesignCriterion.D_OPTIMAL
         Design criterion: ``"determinant"`` (D), ``"trace"`` (A),
-        ``"min_eigenvalue"`` (E), ``"condition_number"`` (ME).
+        ``"min_eigenvalue"`` (E), ``"condition_number"`` (ME),
+        ``"average_variance"`` (I) or ``"max_variance"`` (G). The last two are
+        about predictions rather than parameters, so they need a region to
+        predict over: by default the design bounds, sampled at
+        ``n_prediction_points``, or give ``prediction_points`` or a
+        ``prediction_region`` built with :func:`experiment_region`.
+    prediction_region : DesignRegion, optional
+        A region built once with :func:`experiment_region`, to reuse across
+        calls. Only the I and G criteria read it.
+    prediction_points : sequence of mapping, optional
+        Explicit points to predict at, instead of sampling the design bounds.
+    n_prediction_points : int, default 256
+        Sample size when the region is sampled from the design bounds.
     prior_fim : numpy.ndarray, optional
         Prior FIM from previous experiments.
     equality_constraints : sequence of callable, optional
@@ -304,8 +413,21 @@ def optimal_experiment(
     # SLSQP refinement seed. The scan ranks purely by the criterion, so when
     # constraints are present this incumbent is typically infeasible and must
     # not be returned as-is.
+    region = prediction_region
+    if criterion in PREDICTION_CRITERIA and region is None:
+        # The sensitivity rows depend on the nominals and the region only, so
+        # they are computed once here and reused by every candidate evaluation.
+        region = experiment_region(
+            experiment,
+            param_values,
+            bounds=None if prediction_points is not None else design_bounds,
+            points=prediction_points,
+            n_points=n_prediction_points,
+            seed=seed,
+        )
+
     seed_design, scan_criterion, scan_fim_result = _scan_candidates(
-        experiment, param_values, candidates, criterion, prior_fim
+        experiment, param_values, candidates, criterion, prior_fim, region
     )
     if seed_design is None or scan_fim_result is None:
         # Re-evaluate one candidate to surface the underlying failure (a bad
@@ -331,7 +453,7 @@ def optimal_experiment(
         feasible = [c for c in candidates if _is_feasible(c, eq, ineq)]
         if feasible:
             best_design, best_criterion, best_fim_result = _scan_candidates(
-                experiment, param_values, feasible, criterion, prior_fim
+                experiment, param_values, feasible, criterion, prior_fim, region
             )
         else:
             best_design = None
@@ -347,6 +469,7 @@ def optimal_experiment(
             design_bounds,
             criterion,
             prior_fim,
+            region=region,
             equality_constraints=eq,
             inequality_constraints=ineq,
         )
@@ -382,6 +505,7 @@ def optimal_experiment(
                 prior_fim,
                 eq,
                 ineq,
+                region,
             )
             if fallback is not None:
                 best_design, best_criterion, best_fim_result = fallback
@@ -437,6 +561,7 @@ def _scan_candidates(
     candidates: list[dict[str, float]],
     criterion: str,
     prior_fim: np.ndarray | None,
+    region: "DesignRegion | None" = None,
 ) -> tuple[dict[str, float] | None, float, FIMResult | None]:
     """Evaluate each candidate and return the best."""
     best_design: dict[str, float] | None = None
@@ -457,7 +582,7 @@ def _scan_candidates(
         if fim_result is None:
             continue
         try:
-            crit_val = _evaluate_criterion(fim_result, criterion)
+            crit_val = _evaluate_criterion(fim_result, criterion, region)
         except Exception:
             continue
 
@@ -479,6 +604,8 @@ def _refine_single_design(
     prior_fim: np.ndarray | None,
     equality_constraints: Sequence[DesignConstraint] = (),
     inequality_constraints: Sequence[DesignConstraint] = (),
+    *,
+    region: "DesignRegion | None" = None,
 ) -> tuple[dict[str, float], float, FIMResult] | None:
     """Local refinement of a single design via scipy L-BFGS-B or SLSQP."""
     maximize = _is_maximization(criterion)
@@ -505,7 +632,7 @@ def _refine_single_design(
         design = to_design(x)
         try:
             fim_result = eval_fim(design)
-            crit = _evaluate_criterion(fim_result, criterion)
+            crit = _evaluate_criterion(fim_result, criterion, region, smooth=True)
         except Exception:
             return _SINGULAR_SENTINEL
         if not np.isfinite(crit):
@@ -539,7 +666,7 @@ def _refine_single_design(
         fim_result = eval_fim(design)
     except Exception:
         return None
-    crit_val = _evaluate_criterion(fim_result, criterion)
+    crit_val = _evaluate_criterion(fim_result, criterion, region)
     if not np.isfinite(crit_val):
         return None
     return design, crit_val, fim_result
@@ -555,6 +682,7 @@ def _best_feasible_refinement(
     prior_fim: np.ndarray | None,
     equality_constraints: Sequence[DesignConstraint],
     inequality_constraints: Sequence[DesignConstraint],
+    region: "DesignRegion | None" = None,
 ) -> tuple[dict[str, float], float, FIMResult] | None:
     """Refine from each seed via SLSQP; return the best feasible refinement.
 
@@ -574,6 +702,7 @@ def _best_feasible_refinement(
             design_bounds,
             criterion,
             prior_fim,
+            region=region,
             equality_constraints=equality_constraints,
             inequality_constraints=inequality_constraints,
         )
@@ -587,8 +716,16 @@ def _best_feasible_refinement(
     return best
 
 
-def _evaluate_criterion(fim_result: FIMResult, criterion: str) -> float:
+def _evaluate_criterion(
+    fim_result: FIMResult,
+    criterion: str,
+    region: "DesignRegion | None" = None,
+    *,
+    smooth: bool = False,
+) -> float:
     """Evaluate a design criterion from a FIM result."""
+    if criterion in PREDICTION_CRITERIA:
+        return _criterion_from_fim(np.asarray(fim_result.fim), criterion, region, smooth=smooth)
     if criterion == DesignCriterion.D_OPTIMAL:
         return fim_result.d_optimal
     elif criterion == DesignCriterion.A_OPTIMAL:
@@ -642,6 +779,9 @@ def batch_optimal_experiment(
     criterion: str = DesignCriterion.D_OPTIMAL,
     strategy: str = BatchStrategy.GREEDY,
     prior_fim: np.ndarray | None = None,
+    prediction_region: "DesignRegion | None" = None,
+    prediction_points: Sequence[Mapping[str, float]] | None = None,
+    n_prediction_points: int = 256,
     equality_constraints: Sequence[DesignConstraint] | None = None,
     inequality_constraints: Sequence[DesignConstraint] | None = None,
     feasible_projection: Callable[[dict[str, float]], dict[str, float]] | None = None,
@@ -702,6 +842,17 @@ def batch_optimal_experiment(
     eq = list(equality_constraints) if equality_constraints else []
     ineq = list(inequality_constraints) if inequality_constraints else []
 
+    region = prediction_region
+    if criterion in PREDICTION_CRITERIA and region is None:
+        region = experiment_region(
+            experiment,
+            param_values,
+            bounds=None if prediction_points is not None else design_bounds,
+            points=prediction_points,
+            n_points=n_prediction_points,
+            seed=seed,
+        )
+
     if strategy == BatchStrategy.GREEDY:
         return _greedy_batch(
             experiment,
@@ -710,6 +861,7 @@ def batch_optimal_experiment(
             n_experiments,
             criterion=criterion,
             prior_fim=prior_fim,
+            region=region,
             equality_constraints=eq,
             inequality_constraints=ineq,
             feasible_projection=feasible_projection,
@@ -726,6 +878,7 @@ def batch_optimal_experiment(
             n_experiments,
             criterion=criterion,
             prior_fim=prior_fim,
+            region=region,
             equality_constraints=eq,
             inequality_constraints=ineq,
             feasible_projection=feasible_projection,
@@ -741,6 +894,7 @@ def batch_optimal_experiment(
             n_experiments,
             criterion=criterion,
             prior_fim=prior_fim,
+            region=region,
             equality_constraints=eq,
             inequality_constraints=ineq,
             feasible_projection=feasible_projection,
@@ -761,6 +915,7 @@ def _greedy_batch(
     *,
     criterion: str,
     prior_fim: np.ndarray | None,
+    region: "DesignRegion | None" = None,
     equality_constraints: Sequence[DesignConstraint] = (),
     inequality_constraints: Sequence[DesignConstraint] = (),
     feasible_projection: Callable[[dict[str, float]], dict[str, float]] | None = None,
@@ -796,13 +951,13 @@ def _greedy_batch(
         designs.append(picked.design)
         fim_results.append(per_fim)
         running_prior = per_fim.fim.copy() if running_prior is None else running_prior + per_fim.fim
-        per_round.append(_criterion_from_fim(running_prior, criterion))
+        per_round.append(_criterion_from_fim(running_prior, criterion, region))
 
     assert running_prior is not None  # n_experiments >= 1
 
     # Exchange refinement: re-optimize each run given all the others.
     maximize = criterion in (DesignCriterion.D_OPTIMAL, DesignCriterion.E_OPTIMAL)
-    current = _criterion_from_fim(running_prior, criterion)
+    current = _criterion_from_fim(running_prior, criterion, region)
     for sweep in range(max(0, int(exchange_passes)) if np.isfinite(current) else 0):
         improved = False
         for i in range(len(designs)):
@@ -825,7 +980,7 @@ def _greedy_batch(
                 continue
             per_fim = compute_fim(experiment, param_values, picked.design, prior_fim=None)
             trial = others + per_fim.fim
-            value = _criterion_from_fim(trial, criterion)
+            value = _criterion_from_fim(trial, criterion, region)
             gain = (value - current) if maximize else (current - value)
             if np.isfinite(value) and gain > 1e-10 * max(1.0, abs(current)):
                 designs[i] = picked.design
@@ -841,7 +996,7 @@ def _greedy_batch(
     acc = prior_fim.copy() if prior_fim is not None else None
     for r in fim_results:
         acc = r.fim.copy() if acc is None else acc + r.fim
-        per_round.append(_criterion_from_fim(acc, criterion))
+        per_round.append(_criterion_from_fim(acc, criterion, region))
 
     return BatchDesignResult(
         designs=designs,
@@ -861,6 +1016,7 @@ def _joint_batch(
     *,
     criterion: str,
     prior_fim: np.ndarray | None,
+    region: "DesignRegion | None" = None,
     equality_constraints: Sequence[DesignConstraint] = (),
     inequality_constraints: Sequence[DesignConstraint] = (),
     feasible_projection: Callable[[dict[str, float]], dict[str, float]] | None = None,
@@ -912,7 +1068,7 @@ def _joint_batch(
         if result is None:
             return _SINGULAR_SENTINEL
         fim, _ = result
-        crit = _criterion_from_fim(fim, criterion)
+        crit = _criterion_from_fim(fim, criterion, region)
         if not np.isfinite(crit):
             return _SINGULAR_SENTINEL
         return -crit if maximize else crit
@@ -998,7 +1154,7 @@ def _joint_batch(
     if final is None:
         raise RuntimeError("joint batch: final FIM evaluation failed")
     joint_fim, pieces = final
-    criterion_value = _criterion_from_fim(joint_fim, criterion)
+    criterion_value = _criterion_from_fim(joint_fim, criterion, region)
 
     return BatchDesignResult(
         designs=designs,
@@ -1018,6 +1174,7 @@ def _penalized_batch(
     *,
     criterion: str,
     prior_fim: np.ndarray | None,
+    region: "DesignRegion | None" = None,
     equality_constraints: Sequence[DesignConstraint] = (),
     inequality_constraints: Sequence[DesignConstraint] = (),
     feasible_projection: Callable[[dict[str, float]], dict[str, float]] | None = None,
@@ -1082,7 +1239,7 @@ def _penalized_batch(
         designs.append(best)
         fim_results.append(per_fim)
         running_prior = per_fim.fim.copy() if running_prior is None else running_prior + per_fim.fim
-        per_round.append(_criterion_from_fim(running_prior, criterion))
+        per_round.append(_criterion_from_fim(running_prior, criterion, region))
 
     assert running_prior is not None
     return BatchDesignResult(
