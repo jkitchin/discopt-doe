@@ -115,6 +115,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of a misleading `0.0000`.
 
 ### Added
+- **Categorical factors in the BO loop.** `optimize_round(categorical={"catalyst":
+  ["A", "B", "C"]})`. A GP measures distance between runs, so a categorical has
+  to be encoded before it can be modelled at all, and coding levels 0, 1, 2
+  invents an ordering and a spacing the chemistry does not have. The levels are
+  one-hot encoded, so every pair is equally far apart and none lies between any
+  others; the candidate pool is the product of the levels with the continuous
+  box, so each level is offered at the *same* conditions rather than losing on
+  the luck of the draw; and the level is written back to the workbook as itself,
+  not as an index. A categorical factor needs no bounds.
+- **Several objectives at once (ParEGO).** `optimize_round(objectives={"yield":
+  "maximize", "impurity": "minimize"})`. Each requested run draws its own weight
+  vector and scalarizes with an augmented Chebyshev function (Knowles 2006),
+  which is what lets a scalarized search reach the concave parts of a front that
+  a weighted sum cannot -- and what spreads a batch along the trade-off instead
+  of crowding one end. The result carries `pareto_front`, the non-dominated
+  completed runs, and `scalarization_weights`, in place of a single incumbent:
+  with several objectives there is no single best run, and choosing a point on
+  the front is a judgement about value, not about data.
 - **Campaigns: runs with conditions.**
   - `campaign_experiment(model, runs)` turns a per-run model (a `SymbolicModel`,
     an `ODEExperiment` or an `Experiment` with design inputs) plus a list of run
