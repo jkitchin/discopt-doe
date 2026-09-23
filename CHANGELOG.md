@@ -153,6 +153,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   also reports which source term each coefficient came from, and an unrecognized
   term raises with what it searched for rather than guessing (`aliases=` covers
   the rest).
+- **Robust designs take constraints, and criteria beyond D.**
+  `robust_optimal_experiment` optimized over bounds only and refused anything
+  but D-optimality, so a schedule it produced could be one nobody can run --
+  two samples at the same instant, say.
+  - `equality_constraints` / `inequality_constraints` are the same per-run
+    callables `batch_optimal_experiment` takes (`g(design) == 0`,
+    `h(design) >= 0`), so a minimum spacing between sampling times carries over
+    from the local design to the robust one. The search switches to SLSQP when
+    any are given, rejects infeasible refinements rather than returning them,
+    and says so when no start reaches a feasible point.
+  - `criterion="A"` (minimize `tr(F⁻¹)`) and `criterion="E"` (maximize
+    `lambda_min`) join `"D"`, for both `robust="expected"` and `"maximin"`,
+    each with the matching efficiency scale. D remains the default and the one
+    to prefer: its efficiency is invariant to parameter scaling, which is what
+    makes values from different samples commensurable, and the docstring says
+    so.
+  - `reference_scores` generalizes `reference_log_dets` (still accepted for D,
+    and an error for A or E rather than silently misread).
+  - Max-min now optimizes in epigraph form -- maximize `t` subject to every
+    sample's efficiency being at least `t` -- instead of minimizing a
+    non-smooth worst case with Powell. It is never worse and sometimes better
+    (worst-case efficiency 0.60 to 0.63 on the book's reactor schedule), and it
+    is what lets the constraints be carried at the same time. **Max-min designs
+    can shift slightly** as a result.
 - **A fitted model is a file now: `ModelCard`.** A model is only reusable if
   everything a prediction needs travels with it — the model form, the estimates,
   their covariance, and the noise estimate behind that covariance. `ModelCard`

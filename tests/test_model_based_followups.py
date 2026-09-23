@@ -293,7 +293,218 @@ def test_maximin_improves_the_worst_case(k_samples):
 
 
 def test_robust_rejects_unknown_options(k_samples):
-    with pytest.raises(ValueError, match="'D'"):
-        robust_optimal_experiment(ExpDecay(), k_samples, {"t": (0.1, 20.0)}, criterion="A")
+    with pytest.raises(ValueError, match="criterion must be one of"):
+        robust_optimal_experiment(ExpDecay(), k_samples, {"t": (0.1, 20.0)}, criterion="G")
     with pytest.raises(ValueError, match="robust"):
         robust_optimal_experiment(ExpDecay(), k_samples, {"t": (0.1, 20.0)}, robust="bayes")
+    with pytest.raises(ValueError, match="not both"):
+        robust_optimal_experiment(
+            ExpDecay(),
+            k_samples,
+            {"t": (0.1, 20.0)},
+            reference_log_dets=[1.0] * len(k_samples),
+            reference_scores=[1.0] * len(k_samples),
+        )
+    # reference_log_dets is the D spelling, and says so rather than being ignored.
+    with pytest.raises(ValueError, match="reference_scores"):
+        robust_optimal_experiment(
+            ExpDecay(),
+            k_samples,
+            {"t": (0.1, 20.0)},
+            criterion="A",
+            reference_log_dets=[1.0] * len(k_samples),
+        )
+
+
+# --------------------------------------------------------------------------
+# Robust designs: constraints, and criteria beyond D
+# --------------------------------------------------------------------------
+
+
+class TwoTime(Experiment):
+    """Two-parameter decay measured at two times, so the schedule can be constrained."""
+
+    def create_model(self, **kwargs):
+        m = dm.Model("tt")
+        a = m.continuous("a", lb=0.1, ub=10.0)
+        k = m.continuous("k", lb=0.01, ub=5.0)
+        t1 = m.continuous("t1", lb=0.1, ub=10.0)
+        t2 = m.continuous("t2", lb=0.1, ub=10.0)
+        return ExperimentModel(
+            m,
+            {"a": a, "k": k},
+            {"t1": t1, "t2": t2},
+            {"y1": a * dm.exp(-k * t1), "y2": a * dm.exp(-k * t2)},
+            {"y1": 0.05, "y2": 0.05},
+        )
+
+
+SPACING = [lambda d: d["t2"] - d["t1"] - 2.0]
+
+
+@pytest.mark.slow
+def test_a_constrained_robust_design_obeys_its_constraint(k_samples):
+    """The unconstrained optimum violates the spacing, so the constraint must bind."""
+    samples = [{"a": 5.0, "k": s["k"]} for s in k_samples[:8]]
+    bounds = {"t1": (0.1, 10.0), "t2": (0.1, 10.0)}
+
+    free = robust_optimal_experiment(TwoTime(), samples, bounds, n_starts=3, seed=0)
+    held = robust_optimal_experiment(
+        TwoTime(), samples, bounds, n_starts=3, seed=0, inequality_constraints=SPACING
+    )
+
+    gap_free = free.designs[0]["t2"] - free.designs[0]["t1"]
+    gap_held = held.designs[0]["t2"] - held.designs[0]["t1"]
+    assert abs(gap_free) < 2.0 - 1e-6  # the free optimum doubles the two times up
+    assert gap_held >= 2.0 - 1e-6  # ... and the constrained one is pushed apart
+    # A constraint can only cost information, never add it.
+    assert held.criterion_value <= free.criterion_value + 1e-9
+
+
+@pytest.mark.slow
+def test_a_constrained_maximin_design_obeys_its_constraint(k_samples):
+    samples = [{"a": 5.0, "k": s["k"]} for s in k_samples[:6]]
+    res = robust_optimal_experiment(
+        TwoTime(),
+        samples,
+        {"t1": (0.1, 10.0), "t2": (0.1, 10.0)},
+        robust="maximin",
+        n_starts=3,
+        seed=0,
+        inequality_constraints=SPACING,
+    )
+    assert res.designs[0]["t2"] - res.designs[0]["t1"] >= 2.0 - 1e-6
+    assert 0.0 < res.criterion_value <= 1.0
+
+
+@pytest.mark.slow
+def test_an_equality_constraint_is_met_exactly(k_samples):
+    """A fixed total experiment length: t1 + t2 == 8."""
+    samples = [{"a": 5.0, "k": s["k"]} for s in k_samples[:6]]
+    res = robust_optimal_experiment(
+        TwoTime(),
+        samples,
+        {"t1": (0.1, 10.0), "t2": (0.1, 10.0)},
+        n_starts=3,
+        seed=0,
+        equality_constraints=[lambda d: d["t1"] + d["t2"] - 8.0],
+    )
+    assert res.designs[0]["t1"] + res.designs[0]["t2"] == pytest.approx(8.0, abs=1e-6)
+
+
+def test_unsatisfiable_constraints_say_so(k_samples):
+    with pytest.raises(ValueError, match="no feasible design"):
+        robust_optimal_experiment(
+            ExpDecay(),
+            k_samples[:3],
+            {"t": (0.1, 2.0)},
+            n_starts=2,
+            seed=0,
+            inequality_constraints=[lambda d: d["t"] - 50.0],  # outside the bounds
+        )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("criterion", ["D", "A", "E"])
+def test_one_parameter_makes_every_criterion_agree(criterion, k_samples):
+    """With p = 1 every criterion's *efficiency* is the same ratio F/F*.
+
+    So a max-min design must not depend on which criterion is named. (The
+    `expected` designs legitimately differ: mean log F, mean -1/F and mean F
+    average different functionals of the same sample.) A criterion implemented
+    with the wrong sign, or an efficiency ratio the wrong way up, breaks this.
+    """
+    res = robust_optimal_experiment(
+        ExpDecay(),
+        k_samples[:6],
+        {"t": (0.1, 20.0)},
+        criterion=criterion,
+        robust="maximin",
+        n_starts=3,
+        seed=0,
+    )
+    reference = robust_optimal_experiment(
+        ExpDecay(),
+        k_samples[:6],
+        {"t": (0.1, 20.0)},
+        criterion="D",
+        robust="maximin",
+        n_starts=3,
+        seed=0,
+    )
+    assert res.designs[0]["t"] == pytest.approx(reference.designs[0]["t"], rel=1e-3)
+    # Same tolerance as the design above: both come from a numerical search.
+    np.testing.assert_allclose(res.efficiencies, reference.efficiencies, rtol=1e-3)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("criterion", ["D", "A", "E"])
+def test_efficiency_is_one_against_a_single_samples_own_optimum(criterion):
+    """One sample: the robust design *is* the local optimum, so efficiency is 1."""
+    res = robust_optimal_experiment(
+        TwoTime(),
+        [{"a": 5.0, "k": 0.5}],
+        {"t1": (0.1, 10.0), "t2": (0.1, 10.0)},
+        criterion=criterion,
+        robust="maximin",
+        n_starts=4,
+        seed=0,
+    )
+    assert res.efficiencies is not None
+    assert res.efficiencies.max() <= 1.0 + 1e-6
+    assert res.criterion_value == pytest.approx(1.0, abs=0.02)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("criterion", ["A", "E"])
+def test_efficiencies_stay_on_the_unit_scale(criterion, k_samples):
+    """An inverted ratio shows up here as an efficiency above 1."""
+    samples = [{"a": 5.0, "k": s["k"]} for s in k_samples[:6]]
+    res = robust_optimal_experiment(
+        TwoTime(),
+        samples,
+        {"t1": (0.1, 10.0), "t2": (0.1, 10.0)},
+        criterion=criterion,
+        robust="maximin",
+        n_starts=3,
+        seed=0,
+    )
+    assert res.efficiencies is not None
+    assert np.all(res.efficiencies > 0.0)
+    assert np.all(res.efficiencies <= 1.0 + 1e-6)
+    assert res.criterion_value == pytest.approx(res.efficiencies.min())
+
+
+@pytest.mark.slow
+def test_a_constraint_cannot_raise_the_reported_worst_case(k_samples):
+    """Efficiencies are scaled by the best design in the *box*, not the best feasible one.
+
+    Scaling by the constrained optimum makes the reference move with the
+    constraint, so a constrained run reports a *higher* worst case than the
+    unconstrained one on the same problem -- a constraint appearing to improve
+    a design it can only restrict. The reported value must be comparable
+    across the two, and must agree with `design_efficiencies`, which scores a
+    design against references handed to it.
+    """
+    samples = [{"a": 5.0, "k": s["k"]} for s in k_samples[:6]]
+    bounds = {"t1": (0.1, 10.0), "t2": (0.1, 10.0)}
+
+    free = robust_optimal_experiment(
+        TwoTime(), samples, bounds, robust="maximin", n_starts=3, seed=0
+    )
+    held = robust_optimal_experiment(
+        TwoTime(),
+        samples,
+        bounds,
+        robust="maximin",
+        n_starts=3,
+        seed=0,
+        inequality_constraints=SPACING,
+    )
+    assert held.criterion_value <= free.criterion_value + 1e-6
+
+    # The same design, scored by the independent path, gets the same number.
+    scored = design_efficiencies(
+        TwoTime(), held.designs, samples, reference_log_dets=free.reference_log_dets
+    )
+    assert float(scored.min()) == pytest.approx(held.criterion_value, rel=1e-6)
