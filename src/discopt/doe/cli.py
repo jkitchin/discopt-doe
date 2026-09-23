@@ -999,6 +999,8 @@ def _do_fit_symbolic(wb: Workbook, completed: list[dict[str, Any]]) -> dict[str,
         out["estimates"],
         out["std_errors"],
         {n: (out["ci_lower"][n], out["ci_upper"][n]) for n in names},
+        sigma=float(out["sigma"]),
+        sigma_source=str(out["sigma_source"]),
     )
     # `extend` adds each new run's information at the declared measurement
     # error, so the stored prior must be on that same scale. fit_least_squares
@@ -1052,6 +1054,9 @@ def _do_fit_symbolic(wb: Workbook, completed: list[dict[str, Any]]) -> dict[str,
         "parameter_names": names,
         "n_observations": out["n_observations"],
         "objective": out["residual_sum_of_squares"],
+        "sigma": float(out["sigma"]),
+        "sigma_source": str(out["sigma_source"]),
+        "degrees_of_freedom": int(out["degrees_of_freedom"]),
         "log_det_fim": log_det,
         "coefficients": coefficients,
         "regression_anova": anova_rows,
@@ -2136,7 +2141,16 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
     information = (X.T @ X) / (sigma**2)
     cum_fim = information + _scaled_ridge(information, n_p)
 
-    wb.write_parameters(parameter_names, estimates, std_errors, cis)
+    # The sigma behind the standard errors above: the residual estimate when
+    # there were degrees of freedom to spare, else the declared value. Stored so
+    # the declared-scale FIM can be turned back into this covariance later.
+    if n_obs > n_p:
+        sigma_hat, sigma_source = float(np.sqrt(sigma_hat_sq)), "residual"
+    else:
+        sigma_hat, sigma_source = float(sigma), "declared"
+    wb.write_parameters(
+        parameter_names, estimates, std_errors, cis, sigma=sigma_hat, sigma_source=sigma_source
+    )
     wb.write_fim(cum_fim, parameter_names)
     coefficients, anova_rows, fit_summary = _compute_anova(
         y=y,
@@ -2174,6 +2188,9 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
         "parameter_names": parameter_names,
         "n_observations": n_obs,
         "objective": residual_ss,
+        "sigma": sigma_hat,
+        "sigma_source": sigma_source,
+        "degrees_of_freedom": max(0, n_obs - n_p),
         "log_det_fim": log_det_fim,
         # The regression statistics that already go into the workbook's ANOVA
         # sheet, returned as well: whether a coefficient is distinguishable
