@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-25
+
+A large release. Highlights: campaigns (runs with conditions), robust designs,
+dynamic (ODE) experiments, I- and G-optimal designs, categorical factors and
+multi-objective (ParEGO) Bayesian optimization, `ModelCard` for saving a fitted
+model, and constrained mixtures with ratio bounds.
+
+**Compatibility:** this release requires **Python >= 3.12** and
+**`discopt>=0.9`**. Some results change: batch designs now choose different
+runs (they no longer waste the first ones), and the workbook adds a
+`run_order` column.
+
 ### Fixed
 - **Deviance-based tools work on a campaign.** `DevianceFunction` called
   `predict(theta, design)`, but a campaign's conditions live in its runs, so its
@@ -742,6 +754,7 @@ First public release on PyPI.
 ### Changed
 - Depend on `discopt>=0.6` from PyPI (removed the temporary `[tool.uv.sources]` git pin).
 
-[Unreleased]: https://github.com/jkitchin/discopt-doe/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jkitchin/discopt-doe/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jkitchin/discopt-doe/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jkitchin/discopt-doe/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jkitchin/discopt-doe/releases/tag/v0.2.0
