@@ -7,9 +7,9 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     # Keep this rev in sync with the ruff version resolved by uv.
-    rev: v0.14.6
+    rev: v0.15.13
     hooks:
-      - id: ruff          # lint (auto-fixes what it safely can)
+      - id: ruff-check    # lint (auto-fixes what it safely can)
         args: [--fix]
       - id: ruff-format   # formatting
 
