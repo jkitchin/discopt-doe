@@ -40,7 +40,7 @@ def test_skill_ships_as_package_data():
 
 
 def test_version_prefix_tolerates_prereleases():
-    """The discopt version guard must accept pre-releases like 0.8rc1."""
+    """The discopt version guard must accept pre-releases like 0.9rc1."""
     from discopt.doe import _MIN_DISCOPT, _version_prefix
 
     assert _version_prefix("0.8") == (0, 8)
@@ -51,5 +51,5 @@ def test_version_prefix_tolerates_prereleases():
     assert _version_prefix("0.5") == (0, 5)
     # A pre-release of the minimum must pass the guard; the release before it
     # must not.
-    assert _version_prefix("0.8rc1") >= _MIN_DISCOPT
-    assert _version_prefix("0.7") < _MIN_DISCOPT
+    assert _version_prefix("0.9rc1") >= _MIN_DISCOPT
+    assert _version_prefix("0.8") < _MIN_DISCOPT

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-25
+
+A large release. Highlights: campaigns (runs with conditions), robust designs,
+dynamic (ODE) experiments, I- and G-optimal designs, categorical factors and
+multi-objective (ParEGO) Bayesian optimization, `ModelCard` for saving a fitted
+model, and constrained mixtures with ratio bounds.
+
+**Compatibility:** this release requires **Python >= 3.12** and
+**`discopt>=0.9`**. Some results change: batch designs now choose different
+runs (they no longer waste the first ones), and the workbook adds a
+`run_order` column.
+
 ### Fixed
 - **Deviance-based tools work on a campaign.** `DevianceFunction` called
   `predict(theta, design)`, but a campaign's conditions live in its runs, so its
@@ -431,6 +443,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   converges from the default start.
 
 ### Changed
+- **Requires `discopt>=0.9`** (was `>=0.8`). The import-time guard now rejects
+  discopt 0.8.x with an upgrade message.
+- **Requires Python >= 3.12** (was `>=3.10`), because discopt 0.9 does. CI now
+  tests 3.12 and 3.13.
 - **I-optimal design search is faster.** `DesignRegion.moment_matrix` was a
   plain property, so the region's moment matrix `W` was rebuilt on every
   candidate evaluation inside the search even though a region is constructed
@@ -738,6 +754,7 @@ First public release on PyPI.
 ### Changed
 - Depend on `discopt>=0.6` from PyPI (removed the temporary `[tool.uv.sources]` git pin).
 
-[Unreleased]: https://github.com/jkitchin/discopt-doe/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jkitchin/discopt-doe/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jkitchin/discopt-doe/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jkitchin/discopt-doe/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jkitchin/discopt-doe/releases/tag/v0.2.0

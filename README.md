@@ -38,7 +38,7 @@ machine. See [docs/browser-app.md](docs/browser-app.md).
 
 ## Install
 
-Both `discopt-doe` and its `discopt>=0.8` dependency are published on
+Both `discopt-doe` and its `discopt>=0.9` dependency are published on
 [PyPI](https://pypi.org/project/discopt-doe/), so a plain pip install resolves
 everything:
 
