@@ -270,7 +270,69 @@ factors."""
 )
 
 md(
-    """## 5. CLI round trip
+    """## 5. Fractional factorials for many factors
+
+A full $2^k$ factorial doubles in size with every factor you add.
+For $k = 6$ that's 64 runs even before replication; for $k = 8$ it
+is 256. A *fractional* factorial picks $2^{k-p}$ of the corners so
+that:
+
+* every main effect remains estimable, and
+* the kept effect columns are pairwise orthogonal at the requested
+  **resolution**.
+
+Resolution III keeps main effects clear of one another; IV also
+keeps them clear of two-factor interactions; V additionally keeps
+every two-factor interaction clear of the others. The classical
+construction picks defining contrasts by hand; `discopt.doe`
+formulates the row selection as a small MILP and lets the solver
+choose them.
+
+Below we generate a resolution-IV half-fraction of a $2^5$ design
+(16 runs instead of 32) and verify the orthogonality structure by
+inspecting the Gram matrix of the model columns."""
+)
+
+code(
+    """import itertools
+
+from discopt.doe import fractional_factorial_design
+
+frac = fractional_factorial_design(
+    factors={f: (-1.0, 1.0) for f in ["A", "B", "C", "D", "E"]},
+    n_runs=16,
+    resolution=4,
+    seed=0,
+)
+print(f"{len(frac.rows)} runs (half-fraction of 2^5 = 32)")
+
+# Code the design as a ±1 matrix.
+M = np.array([[r[f] for f in frac.factors] for r in frac.rows], dtype=int)
+
+# Mains are balanced and pairwise orthogonal — diagonal Gram.
+print("\\nmain-effect Gram matrix (off-diagonal zeros ⇒ orthogonal):")
+print(M.T @ M)
+
+# Every 3-factor interaction column is balanced ⇒ no main is aliased
+# with any 2FI (the defining property of resolution IV).
+imbalances = [
+    abs((M[:, i] * M[:, j] * M[:, k]).sum())
+    for i, j, k in itertools.combinations(range(5), 3)
+]
+print(f"\\nmax |Σ 3FI column| across all triples: {max(imbalances)} "
+      f"(0 ⇒ main effects clear of every 2FI)")"""
+)
+
+md(
+    """Sixteen runs cover the five factors and let us fit all five main
+effects without any aliasing into the two-factor interactions —
+the kind of return on investment fractional designs are built for.
+Switch the call to `resolution=5` and you get the classical 16-run
+$2^{5-1}_V$ design with every two-factor interaction also clear."""
+)
+
+md(
+    """## 6. CLI round trip
 
 The whole workflow is also available from the command line. The
 workbook stores categorical factor values as strings, so it
@@ -295,7 +357,7 @@ discopt doe anova screen.xlsx \\
 For purely numeric factors you can also add `--center-points 2` to
 the `new` step to enable a curvature test.
 
-## 6. Practical guidance
+## 7. Practical guidance
 
 ### Run-count guide
 
@@ -307,9 +369,12 @@ the `new` step to enable a curvature test.
 | 6   | 64         | 128               | 132                      |
 | 7   | 128        | 256               | 260                      |
 
-Beyond $k = 7$ a *fractional* factorial or a Plackett-Burman
-{cite:p}`PlackettBurman1946` design scales better, but those
-generators are not yet implemented in `discopt.doe`.
+Beyond $k = 7$ a *fractional* factorial cuts the run count to
+$2^{k-p}$ corners while still letting you estimate every main
+effect — see Section 5 below for a MILP-based generator. For
+even larger $k$, a Plackett-Burman {cite:p}`PlackettBurman1946`
+design covers $k$ factors in $k+1$ runs at resolution III
+(not yet implemented here).
 
 ### When to add center points
 
