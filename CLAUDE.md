@@ -41,7 +41,7 @@ Notes:
   - `scripts/execute_notebooks.py` runs them and writes the outputs back
     (`make notebooks`). The `notebooks` CI job runs it with `--check` (execute, do not
     save, fail on any error), so a change that breaks a notebook cannot ship silently.
-- Lint/format is **ruff** only (line-length 100, target py310). It runs via
+- Lint/format is **ruff** only (line-length 100, target py312). It runs via
   **pre-commit** (`.pre-commit-config.yaml`); `docs/notebooks/` is excluded (see
   `[tool.ruff] extend-exclude` in `pyproject.toml`).
 - **The same hooks run in CI** (the `lint` job in `.github/workflows/ci.yml` calls

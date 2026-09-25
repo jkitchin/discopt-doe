@@ -431,6 +431,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   converges from the default start.
 
 ### Changed
+- **Requires `discopt>=0.9`** (was `>=0.8`). The import-time guard now rejects
+  discopt 0.8.x with an upgrade message.
+- **Requires Python >= 3.12** (was `>=3.10`), because discopt 0.9 does. CI now
+  tests 3.12 and 3.13.
 - **I-optimal design search is faster.** `DesignRegion.moment_matrix` was a
   plain property, so the region's moment matrix `W` was rebuilt on every
   candidate evaluation inside the search even though a region is constructed
