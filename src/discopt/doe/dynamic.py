@@ -223,18 +223,23 @@ class ODEExperiment(Experiment):
             vals.append(xs[spec] if isinstance(spec, str) else spec(xs, p, u))
         return jnp.stack([jnp.asarray(v, dtype=float) for v in vals])
 
+    def _initial_state(self, p: Mapping, u: Mapping):
+        """Initial state vector; a string names an unknown parameter or a design input."""
+        _, jnp = _jax()
+        return jnp.stack(
+            [
+                jnp.asarray((p[v] if v in p else u[v]) if isinstance(v, str) else v, dtype=float)
+                for v in (self.initial[s] for s in self.state_names)
+            ]
+        )
+
     def _response_fn(self, *args):
         """All responses, ordered as :attr:`response_names`, from (θ..., u...)."""
         _, jnp = _jax()
         k = len(self.parameter_specs)
         p = self._as_dict(self.parameter_names, args[:k])
         u = self._as_dict(self.design_names, args[k:])
-        x0 = jnp.stack(
-            [
-                jnp.asarray(u[v] if isinstance(v, str) else v, dtype=float)
-                for v in (self.initial[s] for s in self.state_names)
-            ]
-        )
+        x0 = self._initial_state(p, u)
         jax, _ = _jax()
         t_ends = jnp.stack(
             [jnp.asarray(u[t] if isinstance(t, str) else t, dtype=float) for t in self.sample_times]
@@ -394,6 +399,12 @@ class ODEExperiment(Experiment):
             ),
             (self.jacobian(theta, design), fine.jacobian(theta, design)),
         ):
+            if not (np.all(np.isfinite(coarse_val)) and np.all(np.isfinite(fine_val))):
+                # An integration that blew up (explicit RK4 on a stiff system)
+                # gives inf/nan; every comparison with nan is False, so without
+                # this the check passed silently on exactly the worst case.
+                change = float("inf")
+                break
             scale = max(float(np.max(np.abs(fine_val))), 1e-300)
             change = max(change, float(np.max(np.abs(coarse_val - fine_val))) / scale)
         if warn and change > rtol:
@@ -440,12 +451,7 @@ class ODEExperiment(Experiment):
                 )
             t_max = max(float(u[t]) if isinstance(t, str) else float(t) for t in self.sample_times)
             times = np.linspace(self.t0, t_max, 101)
-        x0 = jnp.asarray(
-            [
-                float(u[v]) if isinstance(v, str) else float(v)
-                for v in (self.initial[s] for s in self.state_names)
-            ]
-        )
+        x0 = self._initial_state(p, u)
         xs = np.array(
             [
                 np.asarray(self._integrate(x0, float(t), p, u)) if t > self.t0 else np.asarray(x0)
@@ -616,7 +622,9 @@ def ode_experiment(
         ``lambda t, x, p, u: {"A": -p["k"] * jnp.exp(-p["E"] / u["T"]) * x["A"]}``.
     states : mapping name -> float or str
         Every state and its initial value. A string names a design input, so an
-        initial concentration can be designed.
+        initial concentration can be designed, or an unknown parameter, so an
+        uncertain initial condition is estimated (and its sensitivity enters
+        the FIM) like any rate constant.
     parameters : mapping name -> nominal or (nominal, lower, upper)
         The unknown parameters. Bounds default to ``(0, +inf)`` for a positive
         nominal and ``(-inf, +inf)`` otherwise; estimation respects them.
@@ -665,8 +673,11 @@ def ode_experiment(
     if not states:
         raise ValueError("an ODE experiment needs at least one state")
     for s, v in states.items():
-        if isinstance(v, str) and v not in design:
-            raise ValueError(f"initial value of {s!r} names {v!r}, which is not a design input")
+        if isinstance(v, str) and v not in design and v not in parameters:
+            raise ValueError(
+                f"initial value of {s!r} names {v!r}, which is neither a design input nor "
+                "an unknown parameter"
+            )
     if not sample_times:
         raise ValueError("give at least one sampling time")
     for t in sample_times:

@@ -74,7 +74,17 @@ Found by cross-checking against `pyomo.contrib.doe` (see
   errors. Such parameters are now labelled `k[0] .. k[n-1]`
   (`discopt.doe.fim.fim_parameter_names`).
 
+- **A blown-up ODE integration passed silently.** Explicit RK4 on a stiff
+  system (k1 = 500, 50 steps) overflows to an infinite FIM, which
+  `compute_fim` returned without comment, and `ODEExperiment.check_accuracy`
+  compared nans and reported success. Non-finite results now make
+  `check_accuracy` return `inf` and warn, and `compute_fim` warns about a
+  non-finite FIM.
+
 ### Added
+- `ode_experiment` initial values may name an unknown parameter, so an
+  uncertain initial condition is estimated and enters the FIM (pyomo.doe
+  models this with a constraint; discopt could not express it).
 - `optimal_experiment(initial_designs=[...])`: designs to add to the
   multi-start (the current operating point, a previous round's design). In a
   10-variable design space random starts rarely reach the basin of a design

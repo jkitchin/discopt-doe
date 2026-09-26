@@ -403,3 +403,52 @@ class TestEigenvalueCriteria:
             _biexp_experiment(), BIEXP_THETA, BIEXP_BOUNDS, criterion=criterion
         )
         assert res.criterion_value == pytest.approx(optimum, rel=1e-3)
+
+
+class TestODERound3:
+    @staticmethod
+    def _abc(theta, b0=0.0, **kw):
+        from discopt.doe import ode_experiment
+
+        return ode_experiment(
+            lambda t, x, p, u: {"A": -p["k1"] * x["A"], "B": p["k1"] * x["A"] - p["k2"] * x["B"]},
+            states={"A": "CA0", "B": b0},
+            parameters=theta,
+            measured=["A", "B"],
+            sample_times=[0.05, 0.2, 1.0, 3.0],
+            design_inputs={"CA0": (0.5, 2.0)},
+            measurement_error=0.01,
+            **kw,
+        )
+
+    def test_blown_up_integration_is_flagged(self):
+        # RK4 with h = 0.06 on k1 = 500 overflows; the FIM is inf. It used to be
+        # returned silently, and check_accuracy compared nans and passed.
+        theta = {"k1": 500.0, "k2": 1.0}
+        ex = self._abc(theta, n_steps=50)
+        with pytest.warns(UserWarning, match="non-finite"):
+            compute_fim(ex, theta, {"CA0": 1.0})
+        with pytest.warns(UserWarning, match="not converged"):
+            assert ex.check_accuracy(theta, {"CA0": 1.0}) == np.inf
+
+    def test_unknown_initial_condition_as_parameter(self):
+        import jax
+        import jax.numpy as jnp
+
+        theta = {"k1": 2.0, "k2": 0.5, "B0": 0.3}
+        times = [0.05, 0.2, 1.0, 3.0]
+
+        def exact(v):
+            k1, k2, b0 = v
+            ca = [jnp.exp(-k1 * t) for t in times]
+            cb = [
+                b0 * jnp.exp(-k2 * t) + k1 / (k2 - k1) * (jnp.exp(-k1 * t) - jnp.exp(-k2 * t))
+                for t in times
+            ]
+            return jnp.stack(ca + cb)
+
+        J = np.asarray(jax.jacfwd(exact)(jnp.array([2.0, 0.5, 0.3])))
+        r = compute_fim(self._abc(theta, b0="B0"), theta, {"CA0": 1.0})
+        assert r.parameter_names == ["k1", "k2", "B0"]
+        # responses are ordered A@t..., B@t... per time; compare as FIMs
+        np.testing.assert_allclose(r.fim, J.T @ J / 0.01**2, rtol=1e-6)

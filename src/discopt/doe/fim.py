@@ -614,6 +614,23 @@ def compute_fim(
     re-trace. See :func:`clear_fim_cache`.
     """
 
+    result = _compute_fim(
+        experiment, param_values, design_values, prior_fim=prior_fim, method=method, fd_step=fd_step
+    )
+    if not np.all(np.isfinite(result.fim)):
+        import warnings
+
+        warnings.warn(
+            "the FIM has non-finite entries: the responses or their sensitivities "
+            "overflowed at this design (for an ODE experiment, typically explicit RK4 "
+            "on a stiff system -- use more n_steps or method='trapezoid', and see "
+            "check_accuracy).",
+            stacklevel=2,
+        )
+    return result
+
+
+def _compute_fim(experiment, param_values, design_values, *, prior_fim, method, fd_step):
     from discopt.parametric import extract_x_flat, flatten_params
 
     if method == "autodiff":
