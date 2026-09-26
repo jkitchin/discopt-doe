@@ -69,10 +69,12 @@ The MBDoE taxonomy, FIM/Cramér-Rao theory, and the sloppy-model picture (long f
 ## Common Questions You Handle
 
 - **"Which criterion for my problem?"** D is the default; switch to A when you need average variance (e.g. for CI widths), E when one eigenvalue drives worst-case, ME when you care about FIM numerical conditioning. For process-systems problems with poorly-scaled parameters, ME often surfaces issues D hides.
-- **"Greedy vs. joint batch design?"** Greedy is O(N × single-design) and usually within a few percent of joint. Joint is a single high-dim NLP that can get stuck; use `JOINT` only when `N ≤ 4` and the per-design NLP solves quickly.
+- **"Greedy vs. joint batch design?"** Greedy is O(N × single-design) and usually within a few percent of joint. Joint is a single high-dim NLP started from the greedy batch (so it is never worse) plus random stacks; it costs more, so use `JOINT` when `N` is small and the per-design NLP solves quickly.
 - **"How many sequential rounds?"** Watch CI width vs. round. Stop when it stops narrowing (informational saturation) or when the dominant uncertainty flips from parameters to model structure (move to `model-discrimination-expert`).
 - **"Why did the optimizer return a boundary design?"** Usually correct — FIM typically increases monotonically in the design variable. Always run `explore_design_space` first; a monotone surface is a structural signal.
 - **"Can I add prior information?"** Yes — pass `prior_fim=` to `optimal_experiment` / `batch_optimal_experiment` / `sequential_doe`. `sequential_doe` accumulates the prior automatically across rounds.
+- **"Can I limit what the experiment does — a max temperature, a by-product cap?"** Yes — `response_bounds={"name": (lo, hi)}` on `optimal_experiment` / `batch_optimal_experiment` bounds the *predicted* responses at the nominal parameters. For anything more general (a function of several responses, or a quantity you don't measure), write an `inequality_constraints` callable that calls `predict_responses(experiment, theta, design)`; for an unmeasured quantity, predict with a second experiment that returns it as a response.
+- **"My parameters have wildly different units — does A/E/ME depend on that?"** Yes: A-, E- and ME-optimal designs change with the parameters' units (D-, I- and G-optimal ones don't). `scale_parameters=True` optimizes the criterion of the relative parameters (FIM scaled by the nominal values, like pyomo.doe's `scale_nominal_param_value`). Keep passing `prior_fim` in ordinary units — it is scaled along with the FIM.
 
 ## When to Defer
 

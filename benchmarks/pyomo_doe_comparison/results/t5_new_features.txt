@@ -1,0 +1,48 @@
+== R5-1 relative-parameter (scaled) FIM ==
+  michaelis_menten_2pt  trace           brute(scaled) {'S1': 0.23, 'S2': 5.0} = 0.0163983
+      discopt scaled   {'S1': 5.0, 'S2': 0.22} = 0.0163939 (reported 0.0163939; fim_result unscaled: True)
+      discopt unscaled {'S1': 0.2, 'S2': 5.0} -> scaled criterion 0.0165505
+      pyomo scaled     {'S1': 5.0, 'S2': 0.22} = 0.0163939 [optimal]
+  michaelis_menten_2pt  min_eigenvalue  brute(scaled) {'S1': 0.23, 'S2': 5.0} = 63.1699
+      discopt scaled   {'S1': 0.22, 'S2': 5.0} = 63.1997 (reported 63.1997; fim_result unscaled: True)
+      discopt unscaled {'S1': 0.16, 'S2': 5.0} -> scaled criterion 58.9442
+      pyomo scaled     ERROR LinAlgError: Singular matrix
+  michaelis_menten_2pt  determinant     brute(scaled) {'S1': 0.26, 'S2': 5.0} = 11.6328
+      discopt scaled   {'S1': 0.27, 'S2': 5.0} = 11.6333 (reported 11.6333; fim_result unscaled: True)
+      discopt unscaled {'S1': 0.27, 'S2': 5.0} -> scaled criterion 11.6333
+      pyomo scaled     {'S1': 5.0, 'S2': 0.27} = 11.6333 [optimal]
+  arrhenius_2T          trace           brute(scaled) {'T1': 380.0, 'T2': 400.0} = 0.000143049
+      discopt scaled   {'T1': 400.0, 'T2': 379.94} = 0.000143047 (reported 0.000143047; fim_result unscaled: True)
+      discopt unscaled {'T1': 400.0, 'T2': 379.99} -> scaled criterion 0.000143048
+      pyomo scaled     {'T1': 362.38, 'T2': 346.67} = 0.0126469 [maxIterations]
+  arrhenius_2T          min_eigenvalue  brute(scaled) {'T1': 380.0, 'T2': 400.0} = 6991.04
+      discopt scaled   {'T1': 379.94, 'T2': 400.0} = 6991.12 (reported 6991.12; fim_result unscaled: True)
+      discopt unscaled {'T1': 400.0, 'T2': 379.98} -> scaled criterion 6991.08
+      pyomo scaled     {'T1': 363.0, 'T2': 363.0} = 0 [optimal]
+  arrhenius_2T          determinant     brute(scaled) {'T1': 381.88, 'T2': 400.0} = 27.4272
+      discopt scaled   {'T1': 381.86, 'T2': 400.0} = 27.4272 (reported 27.4272; fim_result unscaled: True)
+      discopt unscaled {'T1': 381.86, 'T2': 400.0} -> scaled criterion 27.4272
+      pyomo scaled     {'T1': 381.86, 'T2': 400.0} = 27.4272 [optimal]
+  rooney_biegler+prior  trace           brute(scaled) {'t': 10.0} = 0.000280812
+      discopt scaled   {'t': 10.0} = 0.000280812 (reported 0.000280812; fim_result unscaled: True)
+      discopt unscaled {'t': 10.0} -> scaled criterion 0.000280812
+      pyomo scaled     {'t': 10.0} = 0.000280823 [optimal]
+  rooney_biegler+prior  min_eigenvalue  brute(scaled) {'t': 10.0} = 3678.02
+      discopt scaled   {'t': 10.0} = 3678.02 (reported 3678.02; fim_result unscaled: True)
+      discopt unscaled {'t': 10.0} -> scaled criterion 3678.02
+      pyomo scaled     {'t': 10.0} = 3678.02 [optimal]
+  rooney_biegler+prior  determinant     brute(scaled) {'t': 10.0} = 19.8366
+      discopt scaled   {'t': 10.0} = 19.8366 (reported 19.8366; fim_result unscaled: True)
+      discopt unscaled {'t': 10.0} -> scaled criterion 19.8366
+      pyomo scaled     {'t': 10.0} = 19.8366 [optimal]
+== R5-2 constraints on predicted outputs ==
+  RB, y <= 12.0: brute t=1.5625 (logdet 15.49202) | discopt t=1.5617 y=8.1297 logdet 15.49202 | pyomo t=1.5617 y=8.1299 [optimal]
+  RB, y <= 8.0: brute t=1.5225 (logdet 15.49183) | discopt t=1.5243 y=8.0000 logdet 15.49185 | pyomo t=1.5220 y=7.9920 [optimal]
+  A->B->C, CC@1 <= 1.0: brute {'T': 300.0, 'CA0': 2.12} logdet 7.86286
+      discopt {'T': 300.0, 'CA0': 2.13} CC=1.0000 logdet 7.87498
+      pyomo (start violating the cap) ERROR RuntimeError: Model from experiment did not solve appropriately. Make sure
+      pyomo (feasible start) {'T': 300.0, 'CA0': 2.12} CC=0.9959 logdet 7.86587 [optimal]
+  A->B->C, CC@1 <= 0.6: brute {'T': 300.0, 'CA0': 1.26} logdet 6.97199
+      discopt {'T': 300.0, 'CA0': 1.28} CC=0.6000 logdet 6.99083
+      pyomo (start violating the cap) ERROR RuntimeError: Model from experiment did not solve appropriately. Make sure
+      pyomo (feasible start) {'T': 300.0, 'CA0': 1.27} CC=0.5975 logdet 6.98560 [optimal]

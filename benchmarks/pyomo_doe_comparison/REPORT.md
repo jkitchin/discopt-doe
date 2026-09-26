@@ -1,6 +1,6 @@
 # discopt.doe vs pyomo.doe — adversarial comparison
 
-**Versions:** discopt-doe 0.4.0 (+ the fixes below, from four rounds), discopt 0.9, Pyomo 6.10.1
+**Versions:** discopt-doe 0.4.0 (+ the fixes below, from four rounds, and the two features of round 5), discopt 0.9, Pyomo 6.10.1
 (`pyomo.contrib.doe`), Ipopt 3.14.20 (MUMPS). Re-run with `./run_all.sh`; the logs
 are in `results/`.
 
@@ -44,7 +44,7 @@ How the two packages work:
 | T6 | responses that are constraint-defined states | ❌ | **discopt bug (fixed)**: all-zero or wrong FIM; pyomo right |
 | T7 | optimal design, 5 problems × {D, A} | mostly ✅ | two **discopt bugs (fixed)**; pyomo single-start and non-convergence issues |
 | T8 | ODE A→B→C (pyomo's reactor kinetics) | ✅ when well posed | discopt RK4 more accurate; both silent on an ill-posed design (discopt now warns) |
-| T9 | `scale_nominal_param_value` | differs for A only | a difference in definition, not a bug |
+| T9 | `scale_nominal_param_value` | differs for A only | **corrected in round 5:** pyomo's scaled A-optimal design was a solver failure, not a scaling effect |
 
 ## Findings in discopt.doe (all fixed, with regression tests in `tests/test_fim_correctness.py`)
 
@@ -167,11 +167,16 @@ different design, with no warning.
   gives 1e-7; pyomo collocation (Radau, 10 elements × 3 points) gives 1e-4 to
   2e-3 (discretization error dominates); backward Euler gives 2–16 %. RK4 with
   10 steps is unstable at 700 K (discopt: use `ODEExperiment.check_accuracy`).
-* **Parameter scaling (T9):** with the same definition the designs agree. pyomo's
-  `scale_nominal_param_value=True` leaves the D-optimal design unchanged, but
-  moves the A-optimal design from (400, 380) K to (390, 356) K. A-optimality
-  depends on parameter units; that's a matter of definition, not a bug. discopt
-  has no scaling switch (reparameterize instead).
+* **Parameter scaling (T9), corrected in round 5:** with the same definition
+  the designs agree. pyomo's `scale_nominal_param_value=True` leaves the
+  D-optimal design unchanged and moved the A-optimal Arrhenius design from
+  (400, 380) K to (390, 356) K. I originally called that a difference in
+  definition. Round 5 checked it by brute force on the *scaled* criterion: the
+  scaled A-optimum is still ≈ (380, 400) K, and pyomo's scaled run ends in
+  `maxIterations` at a criterion 88× worse. So it was a solver failure, not a
+  scaling effect. (Scaling does move A-optimal designs in general; for
+  Michaelis–Menten S₁ goes from 0.196 to 0.223. discopt now has
+  `scale_parameters=True`.)
 
 ## Bottom line
 
@@ -529,3 +534,70 @@ new differences) was met.
 * **Where pyomo remains better:** global search on its large dynamic example
   (R6) and speed on dynamic models. Improving discopt's search there is the
   open follow-up.
+
+---
+
+# Round 5: closing the two feature gaps
+
+The comparison left discopt.doe without two things pyomo.doe has: **constraints
+on what the experiment does** (bounds on predicted outputs, not just on its
+settings) and a **relative-parameter (nominal-value-scaled) FIM** for the A-,
+E- and ME-criteria. Both are now in discopt.doe and were checked against brute
+force and pyomo (`t5_new_features.py`, `results/t5_new_features.txt`).
+
+**New API**
+* `optimal_experiment(..., response_bounds={"y@5": (lo, hi)})` and the same on
+  `batch_optimal_experiment` (applied to every experiment of the batch): bounds on
+  predicted responses at the nominal parameters. `discopt.doe.predict_responses`
+  exposes the predictions for general output constraints, including quantities
+  that aren't measured (predict with a second experiment that returns them).
+* `optimal_experiment(..., scale_parameters=True)` (and on the batch): the
+  criterion is evaluated on S·F·S, S = diag(|θ_nominal|). Unlike pyomo, the
+  `prior_fim` stays in unscaled units and is scaled with the FIM, which removes
+  the trap of P10. The returned FIM is unscaled; `criterion_value` is the scaled
+  criterion. A zero nominal value is refused. `ParameterScaledExperiment` is the
+  underlying wrapper.
+
+## R5-1 scaled criteria (brute force on the scaled criterion; pyomo with its prior pre-scaled as S·P·S)
+
+| problem | criterion | brute force | discopt `scale_parameters` | pyomo `scale_nominal_param_value` |
+|---|---|---|---|---|
+| Michaelis–Menten, 2 points | A | 0.0163983 (S₁ ≈ 0.23) | **0.0163939** (unscaled design: 0.0165505) | 0.0163939 |
+| | E | 63.1699 | **63.1997** (unscaled design: 58.94) | crash (singular start) |
+| | D | 11.6328 | 11.6333 (same design as unscaled) | 11.6333 |
+| Arrhenius, 2 temperatures | A | 1.43049e-4 | 1.43047e-4 | 0.0126 (`maxIterations`, 88× worse) |
+| | E | 6991.04 | 6991.12 | 0 (rank-deficient design reported optimal) |
+| | D | 27.4272 | 27.4272 | 27.4272 |
+| Rooney–Biegler + prior | A / E / D | t = 10 | t = 10 (all three) | t = 10 (all three) |
+
+discopt matches brute force everywhere (slightly better where the grid is
+coarse). Scaling changes the A- and E-optimal Michaelis–Menten designs and
+leaves the D-optimal ones alone, as theory says it should.
+
+## R5-2 constraints on predicted outputs
+
+| case | brute force (feasible set) | discopt `response_bounds` | pyomo (constraint on the output variable) |
+|---|---|---|---|
+| Rooney–Biegler + prior, y ≤ 12 | t = 1.5625, 15.49202 (bound inactive) | t = 1.5617, 15.49202 | t = 1.5617 |
+| Rooney–Biegler + prior, y ≤ 8 | t = 1.5225, 15.49183 | t = 1.5243, **y = 8.0000**, 15.49185 | t = 1.5220, y = 7.9920 |
+| A→B→C (T, CA0), by-product cap CC@1 ≤ 1.0 | 7.86286 | CC = 1.0000, **7.87498** | infeasible start: **fails**; feasible start: CC = 0.9959, 7.86587 |
+| same, CC@1 ≤ 0.6 | 6.97199 | CC = 0.6000, **6.99083** | infeasible start: **fails**; feasible start: CC = 0.5975, 6.98560 |
+
+* discopt meets each bound exactly and matches or beats the brute-force grid.
+* **P14. pyomo can't start from a design that violates an output constraint.**
+  Its initial square solve fixes the design, so the model is infeasible
+  ("Model from experiment did not solve appropriately"). discopt's constrained
+  seeding (round 2, D6) handles this.
+* **P15. pyomo's output constraints are slightly conservative.** The constraint
+  is cloned into every finite-difference scenario block, so the *perturbed*
+  parameter scenarios must satisfy it too. The design stops short of the bound
+  (y = 7.992 for a bound of 8; CC = 0.9959 for a cap of 1.0), losing a little
+  information.
+
+## Remaining differences
+
+Of the gaps listed after round 4, the two significant ones are closed. What's
+left: DAEs with algebraic states inside `ode_experiment` (a DAE written as
+constraints works but needs a solve per FIM), the pseudo-trace objective, JSON
+result files, and pyomo's stronger global search on its large dynamic example
+(R6; follow-up task).

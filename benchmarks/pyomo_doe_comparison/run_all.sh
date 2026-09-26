@@ -18,7 +18,7 @@ mkdir -p results
 scripts=("$@")
 if [ ${#scripts[@]} -eq 0 ]; then
     scripts=(probe_forward t_fim t_implicit t_design t_ode t_scaling
-             t2_criteria t2_constraints_batch t2_reactor t2_misc t3_ode t3_structure t4_discopt_only)
+             t2_criteria t2_constraints_batch t2_reactor t2_misc t3_ode t3_structure t4_discopt_only t5_new_features)
 fi
 for t in "${scripts[@]}"; do
     echo "== $t"

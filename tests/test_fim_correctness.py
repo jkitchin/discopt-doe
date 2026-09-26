@@ -502,3 +502,123 @@ class TestRound3Structure:
             optimal_experiment(ex, THETA, {"x": (0.1, 5.0)}, prior_fim=prior)
         with pytest.raises(ValueError, match=match):
             compute_fim(ex, THETA, {"x": 1.0}, prior_fim=prior)
+
+
+def _mm_two_point():
+    class MM(Experiment):
+        def create_model(self, **kwargs):
+            m = dm.Model("mm2")
+            V = m.continuous("V", lb=0, ub=10)
+            K = m.continuous("K", lb=0, ub=10)
+            S1 = m.continuous("S1", lb=0.01, ub=5)
+            S2 = m.continuous("S2", lb=0.01, ub=5)
+            ys = {"y1": V * S1 / (K + S1), "y2": V * S2 / (K + S2)}
+            return ExperimentModel(
+                m, {"V": V, "K": K}, {"S1": S1, "S2": S2}, ys, {"y1": 0.05, "y2": 0.05}
+            )
+
+    return MM()
+
+
+MM_THETA = {"V": 2.0, "K": 0.3}
+MM_BOUNDS = {"S1": (0.01, 5.0), "S2": (0.01, 5.0)}
+
+
+class TestScaleParameters:
+    def test_scaled_a_optimal_design_moves_and_fim_is_unscaled(self):
+        ex = _mm_two_point()
+        plain = optimal_experiment(ex, MM_THETA, MM_BOUNDS, criterion="trace")
+        scaled = optimal_experiment(
+            ex, MM_THETA, MM_BOUNDS, criterion="trace", scale_parameters=True
+        )
+        # brute force: unscaled optimum S1 = 0.196, scaled (relative) optimum S1 = 0.223
+        assert min(plain.design.values()) == pytest.approx(0.196, abs=2e-3)
+        assert min(scaled.design.values()) == pytest.approx(0.223, abs=2e-3)
+        F = compute_fim(ex, MM_THETA, scaled.design).fim
+        np.testing.assert_allclose(scaled.fim, F, rtol=1e-10)  # returned FIM is unscaled
+        S = np.diag([2.0, 0.3])
+        assert scaled.criterion_value == pytest.approx(np.trace(np.linalg.inv(S @ F @ S)), rel=1e-9)
+
+    def test_d_optimal_design_is_scale_invariant(self):
+        ex = _mm_two_point()
+        a = optimal_experiment(ex, MM_THETA, MM_BOUNDS)
+        b = optimal_experiment(ex, MM_THETA, MM_BOUNDS, scale_parameters=True)
+        assert sorted(a.design.values()) == pytest.approx(sorted(b.design.values()), abs=1e-3)
+        assert b.criterion_value == pytest.approx(
+            a.criterion_value + 2 * np.log(2.0 * 0.3), abs=1e-6
+        )
+
+    def test_prior_is_given_in_unscaled_units(self):
+        from discopt.doe import ParameterScaledExperiment
+
+        ex = _mm_two_point()
+        P = np.array([[40.0, 5.0], [5.0, 300.0]])
+        w = ParameterScaledExperiment(ex, np.array([2.0, 0.3]))
+        d = {"S1": 0.5, "S2": 4.0}
+        S = np.diag([2.0, 0.3])
+        np.testing.assert_allclose(
+            compute_fim(w, MM_THETA, d, prior_fim=P).fim,
+            S @ (compute_fim(ex, MM_THETA, d).fim + P) @ S,
+            rtol=1e-10,
+        )
+
+    def test_zero_nominal_refused(self):
+        with pytest.raises(ValueError, match="zero or non-finite"):
+            optimal_experiment(
+                _mm_two_point(), {"V": 2.0, "K": 0.0}, MM_BOUNDS, scale_parameters=True
+            )
+
+    def test_batch_returns_unscaled_fims(self):
+        from discopt.doe import batch_optimal_experiment
+
+        ex = _mm_two_point()
+        r = batch_optimal_experiment(
+            ex, MM_THETA, MM_BOUNDS, 2, criterion="trace", scale_parameters=True
+        )
+        total = sum(compute_fim(ex, MM_THETA, d).fim for d in r.designs)
+        np.testing.assert_allclose(r.joint_fim, total, rtol=1e-8)
+
+
+class TestResponseBounds:
+    def test_active_output_bound_is_met_and_optimal(self):
+        from discopt.doe import predict_responses
+
+        class RB(Experiment):
+            def create_model(self, **kwargs):
+                m = dm.Model("rb")
+                A = m.continuous("A", lb=0, ub=100)
+                k = m.continuous("k", lb=0, ub=10)
+                t = m.continuous("t", lb=0, ub=10)
+                return ExperimentModel(
+                    m, {"A": A, "k": k}, {"t": t}, {"y": A * (1 - dm.exp(-k * t))}, {"y": 0.1}
+                )
+
+        th = {"A": 15.0, "k": 0.5}
+        prior = sum(
+            (lambda J: np.outer(J, J) / 0.01)(
+                np.array([1 - np.exp(-0.5 * t), 15.0 * t * np.exp(-0.5 * t)])
+            )
+            for t in [1, 2, 3, 4, 5, 7]
+        )
+        # unconstrained D-optimum is t = 10 (y = 14.9); with y <= 8 the brute-force
+        # optimum sits on the bound, t = 1.524
+        r = optimal_experiment(
+            RB(), th, {"t": (0.0, 10.0)}, prior_fim=prior, response_bounds={"y": (None, 8.0)}
+        )
+        assert predict_responses(RB(), th, r.design)["y"] <= 8.0 + 1e-6
+        assert r.design["t"] == pytest.approx(1.524, abs=3e-3)
+
+    def test_constrained_model_predictions_and_bad_names(self):
+        from discopt.doe import predict_responses
+
+        k, a, x = THETA["k"], THETA["a"], 2.0
+        z = brentq(lambda z: z + k * z**3 - x, -10, 10)
+        pred = predict_responses(ImplicitStateExperiment(), THETA, {"x": x})
+        assert pred["y1"] == pytest.approx(a * z, rel=1e-6)
+        with pytest.raises(ValueError, match="unknown response"):
+            optimal_experiment(
+                ImplicitStateExperiment(),
+                THETA,
+                {"x": (0.1, 5.0)},
+                response_bounds={"nope": (0, 1)},
+            )

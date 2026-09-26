@@ -7,6 +7,7 @@ Information Matrix.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
@@ -15,6 +16,9 @@ from scipy.optimize import minimize
 
 from discopt.doe.fim import (
     FIMResult,
+    ParameterScaledExperiment,
+    parameter_scale,
+    predict_responses,
     _make_direct_fim_evaluator,
     compute_fim,
     compute_fim_batch,
@@ -344,6 +348,8 @@ def optimal_experiment(
     local_refine: bool = True,
     n_refine: int = 4,
     initial_designs: Sequence[Mapping[str, float]] | None = None,
+    response_bounds: Mapping[str, tuple[float | None, float | None]] | None = None,
+    scale_parameters: bool = False,
     seed: int = 42,
 ) -> DesignResult:
     """Find optimal experimental conditions by maximizing information gain.
@@ -399,6 +405,23 @@ def optimal_experiment(
         high-dimensional design space random starts rarely land in the basin
         of a good design that is already known. Values are clipped to
         ``design_bounds``; every design input must be given.
+    response_bounds : mapping name -> (lower, upper), optional
+        Bounds on *predicted responses* at the nominal parameters -- what the
+        experiment does, not how it is set: a maximum temperature, a minimum
+        conversion, a concentration limit (``None`` for an open side). Each
+        becomes an inequality constraint evaluated with
+        :func:`~discopt.doe.predict_responses`. For a quantity that is not
+        measured, or any other function of the predictions, write the
+        constraint yourself in ``inequality_constraints`` with
+        ``predict_responses`` inside.
+    scale_parameters : bool, default False
+        Evaluate the criterion on the FIM of the *relative* parameters,
+        ``S F S`` with ``S = diag(|θ_nominal|)`` (pyomo.doe's
+        ``scale_nominal_param_value``). A-, E- and ME-optimal designs depend on
+        the parameters' units and change; D-, I- and G-optimal ones do not.
+        ``prior_fim`` stays in unscaled units (it is scaled with the FIM), the
+        returned ``fim_result`` is unscaled, and ``criterion_value`` is the
+        scaled criterion that was optimized.
     n_refine : int, default 4
         Number of the best-scoring multi-start candidates the local solver is
         started from (unconstrained problems); the best refined design wins.
@@ -413,6 +436,31 @@ def optimal_experiment(
     DesignResult
         Optimal design, FIM, and metrics.
     """
+    if response_bounds:
+        inequality_constraints = list(inequality_constraints or []) + _response_bound_constraints(
+            experiment, param_values, response_bounds
+        )
+    if scale_parameters and not isinstance(experiment, ParameterScaledExperiment):
+        wrapped = ParameterScaledExperiment(experiment, parameter_scale(experiment, param_values))
+        res = optimal_experiment(
+            wrapped,
+            param_values,
+            design_bounds,
+            criterion=criterion,
+            prior_fim=prior_fim,
+            equality_constraints=equality_constraints,
+            inequality_constraints=inequality_constraints,
+            feasible_projection=feasible_projection,
+            prediction_region=prediction_region,
+            prediction_points=prediction_points,
+            n_prediction_points=n_prediction_points,
+            n_starts=n_starts,
+            local_refine=local_refine,
+            n_refine=n_refine,
+            initial_designs=initial_designs,
+            seed=seed,
+        )
+        return dataclasses.replace(res, fim_result=wrapped.unscaled(res.fim_result))
     design_names = list(design_bounds.keys())
     _validate_design_problem(experiment, param_values, design_bounds, prior_fim)
     eq = list(equality_constraints) if equality_constraints else []
@@ -645,6 +693,36 @@ def _warn_if_singular(fim_result: FIMResult) -> None:
             "those parameters (see diagnose_identifiability).",
             stacklevel=3,
         )
+
+
+def _response_bound_constraints(
+    experiment: Experiment,
+    param_values: Mapping[str, float],
+    response_bounds: Mapping[str, tuple[float | None, float | None]],
+) -> list[DesignConstraint]:
+    """``h(design) >= 0`` constraints from bounds on predicted responses."""
+    em = experiment.create_model(**dict(param_values))
+    unknown = [n for n in response_bounds if n not in em.responses]
+    if unknown:
+        raise ValueError(
+            f"response_bounds names unknown response(s) {unknown}; the responses are "
+            f"{list(em.response_names)}"
+        )
+    theta = dict(param_values)
+    constraints: list[DesignConstraint] = []
+    for name, bounds in response_bounds.items():
+        lo, hi = bounds
+        if lo is not None and hi is not None and lo > hi:
+            raise ValueError(f"response_bounds[{name!r}]: lower bound {lo} exceeds upper {hi}")
+        if hi is not None:
+            constraints.append(
+                lambda d, n=name, u=float(hi): u - predict_responses(experiment, theta, d)[n]
+            )
+        if lo is not None:
+            constraints.append(
+                lambda d, n=name, lb=float(lo): predict_responses(experiment, theta, d)[n] - lb
+            )
+    return constraints
 
 
 def _validate_design_problem(
@@ -1167,6 +1245,8 @@ def batch_optimal_experiment(
     min_distance: float | None = None,
     seed: int = 42,
     exchange_passes: int = 2,
+    response_bounds: Mapping[str, tuple[float | None, float | None]] | None = None,
+    scale_parameters: bool = False,
 ) -> BatchDesignResult:
     """Design a batch of ``N`` experiments to run in parallel.
 
@@ -1208,6 +1288,13 @@ def batch_optimal_experiment(
         the batch is polished by up to this many exchange sweeps: each run in
         turn is re-optimized given all the others and replaced if that
         improves the criterion. ``0`` gives pure greedy selection.
+    response_bounds : mapping name -> (lower, upper), optional
+        Bounds on predicted responses, applied to every experiment of the batch;
+        see :func:`optimal_experiment`.
+    scale_parameters : bool, default False
+        Criterion on the relative-parameter FIM ``S F S``; see
+        :func:`optimal_experiment`. ``fim_results`` and ``joint_fim`` are
+        returned unscaled.
 
     Returns
     -------
@@ -1216,6 +1303,38 @@ def batch_optimal_experiment(
     if n_experiments < 1:
         raise ValueError(f"n_experiments must be >= 1, got {n_experiments}")
 
+    if response_bounds:
+        # Applied to every experiment of the batch.
+        inequality_constraints = list(inequality_constraints or []) + _response_bound_constraints(
+            experiment, param_values, response_bounds
+        )
+    if scale_parameters and not isinstance(experiment, ParameterScaledExperiment):
+        wrapped = ParameterScaledExperiment(experiment, parameter_scale(experiment, param_values))
+        res = batch_optimal_experiment(
+            wrapped,
+            param_values,
+            design_bounds,
+            n_experiments,
+            criterion=criterion,
+            strategy=strategy,
+            prior_fim=prior_fim,
+            prediction_region=prediction_region,
+            prediction_points=prediction_points,
+            n_prediction_points=n_prediction_points,
+            equality_constraints=equality_constraints,
+            inequality_constraints=inequality_constraints,
+            feasible_projection=feasible_projection,
+            n_starts=n_starts,
+            local_refine=local_refine,
+            min_distance=min_distance,
+            seed=seed,
+            exchange_passes=exchange_passes,
+        )
+        pieces = [wrapped.unscaled(r) for r in res.fim_results]
+        sc = wrapped.scale
+        return dataclasses.replace(
+            res, fim_results=pieces, joint_fim=res.joint_fim / sc[:, None] / sc[None, :]
+        )
     _validate_design_problem(experiment, param_values, design_bounds, prior_fim)
     eq = list(equality_constraints) if equality_constraints else []
     ineq = list(inequality_constraints) if inequality_constraints else []

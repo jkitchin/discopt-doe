@@ -97,6 +97,20 @@ Found by cross-checking against `pyomo.contrib.doe` (see
   design searches now validate it (`discopt.doe.fim.check_prior_fim`).
 
 ### Added
+- **Constraints on what an experiment does.** `optimal_experiment` and
+  `batch_optimal_experiment` take `response_bounds={"name": (lo, hi)}`, bounds
+  on *predicted* responses at the nominal parameters (a temperature limit, a
+  by-product cap), and `discopt.doe.predict_responses` exposes the predictions
+  for general output constraints, including unmeasured quantities. pyomo.doe
+  expresses these as model constraints; discopt could only constrain the design
+  settings.
+- **Relative-parameter FIM.** `scale_parameters=True` on both functions
+  evaluates the criterion on `S F S`, `S = diag(|θ_nominal|)` (pyomo.doe's
+  `scale_nominal_param_value`). This changes A-, E- and ME-optimal designs,
+  which depend on the parameters' units. `prior_fim` stays in unscaled units
+  (pyomo expects it pre-scaled, a silent trap), the returned FIM is unscaled,
+  and a zero nominal value is refused. `ParameterScaledExperiment` is the
+  underlying wrapper.
 - `ode_experiment` initial values may name an unknown parameter, so an
   uncertain initial condition is estimated and enters the FIM (pyomo.doe
   models this with a constraint; discopt could not express it).
