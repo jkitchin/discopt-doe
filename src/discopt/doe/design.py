@@ -19,6 +19,7 @@ from discopt.doe.fim import (
     compute_fim,
     compute_fim_batch,
 )
+from discopt.doe.linear_design import trace_inverse
 
 # The mixture-constraint geometry lives in discopt.doe.simplex, which has no
 # FIM or Experiment dependency — a Scheffé design in a WebAssembly build needs
@@ -220,10 +221,7 @@ def _metrics_from_fim(fim: np.ndarray) -> dict[str, float]:
     # slogdet is stable for badly-scaled FIMs where det over/underflows.
     sign, slog = np.linalg.slogdet(fim)
     log_det = float(slog) if sign > 0 and np.isfinite(slog) else float("-inf")
-    try:
-        tr_inv = float(np.trace(np.linalg.inv(fim)))
-    except np.linalg.LinAlgError:
-        tr_inv = float("inf")
+    tr_inv = trace_inverse(fim)
     return {
         "log_det_fim": log_det,
         "trace_fim_inv": tr_inv,
@@ -344,6 +342,7 @@ def optimal_experiment(
     n_prediction_points: int = 256,
     n_starts: int = 10,
     local_refine: bool = True,
+    n_refine: int = 4,
     seed: int = 42,
 ) -> DesignResult:
     """Find optimal experimental conditions by maximizing information gain.
@@ -393,6 +392,12 @@ def optimal_experiment(
         scipy.optimize.minimize (L-BFGS-B without constraints, SLSQP
         when ``equality_constraints`` or ``inequality_constraints`` are
         supplied).
+    n_refine : int, default 4
+        Number of the best-scoring multi-start candidates the local solver is
+        started from (unconstrained problems); the best refined design wins.
+        Refining only the single best candidate lands in a local optimum
+        whenever the criterion is multimodal in the design, and can stall
+        outright when the first step reaches a singular region.
     seed : int, default 42
         Random seed for reproducibility.
 
@@ -461,18 +466,29 @@ def optimal_experiment(
             best_fim_result = None
 
     if local_refine:
-        refined = _refine_single_design(
-            experiment,
-            param_values,
-            seed_design,
-            design_names,
-            design_bounds,
-            criterion,
-            prior_fim,
-            region=region,
-            equality_constraints=eq,
-            inequality_constraints=ineq,
-        )
+        seeds = [seed_design]
+        if not constrained and n_refine > 1:
+            seeds = _top_candidates(
+                experiment, param_values, candidates, criterion, prior_fim, region, n_refine
+            ) or [seed_design]
+        refined = None
+        for start in seeds:
+            attempt = _refine_single_design(
+                experiment,
+                param_values,
+                start,
+                design_names,
+                design_bounds,
+                criterion,
+                prior_fim,
+                region=region,
+                equality_constraints=eq,
+                inequality_constraints=ineq,
+            )
+            if attempt is not None and (
+                refined is None or _is_better(attempt[1], refined[1], criterion)
+            ):
+                refined = attempt
         if refined is not None:
             r_design, r_criterion, r_fim_result = refined
             # Unconstrained: accept any improvement. Constrained: SLSQP does
@@ -594,6 +610,32 @@ def _scan_candidates(
     return best_design, best_criterion, best_fim_result
 
 
+def _top_candidates(
+    experiment: Experiment,
+    param_values: dict[str, float],
+    candidates: list[dict[str, float]],
+    criterion: str,
+    prior_fim: np.ndarray | None,
+    region: "DesignRegion | None",
+    k: int,
+) -> list[dict[str, float]]:
+    """The ``k`` best candidates with a finite criterion, best first."""
+    try:
+        fims = compute_fim_batch(experiment, param_values, candidates, prior_fim=prior_fim)
+    except Exception:
+        return []
+    scored = []
+    for design_point, fim_result in zip(candidates, fims):
+        try:
+            value = _evaluate_criterion(fim_result, criterion, region)
+        except Exception:
+            continue
+        if np.isfinite(value):
+            scored.append((value, design_point))
+    scored.sort(key=lambda t: -t[0] if _is_maximization(criterion) else t[0])
+    return [d for _, d in scored[:k]]
+
+
 def _refine_single_design(
     experiment: Experiment,
     param_values: dict[str, float],
@@ -628,6 +670,8 @@ def _refine_single_design(
     def to_design(x: np.ndarray) -> dict[str, float]:
         return {n: float(v) for n, v in zip(design_names, x)}
 
+    log_scale = criterion in (DesignCriterion.A_OPTIMAL, DesignCriterion.ME_OPTIMAL)
+
     def objective(x: np.ndarray) -> float:
         design = to_design(x)
         try:
@@ -637,6 +681,11 @@ def _refine_single_design(
             return _SINGULAR_SENTINEL
         if not np.isfinite(crit):
             return _SINGULAR_SENTINEL
+        if log_scale:
+            # A and ME span many decades across a design box (1e-2 at the optimum,
+            # 1e7 near a singular corner is typical), which stalls a gradient
+            # search. log() is monotone, so the optimum is unchanged.
+            return float(np.log(crit)) if crit > 0 else _SINGULAR_SENTINEL
         return -crit if maximize else crit
 
     has_constraints = bool(equality_constraints) or bool(inequality_constraints)
@@ -1062,6 +1111,8 @@ def _joint_batch(
             total = total + prior_fim
         return total, pieces
 
+    log_scale = criterion in (DesignCriterion.A_OPTIMAL, DesignCriterion.ME_OPTIMAL)
+
     def objective(z: np.ndarray) -> float:
         designs = unpack(z)
         result = joint_fim_and_pieces(designs)
@@ -1071,6 +1122,11 @@ def _joint_batch(
         crit = _criterion_from_fim(fim, criterion, region)
         if not np.isfinite(crit):
             return _SINGULAR_SENTINEL
+        if log_scale:
+            # A and ME span many decades across a design box (1e-2 at the optimum,
+            # 1e7 near a singular corner is typical), which stalls a gradient
+            # search. log() is monotone, so the optimum is unchanged.
+            return float(np.log(crit)) if crit > 0 else _SINGULAR_SENTINEL
         return -crit if maximize else crit
 
     rng = np.random.default_rng(seed)

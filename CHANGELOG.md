@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Found by cross-checking against `pyomo.contrib.doe` (see
+`benchmarks/pyomo_doe_comparison/REPORT.md`).
+
+### Fixed
+- **FIM of models with constraint-defined states was wrong.** When a response
+  depended on a variable fixed by an equality constraint (an equilibrium, a mass
+  balance, a discretized ODE), `compute_fim` differentiated the response with
+  the states held fixed, so `dz/dθ` was dropped: a response that *is* a state got
+  an all-zero Jacobian, and a mixed one a plausible but wrong, non-singular FIM
+  that moved the optimal design. The sensitivities now include the implicit
+  function theorem term `∂y/∂s · ds/dθ` (for `method="finite_difference"` too),
+  and a state the equality constraints do not determine raises instead.
+- **A nominal parameter outside its variable bounds was silently clipped.** The
+  FIM was then evaluated at a different parameter vector. `compute_fim` now
+  raises `ValueError`.
+- **A-optimal designs could pick a singular FIM.** `trace(FIM⁻¹)` used
+  `np.linalg.inv`, which returns garbage (often a large *negative* trace) for a
+  numerically singular FIM; the minimizing search then chose exactly those
+  designs. The A criterion now goes through a Cholesky factor and scores any
+  non-positive-definite FIM `inf` (`discopt.doe.linear_design.trace_inverse`).
+- **`optimal_experiment` stopped at local optima.** It refined only the single
+  best multi-start candidate, which misses the global optimum on multimodal
+  criteria and can stall when the first step hits a singular region. It now
+  refines the best `n_refine` candidates (new argument, default 4), and the A
+  and ME criteria are refined on a log scale.
+
 ## [0.4.0] - 2026-09-25
 
 A large release. Highlights: campaigns (runs with conditions), robust designs,
