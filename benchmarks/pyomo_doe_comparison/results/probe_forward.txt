@@ -1,0 +1,18 @@
+reference J:
+ [[ 1.   0.7]
+ [ 1.  -0.7]]
+central sequential J:
+ [[ 1.   0.7]
+ [ 1.  -0.7]]
+forward sequential J:
+ [[ 0.   0.2]
+ [ 0.  -1.2]]
+backward sequential J:
+ [[ 0.   0.2]
+ [ 0.  -1.2]]
+forward simultaneous-model J:
+ [[ 1.   0.7]
+ [ 1.  -0.7]]
+backward simultaneous-model J:
+ [[ 1.   0.7]
+ [ 1.  -0.7]]

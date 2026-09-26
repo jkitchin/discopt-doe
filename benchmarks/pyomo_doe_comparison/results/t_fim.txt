@@ -1,0 +1,42 @@
+== T1 battery: relative Frobenius error of FIM vs exact reference ==
+linear             pyomo[central] worst discopt=0.00e+00 worst pyomo=1.72e-13 []
+linear             pyomo[forward] worst discopt=0.00e+00 worst pyomo=1.03e+00 []
+rooney_biegler     pyomo[central] worst discopt=4.47e-16 worst pyomo=5.22e-06 []
+rooney_biegler     pyomo[forward] worst discopt=4.47e-16 worst pyomo=2.66e+02 []
+michaelis_menten   pyomo[central] worst discopt=1.52e-16 worst pyomo=1.52e-06 []
+michaelis_menten   pyomo[forward] worst discopt=1.52e-16 worst pyomo=4.44e+01 []
+arrhenius          pyomo[central] worst discopt=1.05e-19 worst pyomo=1.33e-04 []
+arrhenius          pyomo[forward] worst discopt=1.05e-19 worst pyomo=1.00e+00 []
+bi_exponential     pyomo[central] worst discopt=0.00e+00 worst pyomo=1.93e-07 []
+bi_exponential     pyomo[forward] worst discopt=0.00e+00 worst pyomo=2.71e+01 []
+oscillator         pyomo[central] worst discopt=0.00e+00 worst pyomo=5.19e-02 []
+oscillator         pyomo[forward] worst discopt=0.00e+00 worst pyomo=6.78e-02 []
+== T2 zero nominal parameter (b=0) ==
+linear b=0 discopt: 0.00e+00 | pyomo: ERROR ZeroDivisionError: float division by zero
+RB k=1e-9 discopt: 0.00e+00 | pyomo: 1.00e+00
+== T3 negative nominal parameter ==
+RB k=-0.3 discopt: 0.00e+00 | pyomo: 2.70e-07
+== T4 nominal outside the discopt Variable bounds ==
+k=0.5 but Variable ub=0.2 -> discopt refuses: nominal value 0.5 of parameter 'k' lies outside its variable bounds [0.0, 0.2]; the FIM wo
+== T5 pyomo FD step sensitivity (oscillator w=40, arrhenius) ==
+oscillator      step=1e-01  discopt=0.00e+00  pyomo=9.97e-01
+oscillator      step=1e-02  discopt=0.00e+00  pyomo=7.93e-01
+oscillator      step=1e-03  discopt=0.00e+00  pyomo=1.33e-02
+oscillator      step=1e-04  discopt=0.00e+00  pyomo=1.33e-04
+oscillator      step=1e-05  discopt=0.00e+00  pyomo=1.33e-06
+oscillator      step=1e-06  discopt=0.00e+00  pyomo=1.33e-08
+oscillator      step=1e-08  discopt=0.00e+00  pyomo=9.18e-09
+arrhenius       step=1e-01  discopt=0.00e+00  pyomo=2.29e+00
+arrhenius       step=1e-02  discopt=0.00e+00  pyomo=1.34e-02
+arrhenius       step=1e-03  discopt=0.00e+00  pyomo=1.33e-04
+arrhenius       step=1e-04  discopt=0.00e+00  pyomo=1.33e-06
+arrhenius       step=1e-05  discopt=0.00e+00  pyomo=1.33e-08
+arrhenius       step=1e-06  discopt=0.00e+00  pyomo=6.54e-11
+arrhenius       step=1e-08  discopt=0.00e+00  pyomo=2.87e-05
+bi_exponential  step=1e-01  discopt=0.00e+00  pyomo=1.22e-03
+bi_exponential  step=1e-02  discopt=0.00e+00  pyomo=1.22e-05
+bi_exponential  step=1e-03  discopt=0.00e+00  pyomo=1.22e-07
+bi_exponential  step=1e-04  discopt=0.00e+00  pyomo=1.22e-09
+bi_exponential  step=1e-05  discopt=0.00e+00  pyomo=2.06e-11
+bi_exponential  step=1e-06  discopt=0.00e+00  pyomo=1.72e-10
+bi_exponential  step=1e-08  discopt=0.00e+00  pyomo=1.00e+00

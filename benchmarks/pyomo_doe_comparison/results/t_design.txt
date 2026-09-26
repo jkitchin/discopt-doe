@@ -1,0 +1,75 @@
+### rooney_biegler+prior [determinant]  brute-force best {t=10} crit=15.8068
+  discopt: {t=10} crit=15.8068 (0.2s)
+  pyomo from {t=5} -> {t=10} crit=15.8068 [optimal] (0.2s) reported log10D=6.86479 (ln=15.8068)
+  pyomo from {t=5.118} -> {t=10} crit=15.8068 [optimal] (0.1s) reported log10D=6.86479 (ln=15.8068)
+  pyomo from {t=9.505} -> {t=10} crit=15.8068 [optimal] (0.1s) reported log10D=6.86479 (ln=15.8068)
+  pyomo from {t=1.442} -> {t=10} crit=15.8068 [optimal] (0.2s) reported log10D=6.86479 (ln=15.8068)
+  pyomo from {t=9.486} -> {t=10} crit=15.8068 [optimal] (0.1s) reported log10D=6.86479 (ln=15.8068)
+### rooney_biegler+prior [trace]  brute-force best {t=10} crit=0.00580196
+  discopt: {t=10} crit=0.00580196 (0.1s)
+  pyomo from {t=5} -> {t=10} crit=0.00580197 [optimal] (0.2s)
+ERROR: Rule failed when generating expression for Constraint
+jacobian_constraint with index ('y[0]', 'th[k]'): AttributeError: 'NoneType'
+object has no attribute '_parent'
+ERROR: Constructing component 'jacobian_constraint' from data=None failed:
+        AttributeError: 'NoneType' object has no attribute '_parent'
+  pyomo from {t=3.118} -> None crit=- [ERROR AttributeError: 'NoneType' object has no attribute '_parent'] (0.1s)
+  pyomo from {t=4.233} -> {t=10} crit=0.00580197 [optimal] (0.1s)
+  pyomo from {t=8.277} -> {t=10} crit=0.00580197 [optimal] (0.1s)
+  pyomo from {t=4.092} -> {t=10} crit=0.00580197 [optimal] (0.1s)
+### michaelis_menten_2pt [determinant]  brute-force best {S1=0.2679, S2=5} crit=12.655
+  discopt: {S1=0.2679, S2=5} crit=12.655 (0.2s)
+  pyomo from {S1=2.505, S2=2.505} -> {S1=0.2679, S2=5} crit=12.655 [optimal] (0.3s) reported log10D=5.49598 (ln=12.655)
+  pyomo from {S1=2.752, S2=0.1475} -> {S1=5, S2=0.2679} crit=12.655 [optimal] (0.1s) reported log10D=5.49598 (ln=12.655)
+  pyomo from {S1=3.77, S2=2.695} -> {S1=5, S2=0.2679} crit=12.655 [optimal] (0.2s) reported log10D=5.49598 (ln=12.655)
+  pyomo from {S1=1.655, S2=3.944} -> {S1=0.2679, S2=5} crit=12.655 [optimal] (0.2s) reported log10D=5.49598 (ln=12.655)
+  pyomo from {S1=1.523, S2=2.273} -> {S1=0.2679, S2=5} crit=12.655 [optimal] (0.1s) reported log10D=5.49598 (ln=12.655)
+### michaelis_menten_2pt [trace]  brute-force best {S1=0.196, S2=5} crit=0.00499844
+  discopt: {S1=0.196, S2=5} crit=0.00499844 (0.2s)
+  pyomo from {S1=2.505, S2=2.505} -> {S1=0.196, S2=5} crit=0.00499845 [optimal] (0.5s)
+  pyomo from {S1=0.6789, S2=2.022} -> {S1=5, S2=0.196} crit=0.00499845 [optimal] (0.2s)
+  pyomo from {S1=1.025, S2=1.319} -> {S1=0.196, S2=5} crit=0.00499845 [optimal] (0.2s)
+  pyomo from {S1=3.754, S2=1.409} -> {S1=5, S2=0.196} crit=0.00499845 [optimal] (0.2s)
+  pyomo from {S1=2.431, S2=4.904} -> {S1=0.196, S2=5} crit=0.00499845 [optimal] (0.2s)
+### arrhenius_2T [determinant]  brute-force best {T1=381.9, T2=400} crit=-0.876813
+  discopt: {T1=381.9, T2=400} crit=-0.876813 (0.2s)
+  pyomo from {T1=350, T2=350} -> {T1=353.8, T2=356.8} crit=-12.7004 [maxIterations] (5.9s) reported log10D=-3.41956 (ln=-7.87383)
+  pyomo from {T1=396.2, T2=372.5} -> {T1=400, T2=381.9} crit=-0.876812 [optimal] (0.2s) reported log10D=-0.380535 (ln=-0.876215)
+  pyomo from {T1=354.1, T2=327.7} -> {T1=400, T2=381.9} crit=-0.876812 [optimal] (0.3s) reported log10D=-0.380535 (ln=-0.876215)
+  pyomo from {T1=316.1, T2=397} -> {T1=381.9, T2=400} crit=-0.876812 [optimal] (0.2s) reported log10D=-0.380535 (ln=-0.876215)
+  pyomo from {T1=351.6, T2=311.6} -> {T1=400, T2=381.9} crit=-0.876812 [optimal] (0.6s) reported log10D=-0.380535 (ln=-0.876215)
+### arrhenius_2T [trace]  brute-force best {T1=380, T2=400} crit=330725
+  discopt: {T1=400, T2=380} crit=330725 (0.2s)
+  pyomo from {T1=350, T2=350} -> {T1=319.3, T2=320.4} crit=3.79652e+11 [maxIterations] (5.3s)
+  pyomo from {T1=362.3, T2=377.7} -> {T1=326.1, T2=336.7} crit=1.01199e+09 [maxIterations] (13.7s)
+  pyomo from {T1=361.3, T2=391.7} -> {T1=380, T2=400} crit=330725 [optimal] (0.2s)
+  pyomo from {T1=304, T2=352.9} -> {T1=311.2, T2=308.2} crit=2.50903e+11 [maxIterations] (6.1s)
+  pyomo from {T1=345.9, T2=306.2} -> {T1=308.9, T2=317.4} crit=2.28427e+10 [maxIterations] (8.2s)
+### oscillator+prior [determinant]  brute-force best {x=9.437} crit=13.6984
+  discopt: {x=9.437} crit=13.6984 (0.1s)
+  pyomo from {x=5} -> {x=5.257} crit=12.5258 [optimal] (0.2s) reported log10D=5.43987 (ln=12.5258)
+  pyomo from {x=6.413} -> {x=6.301} crit=12.8892 [optimal] (0.1s) reported log10D=5.59764 (ln=12.889)
+  pyomo from {x=8.526} -> {x=8.391} crit=13.4632 [optimal] (0.2s) reported log10D=5.84689 (ln=13.463)
+  pyomo from {x=5.929} -> {x=6.301} crit=12.8892 [optimal] (0.1s) reported log10D=5.59764 (ln=12.889)
+  pyomo from {x=2.601} -> {x=2.146} crit=10.7158 [optimal] (0.2s) reported log10D=4.65379 (ln=10.7157)
+### oscillator+prior [trace]  brute-force best {x=9.425} crit=0.0101126
+  discopt: {x=9.431} crit=0.0101125 (0.1s)
+  pyomo from {x=5} -> {x=5.247} crit=0.0103639 [optimal] (0.3s)
+  pyomo from {x=8.399} -> {x=8.384} crit=0.0101423 [optimal] (0.2s)
+  pyomo from {x=5.095} -> {x=5.247} crit=0.0103639 [optimal] (0.2s)
+  pyomo from {x=5.109} -> {x=5.247} crit=0.0103639 [optimal] (0.2s)
+  pyomo from {x=7.53} -> {x=7.338} crit=0.0101859 [optimal] (0.2s)
+### biexp_4times [determinant]  brute-force best {t0=12.51, t1=0.05, t2=0.5206, t3=2.325} crit=33.0789
+  discopt: {t0=0.5206, t1=2.325, t2=12.51, t3=0.05} crit=33.0789 (0.4s)
+  pyomo from {t0=15.03, t1=15.03, t2=15.03, t3=15.03} -> {t0=15.02, t1=16.58, t2=13.38, t3=4.82} crit=-38.7996 [maxIterations] (10.7s) reported log10D=19.111 (ln=44.0048)
+  pyomo from {t0=4.48, t1=24.6, t2=20.51, t3=23.62} -> {t0=2.45, t1=3.827, t2=2.718, t3=14.96} crit=12.3553 [maxIterations] (9.4s) reported log10D=9.83699 (ln=22.6505)
+  pyomo from {t0=5.789, t1=24.08, t2=5.78, t3=2.493} -> {t0=0.5206, t1=12.51, t2=0.05, t3=2.325} crit=33.0789 [optimal] (0.7s) reported log10D=14.366 (ln=33.0789)
+  pyomo from {t0=25.66, t1=25.85, t2=26.3, t3=14.18} -> None crit=- [ERROR ValueError: Cannot load a SolverResults object with bad status: error] (6.0s)
+  pyomo from {t0=8.258, t1=0.2624, t2=19.39, t3=21.61} -> {t0=0.05, t1=0.5206, t2=2.325, t3=12.51} crit=33.0789 [optimal] (2.2s) reported log10D=14.366 (ln=33.0789)
+### biexp_4times [trace]  brute-force best {t0=17.55, t1=0.05, t2=0.468, t3=2.589} crit=0.00906605
+  discopt: {t0=0.4681, t1=2.59, t2=0.05, t3=17.54} crit=0.00906605 (0.5s)
+  pyomo from {t0=15.03, t1=15.03, t2=15.03, t3=15.03} -> {t0=12.67, t1=16.46, t2=9.763, t3=10.28} crit=inf [maxIterations] (9.6s)
+  pyomo from {t0=25.08, t1=8.492, t2=6.496, t3=19.2} -> {t0=17.54, t1=0.4681, t2=2.59, t3=0.05} crit=0.00906607 [optimal] (1.6s)
+  pyomo from {t0=24.16, t1=28.91, t2=4.558, t3=14.49} -> {t0=17.54, t1=2.59, t2=0.05, t3=0.4681} crit=0.00906607 [optimal] (2.3s)
+  pyomo from {t0=26.85, t1=12.71, t2=17.71, t3=0.7835} -> {t0=19.98, t1=13.12, t2=19.73, t3=9.033} crit=inf [maxIterations] (9.1s)
+  pyomo from {t0=20.22, t1=27.58, t2=24.81, t3=26.57} -> {t0=12.71, t1=12.4, t2=11.71, t3=12.14} crit=inf [maxIterations] (12.6s)
