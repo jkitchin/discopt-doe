@@ -8,7 +8,7 @@ Information Matrix.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 import numpy as np
 from scipy.optimize import minimize
@@ -820,6 +820,54 @@ _LOG_SCALED_CRITERIA = (
 )
 
 
+def _nelder_mead_polish(objective: Callable, res: Any, bounds: list) -> Any:
+    """Derivative-free polish of a bounded refinement; keeps the better point.
+
+    L-BFGS-B's finite-difference line search can stop after one iteration on
+    the eigenvalue criteria (bi-exponential sampling times: E stuck at 111.3,
+    optimum 119.7, depending on round-off in the start point). Nelder-Mead in
+    bounds-normalized, clipped coordinates does not depend on that gradient.
+    """
+    lo = np.array([b[0] for b in bounds], dtype=float)
+    span = np.array([b[1] - b[0] for b in bounds], dtype=float)
+    span[span == 0] = 1.0
+
+    def to_x(z: np.ndarray) -> np.ndarray:
+        return lo + np.clip(z, 0.0, 1.0) * span
+
+    nm = minimize(
+        lambda z: objective(to_x(z)),
+        (np.asarray(res.x, dtype=float) - lo) / span,
+        method="Nelder-Mead",
+        options={"xatol": 1e-7, "fatol": 1e-10, "maxiter": 200 * len(bounds) + 400},
+    )
+    if np.isfinite(nm.fun) and nm.fun < res.fun:
+        res.x, res.fun = to_x(nm.x), float(nm.fun)
+    return res
+
+
+def _smooth_eigen_objective(fim: np.ndarray, criterion: str, tau: float) -> float:
+    """Smooth minimization objective for E (-soft-min log λ) or ME (log-cond).
+
+    Eigenvalues are compared on a log scale, so ``tau`` is a relative width:
+    at 0.01 eigenvalues within ~1% of each other are blended.
+    """
+    fim = np.asarray(fim, dtype=float)
+    ev = np.linalg.eigvalsh(0.5 * (fim + fim.T))
+    if not np.all(np.isfinite(ev)) or ev[0] <= 0:
+        return _SINGULAR_SENTINEL
+    logs = np.log(ev)
+
+    def soft_max(v: np.ndarray) -> float:
+        m = float(np.max(v))
+        return m + tau * float(np.log(np.sum(np.exp((v - m) / tau))))
+
+    soft_min = -soft_max(-logs)
+    if criterion == DesignCriterion.E_OPTIMAL:
+        return -soft_min
+    return soft_max(logs) - soft_min
+
+
 def _log_objective(crit: float, maximize: bool) -> float:
     """Minimization objective ``±log(crit)``; a non-positive value is singular."""
     if not crit > 0:
@@ -889,11 +937,20 @@ def _refine_single_design(
         return {n: float(v) for n, v in zip(design_names, x)}
 
     log_scale = criterion in _LOG_SCALED_CRITERIA
+    eigen = criterion in (DesignCriterion.E_OPTIMAL, DesignCriterion.ME_OPTIMAL)
+    # E and ME are refined on a smooth stand-in (soft-min / soft-max of the
+    # log-eigenvalues at a temperature tau), tightened in stages, then reported
+    # exactly. On the exact criteria a finite-difference gradient flips with
+    # whichever of two nearly equal eigenvalues round-off makes the smallest,
+    # so the refinement stalls at a crossing -- or not, run to run.
+    temperature = [0.1]
 
     def objective(x: np.ndarray) -> float:
         design = to_design(x)
         try:
             fim_result = eval_fim(design)
+            if eigen:
+                return _smooth_eigen_objective(fim_result.fim, criterion, temperature[0])
             crit = _evaluate_criterion(fim_result, criterion, region, smooth=True)
         except Exception:
             return _SINGULAR_SENTINEL
@@ -919,6 +976,11 @@ def _refine_single_design(
     else:
         try:
             res = minimize(objective, x0, method="L-BFGS-B", bounds=bounds)
+            if eigen:
+                for tau in (0.01, 0.001):
+                    temperature[0] = tau
+                    res = minimize(objective, np.asarray(res.x), method="L-BFGS-B", bounds=bounds)
+                res = _nelder_mead_polish(objective, res, bounds)
         except Exception:
             return None
 

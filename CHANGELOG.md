@@ -61,8 +61,13 @@ Found by cross-checking against `pyomo.contrib.doe` (see
 - **E- and ME-optimal searches did not leave nearly singular starts.** Both
   criteria are nonsmooth, and random candidates are often nearly singular
   (bi-exponential sampling times: E = 1e-7 against an optimum of 120, ME = 8e11
-  against 335). The D-optimal design is now added to their candidates; all ten
-  E/ME comparison problems reach the brute-force optimum.
+  against 335). The D-optimal design is now added to their candidates, the
+  refinement runs on a smooth soft-min/soft-max of the log-eigenvalues
+  (tightened in stages), and a Nelder-Mead polish follows: L-BFGS-B's
+  finite-difference line search could stop after one iteration, depending on
+  round-off in the start point. Nine of the ten E/ME comparison problems reach
+  the brute-force optimum for every seed tried; ME on a multimodal sine model
+  does for 5 of 10 seeds at the default `n_starts=10` (9 of 10 at 40).
 - **Vector-valued parameters got one FIM label for several rows.** A parameter
   declared as a single `Variable` of size n produced an n×n block but one
   name, which crashed `diagnose_identifiability` and mislabelled standard
