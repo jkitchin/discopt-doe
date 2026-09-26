@@ -202,6 +202,69 @@ discopt-doe-install-skill            # install to ~/.claude
 discopt-doe-install-skill --project  # install to ./.claude (versioned)
 ```
 
+## Related work
+
+discopt-doe is not the only open-source option, and for some jobs it is not the
+best one. What distinguishes it is the combination of classical designs,
+model-based design, and a workbook/CLI/app workflow in one package; where another
+tool is a better fit, use it.
+
+**Model-based design of experiments.** These are the closest neighbours — they
+design experiments from a mechanistic model and its Fisher information.
+
+- [**Pyomo.DoE**](https://pyomo.readthedocs.io/en/stable/explanation/analysis/doe/doe.html)
+  — MBDoE for models written in Pyomo, solving the design problem as a
+  (stochastic) nonlinear program with sensitivities from `k_aug`. If your model
+  is already an algebraic or DAE Pyomo model, or you need design variables
+  subject to serious process constraints, this is more powerful than what is
+  here. Wang & Dowling, *AIChE J* **68** (2022), e17813. The two packages are
+  compared head to head, against exact references rather than against each
+  other, in [`benchmarks/pyomo_doe_comparison/REPORT.md`](benchmarks/pyomo_doe_comparison/REPORT.md);
+  several correctness fixes in discopt-doe came out of it.
+- [**pydex**](https://github.com/KennedyKusumo/pydex) — optimal *continuous*
+  (approximate) designs: it optimises weights over a candidate set through scipy
+  or cvxpy, which is the natural home for the equivalence theorem. discopt-doe
+  builds exact designs of a fixed number of runs instead; the two answer
+  different questions about the same problem.
+- [**Pyomo.parmest**](https://pyomo.readthedocs.io/en/stable/explanation/analysis/parmest/index.html)
+  — the estimation half of the same loop: parameter fitting with bootstrap and
+  likelihood-ratio confidence regions. It pairs naturally with Pyomo.DoE.
+- [**PyOED**](https://arxiv.org/abs/2301.08336) — model-constrained OED for
+  inverse problems and data assimilation, aimed at PDE-scale problems.
+
+**Classical and algorithmic designs.**
+
+- [**pyDOE3**](https://github.com/relf/pyDOE3) — the maintained descendant of
+  pyDOE/pyDOE2: factorial, fractional factorial, Plackett–Burman, Box–Behnken,
+  central composite and Latin hypercube generators. Small, dependency-light, and
+  a fine choice if a design matrix is all you need.
+- [**dexpy**](https://statease.github.io/dexpy/) — classical DOE from Stat-Ease,
+  with D-optimal construction and power analysis.
+- [**OApackage**](https://github.com/eendebakpt/oapackage) — orthogonal arrays,
+  conference designs and D-efficient designs, with the combinatorial search done
+  properly in C++.
+- [**pyoptex**](https://github.com/RobinvdHaar/pyoptex) — optimal design with
+  extensible criteria and design structures, including split-plot and other
+  restricted randomizations.
+
+**Sequential optimization and surrogates.** Chapters on Bayesian optimization
+here are deliberately introductory; for production campaigns these are stronger.
+
+- [**BoTorch**](https://botorch.org/) and [**Ax**](https://ax.dev/) — Bayesian
+  optimization on PyTorch, with multi-objective, batch and constrained variants.
+- [**BayBE**](https://emdgroup.github.io/baybe/) — Bayesian experimental design
+  aimed squarely at chemistry and formulation, with good handling of categorical
+  and mixture-like search spaces.
+- [**SMT**](https://smt.readthedocs.io/) — surrogate modelling toolbox, including
+  sampling plans and gradient-enhanced models.
+
+**Outside Python.** R remains the deepest ecosystem for classical DOE:
+`DoE.base` and `FrF2` for factorial and fractional designs, `AlgDesign` for
+D/A/I-optimal construction, `rsm` for response-surface work, and `daewr` for the
+designs in Lawson's textbook. `JMP`, `Design-Expert` and `Minitab` are the
+commercial standards; the capability map in the book is written against the
+workflow those tools support, without naming them.
+
 ## Literature
 
 The methods implemented here are referenced throughout the docs; the full

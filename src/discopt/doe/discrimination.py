@@ -202,9 +202,13 @@ def discriminate_design(
         candidate design's own FIM. Recommended when driving discrimination
         from a growing dataset; without it the stateless approximation applies.
     n_starts : int, default 10
-        Multi-start sample count.
+        Number of random starting points. Bound and centre points are added to
+        these, and with ``local_refine`` **every** feasible start is descended
+        separately, so raising this genuinely widens the search rather than
+        only sampling more densely. Cost grows with it accordingly.
     local_refine : bool, default True
-        If True, refine the best multi-start point with L-BFGS-B.
+        If True, descend from each start with L-BFGS-B and keep the best
+        result. If False, the best sampled point is returned as-is.
     mi_samples : int, default 2000
         Outer sample count for the MI nested Monte Carlo estimator.
     seed : int, optional
@@ -282,6 +286,7 @@ def discriminate_compound(
     discrimination_weight: float = 0.5,
     precision_criterion: str = DesignCriterion.D_OPTIMAL,
     discrimination_criterion: DiscriminationCriterion = DiscriminationCriterion.BF,
+    normalize: bool = False,
     precision_model: str | None = None,
     model_priors: dict[str, float] | None = None,
     prior_fims: dict[str, np.ndarray] | None = None,
@@ -307,6 +312,29 @@ def discriminate_compound(
         FIM criterion used for the precision term.
     discrimination_criterion : DiscriminationCriterion, default BF
         Discrimination objective `Φ_discrimination`.
+    normalize : bool, default False
+        Combine **log-efficiencies** instead of raw criterion values.
+
+        The default sums the two criteria as they come, and they are not on a
+        common scale: ``Φ_D`` is a log-determinant, whose *differences* between
+        designs do not depend on the parameterisation or on σ, while a
+        discrimination criterion such as BF scales as ``1/σ²``. So ``λ`` is not
+        dimensionless, and the weight at which the design switches from
+        precision-led to discrimination-led moves when you restate the noise --
+        on the worked example in the book, halving σ moves that crossover from
+        λ ≈ 0.49 to λ ≈ 0.20. ``λ = 0.5`` does not mean "balanced".
+
+        With ``normalize=True`` each term is divided by its own optimum first,
+        which is the compound criterion as Atkinson, Bogacka & Bogacki (1998)
+        and Cook & Wong (1994) define it:
+
+        ``(1-λ)/p * log(|M(d)| / |M(d*_D)|) + λ * log(Φ_T(d) / Φ_T(d*_T))``
+
+        Both terms are then ≤ 0, both are 0 at their own optimum, and λ is a
+        dimensionless trade-off that means the same thing across problems. It
+        costs two extra optimisations (one per reference optimum) and requires
+        ``precision_criterion="determinant"`` and a positive discrimination
+        value. The endpoints still collapse to the pure designs either way.
     precision_model : str, optional
         Which model anchors the precision objective. Defaults to the
         lexicographically first key in ``experiments`` and a warning
@@ -351,7 +379,7 @@ def discriminate_compound(
     def precision(pred: _ModelPrediction) -> float:
         return _precision_value(_with_prior(pred.fim_result, prior_prec), precision_criterion)
 
-    def objective(design: dict[str, float]) -> float:
+    def _terms(design: dict[str, float]) -> tuple[float, float] | None:
         try:
             preds = predict(design)
             disc_value, _ = _evaluate_criterion(
@@ -359,10 +387,58 @@ def discriminate_compound(
             )
             prec_value = precision(preds[precision_model])
         except Exception:
-            return _SINGULAR_SENTINEL
+            return None
         if not (np.isfinite(disc_value) and np.isfinite(prec_value)):
+            return None
+        return prec_value, disc_value
+
+    n_params = len(param_estimates[precision_model]) or 1
+    ref_prec = ref_disc = None
+    if normalize:
+        if precision_criterion != DesignCriterion.D_OPTIMAL:
+            raise ValueError(
+                "normalize=True defines efficiency against the D-optimum, so it needs "
+                f"precision_criterion='determinant', got {precision_criterion!r}"
+            )
+        # Each term is measured against its own best achievable value, so both
+        # are log-efficiencies: zero at their own optimum, negative elsewhere.
+        ref_prec = _reference_optimum(
+            lambda d: (lambda t: -t[0] if t else _SINGULAR_SENTINEL)(_terms(d)),
+            _terms,
+            0,
+            design_bounds,
+            n_starts,
+            local_refine,
+            rng_seed,
+        )
+        ref_disc = _reference_optimum(
+            lambda d: (lambda t: -t[1] if t else _SINGULAR_SENTINEL)(_terms(d)),
+            _terms,
+            1,
+            design_bounds,
+            n_starts,
+            local_refine,
+            rng_seed,
+        )
+        if ref_disc is None or ref_disc <= 0.0:
+            raise ValueError(
+                "normalize=True needs a positive discrimination optimum to take a ratio "
+                f"against, got {ref_disc!r}; use normalize=False for this criterion"
+            )
+
+    def _combine(prec_value: float, disc_value: float) -> float:
+        if not normalize:
+            return (1.0 - lam) * prec_value + lam * disc_value
+        prec_eff = (prec_value - ref_prec) / n_params
+        disc_eff = np.log(disc_value / ref_disc) if disc_value > 0 else -np.inf
+        return (1.0 - lam) * prec_eff + lam * disc_eff
+
+    def objective(design: dict[str, float]) -> float:
+        terms = _terms(design)
+        if terms is None:
             return _SINGULAR_SENTINEL
-        return -((1.0 - lam) * prec_value + lam * disc_value)
+        value = _combine(*terms)
+        return _SINGULAR_SENTINEL if not np.isfinite(value) else -value
 
     best_design = _optimize_over_design(
         objective, design_bounds, n_starts=n_starts, local_refine=local_refine, seed=rng_seed
@@ -375,7 +451,7 @@ def discriminate_compound(
         discrimination_criterion, preds, weights, mi_samples, rng_seed
     )
     prec_value = precision(preds[precision_model])
-    compound_value = (1.0 - lam) * prec_value + lam * disc_value
+    compound_value = _combine(prec_value, disc_value)
 
     return DiscriminationDesignResult(
         design=best_design,
@@ -953,6 +1029,29 @@ def _normalise_priors(priors: dict[str, float] | None, model_names: list[str]) -
     return {name: priors[name] / total for name in model_names}
 
 
+def _reference_optimum(
+    pure_objective,
+    terms,
+    which: int,
+    design_bounds: dict[str, tuple[float, float]],
+    n_starts: int,
+    local_refine: bool,
+    seed: int,
+) -> float | None:
+    """Best achievable value of one term on its own, for log-efficiencies.
+
+    ``normalize=True`` measures each criterion against its own optimum, so the
+    optimum has to be found first -- one extra search per term.
+    """
+    best = _optimize_over_design(
+        pure_objective, design_bounds, n_starts=n_starts, local_refine=local_refine, seed=seed
+    )
+    if best is None:
+        return None
+    pair = terms(best)
+    return None if pair is None else float(pair[which])
+
+
 def _optimize_over_design(
     objective: Callable[[dict[str, float]], float],
     design_bounds: dict[str, tuple[float, float]],
@@ -975,35 +1074,63 @@ def _optimize_over_design(
             point[n] = float(val)
             candidates.append(point)
 
-    best_design: dict[str, float] | None = None
-    best_value = np.inf
+    # Score every candidate and keep the feasible ones, best first. A value at
+    # (or above) the sentinel means the objective could not be evaluated there.
+    scored: list[tuple[float, dict[str, float]]] = []
     for cand in candidates:
         val = objective(cand)
-        if val < best_value:
-            best_value = val
-            best_design = cand
+        if np.isfinite(val) and val < _SINGULAR_SENTINEL:
+            scored.append((float(val), cand))
 
-    # A best_value at (or above) the sentinel means every candidate failed;
-    # the finite sentinel would otherwise be accepted as a real "best".
-    if best_design is None or not np.isfinite(best_value) or best_value >= _SINGULAR_SENTINEL:
+    if not scored:
         return None
+
+    scored.sort(key=lambda t: t[0])
+    best_value, best_design = scored[0]
 
     if local_refine:
         bounds = [design_bounds[n] for n in design_names]
-        x0 = np.array([best_design[n] for n in design_names], dtype=float)
+
+        # The scan already evaluated every candidate, and each descent re-asks
+        # for its own starting point first, so seed a cache with what is known.
+        # Keying on the exact bytes only ever merges genuinely identical points,
+        # which leaves finite-difference steps untouched.
+        cache: dict[bytes, float] = {}
+        for val, cand in scored:
+            cache[np.array([cand[n] for n in design_names], dtype=float).tobytes()] = val
 
         def _wrapped(x: np.ndarray) -> float:
-            return objective({n: float(v) for n, v in zip(design_names, x)})
+            key = np.asarray(x, dtype=float).tobytes()
+            hit = cache.get(key)
+            if hit is not None:
+                return hit
+            val = objective({n: float(v) for n, v in zip(design_names, x)})
+            cache[key] = val
+            return val
 
-        try:
-            res = minimize(_wrapped, x0, method="L-BFGS-B", bounds=bounds)
-            if res.fun < best_value:
+        # Descend from *every* feasible start, not only from the best sample.
+        # On a rugged objective the best sample often sits in a different basin
+        # from the best optimum, so refining it alone makes the other starts
+        # worthless: they densify the scan without ever being followed downhill.
+        # Refining only a prefix of `scored` is not enough either -- the bound
+        # and centre points are here for their exploration value, not their
+        # score, so a fixed budget drops exactly the starts worth keeping.
+        failures: list[str] = []
+        for _, cand in scored:
+            x0 = np.array([cand[n] for n in design_names], dtype=float)
+            try:
+                res = minimize(_wrapped, x0, method="L-BFGS-B", bounds=bounds)
+            except Exception as e:  # noqa: BLE001
+                failures.append(str(e))
+                continue
+            if np.isfinite(res.fun) and res.fun < best_value:
                 best_value = float(res.fun)
                 best_design = {n: float(v) for n, v in zip(design_names, res.x)}
-        except Exception as e:  # noqa: BLE001
+        if failures:
+            fell_back = "the best sampled point" if len(failures) == len(scored) else "the best"
             warnings.warn(
-                f"discrimination local refinement failed ({e}); using the "
-                "best multi-start candidate.",
+                f"{len(failures)} of {len(scored)} discrimination local refinements failed "
+                f"(first: {failures[0]}); using {fell_back} result available.",
                 stacklevel=2,
             )
 
