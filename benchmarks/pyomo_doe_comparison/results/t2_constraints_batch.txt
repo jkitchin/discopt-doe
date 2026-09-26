@@ -1,0 +1,36 @@
+== R2-2 constrained designs (D-optimal) ==
+### michaelis_menten_2pt  [S1 + S2 <= 3]  brute {S1=0.2365, S2=2.764} = 12.3852
+  discopt {S1=0.2365, S2=2.764} = 12.3852  g=-4.44e-16
+  pyomo from {S1=0.2012, S2=0.712} -> {S1=0.2365, S2=2.764} = 12.3852  g=8.02e-08 [optimal]
+  pyomo from {S1=1.549, S2=0.8275} -> {S1=2.764, S2=0.2365} = 12.3852  g=8.02e-08 [optimal]
+  pyomo from {S1=1.476, S2=0.9678} -> {S1=2.764, S2=0.2365} = 12.3852  g=8.02e-08 [optimal]
+### arrhenius_2T  [T1 + T2 <= 720]  brute {T1=397.3, T2=322.7} = -6.06896
+  discopt {T1=397.1, T2=322.9} = -6.06898  g=0.00e+00
+  pyomo from {T1=304.2, T2=370.1} -> {T1=322.8, T2=397.2} = -6.06895  g=-5.64e-06 [optimal]
+  pyomo from {T1=322, T2=347.3} -> {T1=322.8, T2=397.2} = -6.06895  g=-5.64e-06 [optimal]
+  pyomo from {T1=338.9, T2=316.9} -> {T1=397.2, T2=322.8} = -6.06895  g=-5.64e-06 [optimal]
+### arrhenius_2T  [T2 >= T1 + 50]  brute {T1=350, T2=400} = -2.6889
+  discopt {T1=350, T2=400} = -2.6889  g=0.00e+00
+  pyomo from {T1=323.2, T2=377.3} -> {T1=350, T2=400} = -2.68889  g=1.69e-06 [optimal]
+  pyomo from {T1=314.4, T2=378.8} -> {T1=350, T2=400} = -2.68889  g=1.69e-06 [optimal]
+  pyomo from {T1=307.8, T2=377.3} -> {T1=350, T2=400} = -2.68889  g=1.69e-06 [optimal]
+### biexp_4times  [sum t <= 5]  brute {t0=0.361, t1=3.349, t2=0.05, t3=1.24} = 30.4335
+  discopt {t0=0.361, t1=0.05, t2=3.349, t3=1.24} = 30.4335  g=-8.96e-13
+  pyomo from {t0=0.6291, t1=1.956, t2=0.2505, t3=1.641} -> {t0=0.361, t1=3.349, t2=0.05, t3=1.24} = 30.4335  g=-3.06e-09 [optimal]
+== R2-3 multi-experiment designs (N single-measurement experiments, D-optimal) ==
+### michaelis_menten N=2: brute joint [0.2679, 5.0] = 12.655
+  discopt greedy [0.2679, 5.0] = 12.655 (reported 12.655)
+  discopt joint  [0.2679, 5.0] = 12.655 (reported 12.655)
+  pyomo sequential(prior) [2.6993, 5.0] = 9.17617
+### michaelis_menten N=4: brute joint [0.2679, 0.2679, 5.0, 5.0] = 14.0413
+  discopt greedy [0.2679, 0.2679, 5.0, 5.0] = 14.0413 (reported 14.0413)
+  discopt joint  [0.2679, 0.2679, 5.0, 5.0] = 14.0413 (reported 14.0413)
+  pyomo sequential(prior) [0.2575, 2.6993, 5.0, 5.0] = 13.6891
+### rooney_biegler N=2: brute joint [1.9322, 10.0] = 13.8804
+  discopt greedy [1.9322, 10.0] = 13.8804 (reported 13.8804)
+  discopt joint  [1.9322, 10.0] = 13.8804 (reported 13.8804)
+  pyomo sequential(prior) picks=[] -> ERROR ValueError: Cannot load a SolverResults object with bad status: error
+### exp+offset N=3: brute joint [0.0, 1.4194, 10.0] = 22.1616
+  discopt greedy [0.0, 1.4194, 10.0] = 22.1616 (reported 22.1616)
+  discopt joint  [0.0, 1.4194, 10.0] = 22.1616 (reported 22.1616)
+  pyomo sequential(prior) picks=[] -> ERROR ValueError: Cannot load a SolverResults object with bad status: error

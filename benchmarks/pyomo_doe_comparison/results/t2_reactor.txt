@@ -1,0 +1,28 @@
+example design: {'T0': 500.0, 'T1': 300.0, 'T2': 300.0, 'T3': 300.0, 'T4': 300.0, 'T5': 300.0, 'T6': 300.0, 'T7': 300.0, 'T8': 300.0, 'CA0': 5.0}
+reference: logdet=14.061394  cond=1.59e+06
+== FIM at the example design, rel. error vs exact ==
+  discopt rk4 n_steps=  50: 3.22e-03  logdet err=-6.68e-03 (12.1s)
+  discopt rk4 n_steps= 200: 1.63e-03  logdet err=-1.58e-02 (12.1s)
+  discopt rk4 n_steps=1000: 2.81e-04  logdet err=-2.45e-03 (12.0s)
+  discopt rk4 n_steps=   5 per segment (breakpoints): 3.39e-04  logdet err=+7.09e-05 (12.6s)
+  discopt rk4 n_steps=  10 per segment (breakpoints): 1.66e-05  logdet err=+2.85e-06 (12.9s)
+  discopt rk4 n_steps=  50 per segment (breakpoints): 2.17e-08  logdet err=+2.91e-09 (11.9s)
+  pyomo collocation nfe=10,ncp=3: 2.16e-02  logdet err=+1.29e-01 (1.1s)
+  pyomo collocation nfe=20,ncp=3: 1.08e-02  logdet err=+6.86e-02 (0.3s)
+  pyomo collocation nfe=40,ncp=3: 5.39e-03  logdet err=+3.53e-02 (0.4s)
+== D-optimal design (10 design variables) ==
+discopt (random starts): exact logdet=13.900124 (120s)
+    {'T0': 300.0, 'T1': 400.7, 'T2': 300.0, 'T3': 300.0, 'T4': 300.0, 'T5': 548.63, 'T6': 300.0, 'T7': 300.0, 'T8': 347.2, 'CA0': 5.0}
+discopt (+ example design): exact logdet=14.177339 (93s)
+    {'T0': 472.91, 'T1': 300.0, 'T2': 300.0, 'T3': 300.0, 'T4': 300.0, 'T5': 300.0, 'T6': 300.0, 'T7': 300.0, 'T8': 300.0, 'CA0': 5.0}
+discopt (+ best design seen): exact logdet=14.499877 (87s)
+    {'T0': 300.0, 'T1': 490.37, 'T2': 300.0, 'T3': 300.0, 'T4': 302.24, 'T5': 304.4, 'T6': 302.64, 'T7': 300.0, 'T8': 300.01, 'CA0': 5.0}
+pyomo from random start 0 [optimal]: exact logdet=14.163994 (20s)
+pyomo from random start 1 [optimal]: exact logdet=14.095546 (1s)
+pyomo from random start 2 [optimal]: exact logdet=14.163995 (2s)
+pyomo (scale_nominal=True) [optimal]: exact logdet=14.163995 (1s)
+    {'T0': 481.88, 'T1': 300.0, 'T2': 300.0, 'T3': 300.0, 'T4': 300.0, 'T5': 300.0, 'T6': 300.0, 'T7': 300.0, 'T8': 300.0, 'CA0': 5.0}
+pyomo (scale_nominal=False) [optimal]: exact logdet=14.163995 (1s)
+    {'T0': 481.88, 'T1': 300.0, 'T2': 300.0, 'T3': 300.0, 'T4': 300.0, 'T5': 300.0, 'T6': 300.0, 'T7': 300.0, 'T8': 300.0, 'CA0': 5.0}
+best known (30 random + 9 seeded L-BFGS-B starts, exact gradients): logdet=14.499877 (11s)
+    {'T0': 300.0, 'T1': 490.37, 'T2': 300.0, 'T3': 300.0, 'T4': 302.24, 'T5': 304.4, 'T6': 302.64, 'T7': 300.0, 'T8': 300.01, 'CA0': 5.0}

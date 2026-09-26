@@ -1,0 +1,13 @@
+== R2-5 prior FIM x scale_nominal_param_value (Rooney-Biegler + prior, D-opt) ==
+  exact optimum (unscaled prior): t=2.1200
+  discopt: t=2.1186
+  pyomo scale_nominal=False + unscaled prior        : t=2.1186 (exact logdet there 9.5067, max 9.5067)
+  pyomo scale_nominal=True  + SAME unscaled prior   : t=10.0000 (exact logdet there 8.0365, max 9.5067)
+  pyomo scale_nominal=True  + prior scaled as S P S : t=2.1186 (exact logdet there 9.5067, max 9.5067)
+== R2-6 compute_FIM_full_factorial vs discopt compute_fim_batch (Rooney-Biegler) ==
+  discopt batch max rel err: 1.6e-16
+  pyomo full_factorial [central] log10 D-opt: max abs err 1.99e-07   (got [6.707, 6.678, 6.691, 6.782, 6.846], exact [6.707, 6.678, 6.691, 6.782, 6.846])
+  pyomo full_factorial [forward] log10 D-opt: max abs err 6.75e-01   (got [6.613, 7.014, 7.316, 7.457, 7.52], exact [6.707, 6.678, 6.691, 6.782, 6.846])
+== R2-7 heterogeneous measurement errors (sigma = 1e-4 and 10) ==
+  sigma=(0.0001, 10.0): discopt 0.0e+00 | pyomo 1.1e-07
+  sigma=(10.0, 0.0001): discopt 0.0e+00 | pyomo 1.7e-13

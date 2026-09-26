@@ -1,0 +1,170 @@
+### michaelis_menten_2pt [min_eigenvalue] brute {S1=5, S2=0.1566} = 240.49
+  discopt {S1=0.1566, S2=5} = 240.49 (0.4s)
+  pyomo-gb tol=1e-04 from {S1=2.505, S2=2.505} -> ERROR LinAlgError: Singular matrix
+  pyomo-gb tol=1e-04 from {S1=0.4374, S2=1.192} -> {S1=0.1566, S2=5} = 240.49 [optimal] rank=2 (0.5s)
+  pyomo-gb tol=1e-04 from {S1=4.008, S2=2.915} -> {S1=0.02701, S2=0.1047} = 0.128304 [optimal] rank=2 (0.8s)
+  pyomo-gb tol=1e-04 from {S1=0.4797, S2=2.171} -> {S1=0.1566, S2=5} = 240.49 [optimal] rank=2 (0.3s)
+  pyomo-gb tol=1e-08 from {S1=0.4374, S2=1.192} -> {S1=0.1566, S2=5} = 240.49 [optimal] rank=2 (0.8s)
+### michaelis_menten_2pt [condition_number] brute {S1=5, S2=0.06382} = 3.12693
+  discopt {S1=5, S2=0.06382} = 3.12693 (0.4s)
+  pyomo-gb tol=1e-04 from {S1=2.505, S2=2.505} -> {S1=2.505, S2=2.505} = 5.47561e+12 [noSolution] rank=2 (0.6s)
+  pyomo-gb tol=1e-04 from {S1=2.4, S2=0.8071} -> {S1=5, S2=0.06382} = 3.12704 [optimal] rank=2 (0.3s)
+  pyomo-gb tol=1e-04 from {S1=3.676, S2=0.5772} -> {S1=5, S2=0.06382} = 3.12704 [optimal] rank=2 (0.3s)
+  pyomo-gb tol=1e-04 from {S1=1.962, S2=2.589} -> {S1=0.06382, S2=5} = 3.12704 [optimal] rank=2 (0.3s)
+  pyomo-gb tol=1e-08 from {S1=2.4, S2=0.8071} -> {S1=5, S2=0.06382} = 3.12693 [optimal] rank=2 (0.3s)
+### michaelis_menten_2pt [determinant] brute {S1=5, S2=0.2679} = 12.655
+  discopt {S1=0.2679, S2=5} = 12.655 (0.2s)
+  pyomo-gb tol=1e-04 from {S1=2.505, S2=2.505} -> ERROR ValueError: NaN values found in initialization of primals or primals_lb or primals_ub in _PyomoNLPWith
+  pyomo-gb tol=1e-04 from {S1=2.159, S2=2.938} -> {S1=0.03504, S2=0.01188} = -0.695553 [optimal] rank=2 (0.8s)
+  pyomo-gb tol=1e-04 from {S1=3.692, S2=4.782} -> {S1=0.2679, S2=4.999} = 12.6549 [optimal] rank=2 (0.5s)
+  pyomo-gb tol=1e-04 from {S1=1.428, S2=3.246} -> {S1=0.2678, S2=4.999} = 12.6549 [optimal] rank=2 (0.3s)
+  pyomo-gb tol=1e-08 from {S1=2.159, S2=2.938} -> {S1=0.03627, S2=0.01225} = -0.511093 [maxIterations] rank=2 (17.3s)
+### michaelis_menten_2pt [trace] brute {S1=5, S2=0.196} = 0.00499844
+  discopt {S1=0.196, S2=5} = 0.00499844 (0.2s)
+  pyomo-gb tol=1e-04 from {S1=2.505, S2=2.505} -> {S1=4.901, S2=0.1986} = 0.0050334 [optimal] rank=2 (0.5s)
+  pyomo-gb tol=1e-04 from {S1=3.484, S2=1.471} -> {S1=4.901, S2=0.1986} = 0.0050334 [optimal] rank=2 (0.3s)
+  pyomo-gb tol=1e-04 from {S1=0.01744, S2=4.868} -> {S1=0.1986, S2=4.901} = 0.0050334 [optimal] rank=2 (0.4s)
+  pyomo-gb tol=1e-04 from {S1=1.499, S2=1.577} -> {S1=0.1986, S2=4.901} = 0.0050334 [optimal] rank=2 (0.3s)
+  pyomo-gb tol=1e-08 from {S1=3.484, S2=1.471} -> {S1=5, S2=0.196} = 0.00499845 [optimal] rank=2 (0.3s)
+### arrhenius_2T [min_eigenvalue] brute {T1=400, T2=380} = 3.02366e-06
+  discopt {T1=400, T2=380} = 3.02366e-06 (0.5s)
+  pyomo-gb tol=1e-04 from {T1=350, T2=350} -> {T1=350, T2=350} = -1.35525e-20 [optimal] rank=1 (0.2s)
+  pyomo-gb tol=1e-04 from {T1=389.2, T2=358.5} -> {T1=350, T2=350} = -1.35525e-20 [optimal] rank=1 (0.3s)
+  pyomo-gb tol=1e-04 from {T1=347.1, T2=377.3} -> {T1=350, T2=350} = 1.35525e-20 [optimal] rank=1 (0.4s)
+  pyomo-gb tol=1e-04 from {T1=303, T2=370.7} -> {T1=350, T2=350} = 0 [optimal] rank=1 (0.4s)
+  pyomo-gb tol=1e-08 from {T1=389.2, T2=358.5} -> ERROR LinAlgError: Singular matrix
+### arrhenius_2T [condition_number] brute {T1=400, T2=378.4} = 4.46237e+10
+  discopt {T1=378.4, T2=400} = 4.46237e+10 (0.6s)
+  pyomo-gb tol=1e-04 from {T1=350, T2=350} -> {T1=351.8, T2=335} = 4.46237e+10 [solverFailure] rank=2 (0.6s)
+  pyomo-gb tol=1e-04 from {T1=337.4, T2=309.1} -> {T1=348, T2=344.7} = 4.00167e+11 [maxIterations] rank=2 (20.2s)
+  pyomo-gb tol=1e-04 from {T1=366.1, T2=393.1} -> {T1=349, T2=366.5} = 4.47139e+10 [maxIterations] rank=2 (19.0s)
+  pyomo-gb tol=1e-04 from {T1=320.7, T2=363} -> {T1=310.6, T2=318} = 7.07388e+10 [maxIterations] rank=2 (19.4s)
+  pyomo-gb tol=1e-08 from {T1=337.4, T2=309.1} -> {T1=399, T2=305.3} = 4.95674e+13 [maxIterations] rank=2 (19.1s)
+### arrhenius_2T [determinant] brute {T1=400, T2=381.9} = -0.876813
+  discopt {T1=381.9, T2=400} = -0.876813 (0.2s)
+  pyomo-gb tol=1e-04 from {T1=350, T2=350} -> ERROR ValueError: NaN values found in initialization of primals or primals_lb or primals_ub in _PyomoNLPWith
+  pyomo-gb tol=1e-04 from {T1=329.8, T2=374.2} -> {T1=381.9, T2=400} = -0.876849 [optimal] rank=2 (1.2s)
+  pyomo-gb tol=1e-04 from {T1=372.2, T2=321.9} -> {T1=400, T2=381.9} = -0.876849 [optimal] rank=2 (1.4s)
+  pyomo-gb tol=1e-04 from {T1=383, T2=365.8} -> {T1=381.9, T2=400} = -0.876849 [optimal] rank=2 (0.9s)
+  pyomo-gb tol=1e-08 from {T1=329.8, T2=374.2} -> {T1=381.9, T2=400} = -0.876812 [optimal] rank=2 (1.3s)
+### arrhenius_2T [trace] brute {T1=400, T2=380} = 330725
+  discopt {T1=400, T2=380} = 330725 (0.2s)
+  pyomo-gb tol=1e-04 from {T1=350, T2=350} -> {T1=350.5, T2=350.5} = inf [noSolution] rank=1 (0.9s)
+  pyomo-gb tol=1e-04 from {T1=368.3, T2=382} -> {T1=353.9, T2=343} = 9.21325e+07 [maxIterations] rank=2 (18.7s)
+  pyomo-gb tol=1e-04 from {T1=342.9, T2=375.9} -> {T1=395.4, T2=300} = 1.08095e+09 [maxIterations] rank=2 (19.5s)
+  pyomo-gb tol=1e-04 from {T1=387.8, T2=310.2} -> {T1=362, T2=352.2} = 3.68157e+07 [maxIterations] rank=2 (12.3s)
+  pyomo-gb tol=1e-08 from {T1=368.3, T2=382} -> {T1=353.9, T2=343} = 9.21325e+07 [maxIterations] rank=2 (18.7s)
+### oscillator+prior [min_eigenvalue] brute {x=9.425} = 100
+  discopt {x=9.425} = 100 (0.2s)
+  pyomo-gb tol=1e-04 from {x=5} -> {x=5.231} = 99.9991 [optimal] rank=2 (0.5s)
+  pyomo-gb tol=1e-04 from {x=8.498} -> {x=10} = 64.4791 [optimal] rank=2 (0.8s)
+  pyomo-gb tol=1e-04 from {x=3.939} -> {x=4.189} = 100 [optimal] rank=2 (0.3s)
+  pyomo-gb tol=1e-04 from {x=4.797} -> {x=5.23} = 99.9987 [optimal] rank=2 (0.9s)
+  pyomo-gb tol=1e-08 from {x=8.498} -> {x=10} = 64.4791 [optimal] rank=2 (0.7s)
+### oscillator+prior [condition_number] brute {x=1.042} = 1.10089
+  discopt {x=1.042} = 1.10089 (0.2s)
+  pyomo-gb tol=1e-04 from {x=5} -> {x=4.606} = 5.40707 [optimal] rank=2 (0.3s)
+  pyomo-gb tol=1e-04 from {x=1.463} -> {x=1.042} = 1.10089 [optimal] rank=2 (0.4s)
+  pyomo-gb tol=1e-04 from {x=6.984} -> {x=6.876} = 5.6169 [optimal] rank=2 (0.3s)
+  pyomo-gb tol=1e-04 from {x=2.92} -> {x=3.522} = 5.13531 [optimal] rank=2 (0.4s)
+  pyomo-gb tol=1e-08 from {x=1.463} -> {x=1.042} = 1.10089 [optimal] rank=2 (0.4s)
+### oscillator+prior [determinant] brute {x=9.437} = 13.6984
+  discopt {x=9.437} = 13.6984 (0.1s)
+  pyomo-gb tol=1e-04 from {x=5} -> {x=5.257} = 12.5258 [optimal] rank=2 (0.4s)
+  pyomo-gb tol=1e-04 from {x=8.711} -> {x=8.391} = 13.4632 [optimal] rank=2 (0.4s)
+  pyomo-gb tol=1e-04 from {x=2.754} -> {x=3.176} = 11.5119 [optimal] rank=2 (0.3s)
+  pyomo-gb tol=1e-04 from {x=5.618} -> {x=5.257} = 12.5258 [optimal] rank=2 (0.2s)
+  pyomo-gb tol=1e-08 from {x=8.711} -> {x=8.391} = 13.4632 [optimal] rank=2 (0.3s)
+### oscillator+prior [trace] brute {x=9.431} = 0.0101125
+  discopt {x=9.431} = 0.0101125 (0.1s)
+  pyomo-gb tol=1e-04 from {x=5} -> {x=5.247} = 0.0103639 [optimal] rank=2 (0.3s)
+  pyomo-gb tol=1e-04 from {x=3.997} -> {x=4.202} = 0.0105678 [optimal] rank=2 (0.2s)
+  pyomo-gb tol=1e-04 from {x=6.129} -> {x=6.292} = 0.0102529 [optimal] rank=2 (0.3s)
+  pyomo-gb tol=1e-04 from {x=1.966} -> {x=2.121} = 0.0122461 [optimal] rank=2 (0.2s)
+  pyomo-gb tol=1e-08 from {x=3.997} -> {x=4.202} = 0.0105678 [optimal] rank=2 (0.2s)
+### biexp_4times [min_eigenvalue] brute {t0=17.85, t1=0.4602, t2=2.637, t3=0.05} = 119.667
+  discopt {t0=0.4602, t1=2.637, t2=17.85, t3=0.05} = 119.667 (1.1s)
+  pyomo-gb tol=1e-04 from {t0=15.03, t1=15.03, t2=15.03, t3=15.03} -> {t0=15.02, t1=15.02, t2=15.02, t3=15.02} = -1.42113e-11 [solverFailure] rank=1 (0.3s)
+  pyomo-gb tol=1e-04 from {t0=5.45, t1=22.42, t2=22.58, t3=17.03} -> {t0=0.4602, t1=17.85, t2=2.637, t3=0.05} = 119.667 [optimal] rank=4 (2.6s)
+  pyomo-gb tol=1e-04 from {t0=27.64, t1=6.213, t2=25.53, t3=5.111} -> {t0=2.589, t1=10.8, t2=30, t3=0.7979} = 0.013002 [optimal] rank=4 (6.3s)
+ERROR: Exception encountered during cyipopt solve:
+Traceback (most recent call last):
+  File "/home/user/discopt-doe/.venv/lib/python3.12/site-packages/pyomo/contrib/pynumero/algorithms/solvers/cyipopt_solver.py", line 402, in solve
+    x, info = cyipopt_solver.solve(problem.x_init())
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/discopt-doe/.venv/lib/python3.12/site-packages/pyomo/contrib/pynumero/interfaces/cyipopt_interface.py", line 137, in solve
+    return super(CyIpoptProblemInterface, self).solve(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "cyipopt/cython/ipopt_wrapper.pyx", line 735, in cyipopt.ipopt_wrapper.Problem.solve
+  File "cyipopt/cython/ipopt_wrapper.pyx", line 1148, in cyipopt.ipopt_wrapper.jacobian_cb
+  File "cyipopt/cython/ipopt_wrapper.pyx", line 1109, in cyipopt.ipopt_wrapper.jacobian_value_cb
+  File "/home/user/discopt-doe/.venv/lib/python3.12/site-packages/pyomo/contrib/pynumero/interfaces/cyipopt_interface.py", line 431, in jacobian
+    self._nlp.evaluate_jacobian(out=self._jac_g)
+  File "/home/user/discopt-doe/.venv/lib/python3.12/site-packages/pyomo/contrib/pynumero/interfaces/pyomo_grey_box_nlp.py", line 428, in evaluate_jacobian
+    ret.set_block(i, 0, nlp.evaluate_jacobian())
+                        ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/discopt-doe/.venv/lib/python3.12/site-packages/pyomo/contrib/pynumero/interfaces/nlp_projections.py", line 304, in evaluate_jacobian
+    original_jacobian = self._original_nlp.evaluate_jacobian()
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/discopt-doe/.venv/lib/python3.12/site-packages/pyomo/contrib/pynumero/interfaces/pyomo_grey_box_nlp.py", line 821, in evaluate_jacobian
+    self._evaluate_jacobian_if_necessary_and_cache()
+  File "/home/user/discopt-doe/.venv/lib/python3.12/site-packages/pyomo/contrib/pynumero/interfaces/pyomo_grey_box_nlp.py", line 818, in _evaluate_jacobian_if_necessary_and_cache
+    self._cached_jacobian = jac.tocoo()
+                            ^^^^^^^^^^^
+  File "/home/user/discopt-doe/.venv/lib/python3.12/site-packages/pyomo/contrib/pynumero/sparse/block_matrix.py", line 373, in tocoo
+    dtype = self.dtype
+            ^^^^^^^^^^
+  File "/home/user/discopt-doe/.venv/lib/python3.12/site-packages/pyomo/contrib/pynumero/sparse/block_matrix.py", line 142, in dtype
+    raise ValueError('Multiple dtypes found: {0}'.format(str(all_dtypes)))
+ValueError: Multiple dtypes found: [dtype('complex128'), dtype('float64')]
+  pyomo-gb tol=1e-04 from {t0=28.93, t1=18.73, t2=18.23, t3=29.12} -> ERROR ValueError: Multiple dtypes found: [dtype('complex128'), dtype('float64')]
+  pyomo-gb tol=1e-08 from {t0=5.45, t1=22.42, t2=22.58, t3=17.03} -> {t0=0.4602, t1=17.85, t2=2.637, t3=0.05} = 119.667 [feasible] rank=4 (2.6s)
+### biexp_4times [condition_number] brute {t0=24.64, t1=0.4646, t2=2.415, t3=0.05} = 335.309
+  discopt {t0=0.4646, t1=2.415, t2=24.64, t3=0.05} = 335.309 (1.1s)
+  pyomo-gb tol=1e-04 from {t0=15.03, t1=15.03, t2=15.03, t3=15.03} -> {t0=15.03, t1=15.03, t2=15.03, t3=15.03} = inf [solverFailure] rank=1 (0.3s)
+  pyomo-gb tol=1e-04 from {t0=23.62, t1=23.71, t2=1.67, t3=11.11} -> {t0=28.95, t1=8.022, t2=3.993, t3=18.61} = inf [maxIterations] rank=3 (28.1s)
+  pyomo-gb tol=1e-04 from {t0=2.593, t1=5.846, t2=6.455, t3=25.77} -> {t0=0.05002, t1=0.4646, t2=2.415, t3=24.64} = 335.333 [optimal] rank=4 (0.8s)
+  pyomo-gb tol=1e-04 from {t0=3.846, t1=8.938, t2=14.81, t3=25.49} -> {t0=3.846, t1=8.938, t2=14.81, t3=25.49} = inf [solverFailure] rank=3 (0.3s)
+  pyomo-gb tol=1e-08 from {t0=23.62, t1=23.71, t2=1.67, t3=11.11} -> {t0=28.95, t1=8.022, t2=3.993, t3=18.61} = inf [maxIterations] rank=3 (28.1s)
+### biexp_4times [determinant] brute {t0=0.5206, t1=12.51, t2=0.05, t3=2.325} = 33.0789
+  discopt {t0=0.5206, t1=2.325, t2=12.51, t3=0.05} = 33.0789 (0.5s)
+  pyomo-gb tol=1e-04 from {t0=15.03, t1=15.03, t2=15.03, t3=15.03} -> ERROR ValueError: NaN values found in initialization of primals or primals_lb or primals_ub in _PyomoNLPWith
+  pyomo-gb tol=1e-04 from {t0=28.96, t1=21.26, t2=6.45, t3=16.37} -> {t0=0.8901, t1=0.4362, t2=9.967, t3=2.411} = 29.7147 [optimal] rank=4 (1.0s)
+  pyomo-gb tol=1e-04 from {t0=21.19, t1=1.604, t2=20.41, t3=11.08} -> {t0=20.8, t1=1.571, t2=14.06, t3=14.51} = -inf [solverFailure] rank=3 (2.7s)
+  pyomo-gb tol=1e-04 from {t0=17.71, t1=20.1, t2=20.09, t3=15.72} -> {t0=14.59, t1=14.61, t2=14.61, t3=9.453} = -inf [maxIterations] rank=2 (24.2s)
+  pyomo-gb tol=1e-08 from {t0=28.96, t1=21.26, t2=6.45, t3=16.37} -> {t0=2.414, t1=1.861, t2=4.146, t3=1.983} = 11.7725 [maxIterations] rank=4 (26.9s)
+### biexp_4times [trace] brute {t0=17.54, t1=0.4681, t2=2.59, t3=0.05} = 0.00906605
+  discopt {t0=0.4681, t1=2.59, t2=0.05, t3=17.54} = 0.00906605 (0.4s)
+  pyomo-gb tol=1e-04 from {t0=15.03, t1=15.03, t2=15.03, t3=15.03} -> {t0=0.857, t1=8.632, t2=1.047, t3=22.47} = 1.0779 [maxIterations] rank=4 (24.2s)
+  pyomo-gb tol=1e-04 from {t0=16.66, t1=5.985, t2=14.88, t3=3.806} -> {t0=1.254, t1=0.6883, t2=0.1457, t3=0.3385} = 1.87353 [optimal] rank=4 (0.7s)
+  pyomo-gb tol=1e-04 from {t0=14.45, t1=16.11, t2=23.23, t3=11.84} -> {t0=13.82, t1=13.82, t2=13.82, t3=6.401} = inf [optimal] rank=2 (0.6s)
+  pyomo-gb tol=1e-04 from {t0=0.637, t1=15.86, t2=6.197, t3=22.25} -> {t0=0.5211, t1=0.08421, t2=2.887, t3=11.44} = 0.0110718 [optimal] rank=4 (2.0s)
+  pyomo-gb tol=1e-08 from {t0=16.66, t1=5.985, t2=14.88, t3=3.806} -> {t0=17.54, t1=2.59, t2=0.05, t3=0.4681} = 0.00906607 [optimal] rank=4 (1.3s)
+### rooney_biegler+prior [min_eigenvalue] brute {t=10} = 173.06
+  discopt {t=10} = 173.06 (0.2s)
+  pyomo-gb tol=1e-04 from {t=5} -> {t=10} = 173.06 [optimal] rank=2 (0.2s)
+  pyomo-gb tol=1e-04 from {t=3.887} -> {t=10} = 173.06 [optimal] rank=2 (0.2s)
+  pyomo-gb tol=1e-04 from {t=3.805} -> {t=10} = 173.06 [optimal] rank=2 (0.2s)
+  pyomo-gb tol=1e-04 from {t=9.095} -> {t=10} = 173.06 [optimal] rank=2 (0.2s)
+  pyomo-gb tol=1e-08 from {t=3.887} -> {t=10} = 173.06 [optimal] rank=2 (0.2s)
+### rooney_biegler+prior [condition_number] brute {t=10} = 244.568
+  discopt {t=10} = 244.568 (0.2s)
+  pyomo-gb tol=1e-04 from {t=5} -> {t=9.999} = 244.577 [optimal] rank=2 (0.2s)
+  pyomo-gb tol=1e-04 from {t=3.93} -> {t=9.999} = 244.577 [optimal] rank=2 (0.2s)
+  pyomo-gb tol=1e-04 from {t=3.489} -> {t=9.999} = 244.577 [optimal] rank=2 (0.3s)
+  pyomo-gb tol=1e-04 from {t=3.48} -> {t=9.999} = 244.577 [optimal] rank=2 (0.2s)
+  pyomo-gb tol=1e-08 from {t=3.93} -> {t=10} = 244.568 [optimal] rank=2 (0.3s)
+### rooney_biegler+prior [determinant] brute {t=10} = 15.8068
+  discopt {t=10} = 15.8068 (0.1s)
+  pyomo-gb tol=1e-04 from {t=5} -> {t=9.999} = 15.8067 [optimal] rank=2 (0.2s)
+  pyomo-gb tol=1e-04 from {t=4.808} -> {t=9.999} = 15.8067 [optimal] rank=2 (0.3s)
+  pyomo-gb tol=1e-04 from {t=0.9329} -> {t=1.562} = 15.492 [optimal] rank=2 (0.3s)
+  pyomo-gb tol=1e-04 from {t=5.467} -> {t=9.999} = 15.8067 [optimal] rank=2 (0.3s)
+  pyomo-gb tol=1e-08 from {t=4.808} -> {t=10} = 15.8068 [optimal] rank=2 (0.3s)
+### rooney_biegler+prior [trace] brute {t=10} = 0.00580196
+  discopt {t=10} = 0.00580196 (0.1s)
+  pyomo-gb tol=1e-04 from {t=5} -> {t=9.85} = 0.00583664 [optimal] rank=2 (0.2s)
+  pyomo-gb tol=1e-04 from {t=9.214} -> {t=9.85} = 0.00583664 [optimal] rank=2 (0.2s)
+  pyomo-gb tol=1e-04 from {t=5.629} -> {t=9.85} = 0.00583664 [optimal] rank=2 (0.2s)
+  pyomo-gb tol=1e-04 from {t=7.439} -> {t=9.85} = 0.00583664 [optimal] rank=2 (0.2s)
+  pyomo-gb tol=1e-08 from {t=9.214} -> {t=10} = 0.00580197 [optimal] rank=2 (0.2s)
