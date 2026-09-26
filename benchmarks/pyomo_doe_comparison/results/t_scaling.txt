@@ -1,0 +1,6 @@
+[determinant] discopt (raw units): {'T1': 381.8558803816765, 'T2': 400.0}
+   pyomo scale_nominal=False: {'T1': 400.0000030475746, 'T2': 381.8582639988859} [optimal] reported FIM == S F S: False
+   pyomo scale_nominal=True: {'T1': 400.00000389034795, 'T2': 381.85826590815384} [optimal] reported FIM == S F S: True
+[trace] discopt (raw units): {'T1': 400.0, 'T2': 379.9860594678942}
+   pyomo scale_nominal=False: {'T1': 400.0000039999997, 'T2': 379.98224979160545} [optimal] reported FIM == S F S: False
+   pyomo scale_nominal=True: {'T1': 389.78555086146395, 'T2': 355.91250038255015} [optimal] reported FIM == S F S: True

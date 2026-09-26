@@ -458,10 +458,10 @@ def _predict_with_covariance(
     """
     from discopt.doe.fim import (
         _assemble_x_flat_direct,
-        _compute_jacobian_autodiff,
-        _get_param_indices,
+        _compile_response,
+        _total_jacobian,
+        fim_parameter_names,
     )
-    from discopt.doe.fim import _compile_response
     from discopt.parametric import extract_x_flat, flatten_params
 
     em = experiment.create_model(**param_values)
@@ -503,9 +503,9 @@ def _predict_with_covariance(
     p_flat = flatten_params(em.model)
     y_hat = np.array([float(np.asarray(fn(x_flat, p_flat)).flat[0]) for fn in response_fns])
 
-    # Jacobian of responses w.r.t. unknown parameters.
-    param_indices = _get_param_indices(em)
-    J = np.asarray(_compute_jacobian_autodiff(response_fns, x_flat, p_flat, param_indices))
+    # Jacobian of responses w.r.t. unknown parameters, through any implicit
+    # states (a constrained model's states move with θ).
+    J = _total_jacobian(em, response_fns, x_flat, p_flat)
 
     sigma = np.array([em.measurement_error[n] for n in em.response_names], dtype=np.float64)
     Sigma_y = np.diag(sigma**2)
@@ -520,7 +520,7 @@ def _predict_with_covariance(
     fim_result = FIMResult(
         fim=np.asarray(fim),
         jacobian=J,
-        parameter_names=em.parameter_names,
+        parameter_names=fim_parameter_names(em),
         response_names=em.response_names,
     )
 
@@ -632,7 +632,7 @@ class _ModelEvaluator:
             fim_result=FIMResult(
                 fim=np.asarray(fim),
                 jacobian=J,
-                parameter_names=self.em.parameter_names,
+                parameter_names=_fim.fim_parameter_names(self.em),
                 response_names=self.response_names,
             ),
         )

@@ -30,6 +30,7 @@ from typing import Any, Callable
 
 import numpy as np
 
+from discopt.doe.linear_design import trace_inverse
 from discopt.estimate import Experiment, ExperimentModel
 
 
@@ -104,11 +105,8 @@ class FIMResult:
 
     @property
     def a_optimal(self) -> float:
-        """A-optimality criterion: ``trace(FIM^{-1})``."""
-        try:
-            return float(np.trace(np.linalg.inv(self.fim)))
-        except np.linalg.LinAlgError:
-            return np.inf
+        """A-optimality criterion: ``trace(FIM^{-1})`` (``inf`` if not positive definite)."""
+        return trace_inverse(self.fim)
 
     @property
     def e_optimal(self) -> float:
@@ -176,6 +174,25 @@ def _measurement_sigma(em: ExperimentModel) -> np.ndarray:
     return sigma
 
 
+def _check_nominal_in_bounds(name: str, var: Any, value: Any) -> None:
+    """Refuse a nominal parameter value outside its Variable's bounds.
+
+    The FIM is a local quantity: it must be evaluated *at* the nominal values.
+    Clipping them into the bounds (or letting the bounded solve do so) would
+    silently return the FIM of a different parameter vector.
+    """
+    arr = np.asarray(value, dtype=np.float64).ravel()
+    lb = np.broadcast_to(np.asarray(var.lb, dtype=np.float64).ravel(), arr.shape)
+    ub = np.broadcast_to(np.asarray(var.ub, dtype=np.float64).ravel(), arr.shape)
+    tol = 1e-9 * np.maximum(1.0, np.abs(arr))
+    if np.any(arr < lb - tol) or np.any(arr > ub + tol):
+        raise ValueError(
+            f"nominal value {arr.tolist() if arr.size > 1 else float(arr[0])} of parameter "
+            f"{name!r} lies outside its variable bounds [{var.lb}, {var.ub}]; the FIM would "
+            "be evaluated at a different point. Widen the bounds in create_model."
+        )
+
+
 def _design_source_map(em: ExperimentModel) -> dict | None:
     """Classify every model variable as a parameter or a design input.
 
@@ -208,8 +225,8 @@ def _direct_var_values(
 ) -> np.ndarray | None:
     """Values for one variable at ``x*`` without solving.
 
-    Parameters take their nominal value (clipped to the variable bounds, to
-    match the box-constrained least-squares solve they replace); design inputs
+    Parameters take their nominal value (a value outside the variable bounds is
+    refused, see :func:`_check_nominal_in_bounds`); design inputs
     take their fixed design value. Returns ``None`` on any shape mismatch or a
     missing design value, signalling the caller to fall back to the solve.
     """
@@ -223,10 +240,8 @@ def _direct_var_values(
             arr = pv.astype(np.float64).copy()
         else:
             return None
-        clipped = np.clip(
-            arr, np.asarray(var.lb, dtype=np.float64), np.asarray(var.ub, dtype=np.float64)
-        )
-        return np.asarray(clipped, dtype=np.float64)
+        _check_nominal_in_bounds(name, var, arr)
+        return arr
     if not design_values or name not in design_values:
         return None
     dv: np.ndarray = np.asarray(design_values[name], dtype=np.float64).ravel()
@@ -328,6 +343,7 @@ class _FIMKernel:
     jac: Callable
     batch_jac: Callable
     signature: Any = None
+    values: Callable | None = None
 
     def x_flat(self, param_values, design_values):
         """``x*`` for one design, or ``None`` on a shape mismatch / missing value."""
@@ -346,7 +362,7 @@ class _FIMKernel:
         return FIMResult(
             fim=np.asarray(fim),
             jacobian=np.asarray(J),
-            parameter_names=self.em.parameter_names,
+            parameter_names=fim_parameter_names(self.em),
             response_names=self.em.response_names,
         )
 
@@ -533,6 +549,7 @@ def _build_fim_kernel(experiment: Experiment, param_values: dict[str, float], *,
         jac=jax.jit(jacobian),
         batch_jac=jax.jit(jax.vmap(jacobian)),
         signature=_model_signature(em),
+        values=jax.jit(response_vector),
     )
 
 
@@ -548,6 +565,69 @@ def _check_design_names(em: ExperimentModel, design_values: dict[str, float] | N
                 f"unknown design input(s) {unknown} in design_values; "
                 f"model design inputs are {sorted(em.design_inputs)}."
             )
+
+
+class ParameterScaledExperiment(Experiment):
+    """An experiment whose FIM is taken with respect to relative parameters.
+
+    The FIM of ``θ = s ⊙ φ`` with respect to ``φ`` is ``S F S``, ``S = diag(s)``
+    and ``s`` the nominal parameter values; its Jacobian is ``J S``. This is
+    the "relative sensitivity" scaling of pyomo.doe's
+    ``scale_nominal_param_value``. It leaves D-optimal designs (``log det``
+    shifts by a constant) and I/G-optimal designs (prediction variances are
+    invariant) unchanged, but changes A-, E- and ME-optimal ones, which depend
+    on the parameters' units.
+
+    :func:`compute_fim`, :func:`compute_fim_batch` and the design searches
+    recognise the wrapper. A ``prior_fim`` handed to them is in the *unscaled*
+    units of the wrapped experiment and is scaled together with the FIM.
+    """
+
+    def __init__(self, experiment: Experiment, scale: np.ndarray):
+        self.experiment = experiment
+        self.scale = np.asarray(scale, dtype=float).ravel()
+
+    def create_model(self, **kwargs) -> ExperimentModel:
+        return self.experiment.create_model(**kwargs)
+
+    def scaled(self, result: FIMResult) -> FIMResult:
+        s = self.scale
+        return dataclasses.replace(
+            result, fim=s[:, None] * result.fim * s[None, :], jacobian=result.jacobian * s
+        )
+
+    def unscaled(self, result: FIMResult) -> FIMResult:
+        s = self.scale
+        return dataclasses.replace(
+            result, fim=result.fim / s[:, None] / s[None, :], jacobian=result.jacobian / s
+        )
+
+
+def parameter_scale(experiment: Experiment, param_values: dict[str, Any]) -> np.ndarray:
+    """``|θ_nominal|`` per FIM row (vector parameters expanded), for scaling.
+
+    Raises for a zero nominal value: the relative sensitivity of a parameter
+    whose nominal value is 0 is identically zero.
+    """
+    from discopt.parametric import variable_slices
+
+    em = experiment.create_model(**param_values)
+    slices = variable_slices(em.model)
+    parts = []
+    for name, var in em.unknown_parameters.items():
+        sl = slices[var.name]
+        vals = np.broadcast_to(
+            np.asarray(param_values[name], dtype=float).ravel(), (sl.stop - sl.start,)
+        )
+        parts.append(np.abs(vals))
+    s = np.concatenate(parts) if parts else np.zeros(0)
+    if np.any(s == 0.0) or not np.all(np.isfinite(s)):
+        zero = [n for n, v in zip(fim_parameter_names(em), s) if not (v > 0 and np.isfinite(v))]
+        raise ValueError(
+            f"cannot scale by nominal values: parameter(s) {zero} have a zero or non-finite "
+            "nominal value, so their relative sensitivity is undefined"
+        )
+    return s
 
 
 def compute_fim(
@@ -599,7 +679,108 @@ def compute_fim(
     re-trace. See :func:`clear_fim_cache`.
     """
 
-    from discopt.parametric import extract_x_flat, flatten_params
+    if isinstance(experiment, ParameterScaledExperiment):
+        return experiment.scaled(
+            compute_fim(
+                experiment.experiment,
+                param_values,
+                design_values,
+                prior_fim=prior_fim,
+                method=method,
+                fd_step=fd_step,
+            )
+        )
+    result = _compute_fim(
+        experiment, param_values, design_values, prior_fim=None, method=method, fd_step=fd_step
+    )
+    if prior_fim is not None:
+        P = check_prior_fim(prior_fim, result.parameter_names)
+        result = dataclasses.replace(result, fim=result.fim + P)
+    if not np.all(np.isfinite(result.fim)):
+        import warnings
+
+        warnings.warn(
+            "the FIM has non-finite entries: the responses or their sensitivities "
+            "overflowed at this design (for an ODE experiment, typically explicit RK4 "
+            "on a stiff system -- use more n_steps or method='trapezoid', and see "
+            "check_accuracy).",
+            stacklevel=2,
+        )
+    return result
+
+
+def _model_and_x_flat(experiment, param_values, design_values):
+    """The built model and its point ``x*`` at the nominal parameters and design.
+
+    For a pure explicit response model ``x*`` is assembled directly. Otherwise
+    (constraints, implicit states) the design is fixed and ``Σ(θ - θ_nom)²`` is
+    minimized subject to the model's constraints, which recovers the states.
+    """
+    from discopt.parametric import extract_x_flat
+
+    em = experiment.create_model(**param_values)
+    _check_design_names(em, design_values)
+    x_flat = _assemble_x_flat_direct(em, param_values, design_values)
+    if x_flat is not None:
+        return em, x_flat
+    for n in em.parameter_names:
+        _check_nominal_in_bounds(n, em.unknown_parameters[n], param_values[n])
+    for name, val in (design_values or {}).items():
+        if name in em.design_inputs:
+            var = em.design_inputs[name]
+            # Fix the design variable by setting lb = ub = val
+            val_arr = np.asarray(val, dtype=np.float64)
+            if var.shape:
+                val_arr = np.full(var.shape, val_arr)
+            var.lb = val_arr
+            var.ub = val_arr
+    em.model.minimize(
+        sum((em.unknown_parameters[n] - param_values[n]) ** 2 for n in em.parameter_names)
+    )
+    return em, extract_x_flat(em.model.solve(), em.model)
+
+
+def predict_responses(
+    experiment: Experiment,
+    param_values: dict[str, Any],
+    design_values: dict[str, Any] | None = None,
+) -> dict[str, float]:
+    """Model predictions of every response at the nominal parameters and a design.
+
+    The building block for constraints on what an experiment *does* rather than
+    on its settings -- a temperature limit, a product purity, a maximum
+    concentration. :func:`~discopt.doe.optimal_experiment` uses it for
+    ``response_bounds``; call it inside ``inequality_constraints`` for anything
+    more general. To constrain a quantity that is not measured, build a second
+    experiment that returns it as a response and predict with that one: a
+    response only enters the FIM of the experiment it belongs to.
+
+    Explicit response models reuse the same compiled model as :func:`compute_fim`;
+    models with implicit states are solved at the design.
+    """
+    from discopt.parametric import flatten_params
+
+    if isinstance(experiment, ParameterScaledExperiment):
+        experiment = experiment.experiment
+    kernel = _fim_kernel(experiment, param_values)
+    if kernel is not None and kernel.values is not None:
+        _check_design_names(kernel.em, design_values)
+        x = kernel.x_flat(param_values, design_values)
+        if x is not None:
+            vals = np.asarray(kernel.values(x), dtype=float).ravel()
+            return dict(zip(kernel.em.response_names, map(float, vals)))
+    em, x_flat = _model_and_x_flat(experiment, param_values, design_values)
+    p_flat = flatten_params(em.model)
+    return {
+        n: float(
+            np.asarray(_compile_response(em.responses[n], em.model)(x_flat, p_flat)).ravel()[0]
+        )
+        for n in em.response_names
+    }
+
+
+def _compute_fim(experiment, param_values, design_values, *, prior_fim, method, fd_step):
+    from discopt.parametric import flatten_params
 
     if method == "autodiff":
         kernel = _fim_kernel(experiment, param_values)
@@ -610,38 +791,7 @@ def compute_fim(
                 J = np.asarray(kernel.jac(x))[:, kernel.param_indices]
                 return kernel.result(J, prior_fim)
 
-    # Build the model at nominal parameter values
-    em = experiment.create_model(**param_values)
-    _check_design_names(em, design_values)
-
-    # Fast path: for a pure explicit response model (no constraints; every
-    # variable is an unknown parameter or a design input) the solution point
-    # x* is fully determined by the nominal parameters and the fixed design.
-    # The QP solve below would merely reconstruct values we already know, so
-    # assemble x* directly and skip it. ``x_flat`` here is identical (to solver
-    # tolerance) to the solved one.
-    x_flat = _assemble_x_flat_direct(em, param_values, design_values)
-
-    if x_flat is None:
-        # General path: a constrained / implicit-state model genuinely needs a
-        # solve to recover x*. Fix the design, then minimise Σ(θ - θ_nom)².
-        if design_values:
-            for name, val in design_values.items():
-                if name in em.design_inputs:
-                    var = em.design_inputs[name]
-                    # Fix design variable by setting lb = ub = val
-                    val_arr = np.asarray(val, dtype=np.float64)
-                    if var.shape:
-                        val_arr = np.full(var.shape, val_arr)
-                    var.lb = val_arr
-                    var.ub = val_arr
-
-        em.model.minimize(
-            sum((em.unknown_parameters[n] - param_values[n]) ** 2 for n in em.parameter_names)
-        )
-        result = em.model.solve()
-
-        x_flat = extract_x_flat(result, em.model)
+    em, x_flat = _model_and_x_flat(experiment, param_values, design_values)
 
     # Compile response functions
     response_fns = []
@@ -649,18 +799,10 @@ def compute_fim(
         fn = _compile_response(em.responses[name], em.model)
         response_fns.append(fn)
 
-    # Find indices of unknown parameter variables in x_flat
-    param_indices = _get_param_indices(em)
-
     # Build p_flat for any model Parameters (distinct from unknown_parameters)
     p_flat = flatten_params(em.model)
 
-    if method == "autodiff":
-        J = _compute_jacobian_autodiff(response_fns, x_flat, p_flat, param_indices)
-    elif method == "finite_difference":
-        J = _compute_jacobian_fd(response_fns, x_flat, p_flat, param_indices, fd_step)
-    else:
-        raise ValueError(f"Unknown method: {method!r}. Use 'autodiff' or 'finite_difference'.")
+    J = _total_jacobian(em, response_fns, x_flat, p_flat, method=method, fd_step=fd_step)
 
     # Measurement covariance (diagonal)
     sigma = _measurement_sigma(em)
@@ -675,7 +817,7 @@ def compute_fim(
     return FIMResult(
         fim=fim,
         jacobian=np.asarray(J),
-        parameter_names=em.parameter_names,
+        parameter_names=fim_parameter_names(em),
         response_names=em.response_names,
     )
 
@@ -705,6 +847,16 @@ def compute_fim_batch(
     """
     if not design_points:
         return []
+    if isinstance(experiment, ParameterScaledExperiment):
+        inner = compute_fim_batch(
+            experiment.experiment,
+            param_values,
+            design_points,
+            prior_fim=prior_fim,
+            method=method,
+            fd_step=fd_step,
+        )
+        return [experiment.scaled(r) for r in inner]
 
     kernel = _fim_kernel(experiment, param_values) if method == "autodiff" else None
     X = None
@@ -750,6 +902,12 @@ def _make_direct_fim_evaluator(
     :func:`compute_fim` on that point — only the per-call model rebuild and JAX
     re-trace are eliminated.
     """
+    if isinstance(experiment, ParameterScaledExperiment):
+        inner = _make_direct_fim_evaluator(experiment.experiment, param_values, prior_fim=prior_fim)
+        if inner is None:
+            return None
+        return lambda design_values: experiment.scaled(inner(design_values))
+
     kernel = _fim_kernel(experiment, param_values)
     if kernel is None:
         return None
@@ -1205,6 +1363,53 @@ def check_identifiability(
 # ─────────────────────────────────────────────────────────────
 
 
+def check_prior_fim(prior_fim: Any, parameter_names: list[str]) -> np.ndarray:
+    """Validate a prior FIM against the FIM's parameters; return it as an array.
+
+    It must be a finite, symmetric, positive semi-definite matrix with one
+    row and column per FIM parameter (see :func:`fim_parameter_names`).
+    """
+    P = np.asarray(prior_fim, dtype=float)
+    n = len(parameter_names)
+    if P.shape != (n, n):
+        raise ValueError(
+            f"prior_fim has shape {P.shape}; expected ({n}, {n}) for the parameters "
+            f"{parameter_names}"
+        )
+    if not np.all(np.isfinite(P)):
+        raise ValueError("prior_fim contains non-finite entries")
+    scale = max(float(np.max(np.abs(P))), 1e-300)
+    if np.max(np.abs(P - P.T)) > 1e-8 * scale:
+        raise ValueError("prior_fim is not symmetric")
+    if np.min(np.linalg.eigvalsh(0.5 * (P + P.T))) < -1e-8 * scale:
+        raise ValueError(
+            "prior_fim is not positive semi-definite (a Fisher information matrix "
+            "cannot have a negative eigenvalue)"
+        )
+    return P
+
+
+def fim_parameter_names(em: ExperimentModel) -> list[str]:
+    """One name per FIM row/column, in ``x*`` order.
+
+    A scalar parameter keeps its name; a vector-valued one (a single
+    ``Variable`` of size n) expands to ``name[0] .. name[n-1]``, matching the
+    rows :func:`_get_param_indices` contributes. Using the bare
+    ``ExperimentModel.parameter_names`` there gave one name for n rows, and
+    everything that pairs names with rows (identifiability diagnostics,
+    standard errors, warnings) broke or mislabelled them.
+    """
+    from discopt.parametric import variable_slices
+
+    slices = variable_slices(em.model)
+    names: list[str] = []
+    for name, var in em.unknown_parameters.items():
+        sl = slices[var.name]
+        size = sl.stop - sl.start
+        names.extend([name] if size == 1 else [f"{name}[{i}]" for i in range(size)])
+    return names
+
+
 def _get_param_indices(em: ExperimentModel) -> list[int]:
     """Find indices of unknown parameter variables in the flat x vector."""
     from discopt.parametric import variable_slices
@@ -1215,6 +1420,126 @@ def _get_param_indices(em: ExperimentModel) -> list[int]:
         sl = slices[var.name]
         param_indices.extend(range(sl.start, sl.stop))
     return param_indices
+
+
+def _total_jacobian(em, response_fns, x_flat, p_flat, *, method="autodiff", fd_step=1e-5):
+    """``dy/dθ`` at a solved ``x*``, including the implicit states (see below).
+
+    The one place a response Jacobian is taken for a model that needed a solve;
+    everything that differentiates such a model goes through here.
+    """
+    param_indices = _get_param_indices(em)
+    if method == "autodiff":
+        jac = lambda fns, idx: _compute_jacobian_autodiff(fns, x_flat, p_flat, idx)  # noqa: E731
+    elif method == "finite_difference":
+        jac = lambda fns, idx: _compute_jacobian_fd(fns, x_flat, p_flat, idx, fd_step)  # noqa: E731
+    else:
+        raise ValueError(f"Unknown method: {method!r}. Use 'autodiff' or 'finite_difference'.")
+
+    J = np.asarray(jac(response_fns, param_indices))
+    state_indices = _get_state_indices(em)
+    if state_indices:
+        J = _add_implicit_sensitivity(
+            em, J, jac, response_fns, param_indices, state_indices, x_flat, p_flat
+        )
+    return J
+
+
+def _get_state_indices(em: ExperimentModel) -> list[int]:
+    """Indices in x* of every variable that is neither a parameter nor a design input.
+
+    These are the implicit states of a constrained model: their values at x*
+    are functions of the parameters through the equality constraints.
+    """
+    from discopt.parametric import variable_slices
+
+    known = {v.name for v in em.unknown_parameters.values()}
+    known |= {v.name for v in em.design_inputs.values()}
+    out: list[int] = []
+    for vname, sl in variable_slices(em.model).items():
+        if vname not in known:
+            out.extend(range(sl.start, sl.stop))
+    return out
+
+
+def _add_implicit_sensitivity(
+    em, J_theta, jac, response_fns, param_indices, state_indices, x_flat, p_flat
+):
+    """Total sensitivity ``dy/dθ`` for responses that depend on implicit states.
+
+    Differentiating the response expressions with respect to the parameters
+    alone holds every state fixed, which is wrong whenever a state is defined
+    through a constraint (``z + k z^3 == x``, a mass balance, a discretized
+    ODE): ``dz/dk`` is then silently dropped and the FIM is wrong -- all zeros
+    when a response is a pure state. With the equality constraints
+    ``g(θ, s) = 0`` determining the states ``s``, the implicit function theorem
+    gives ``ds/dθ = -(∂g/∂s)^+ ∂g/∂θ`` and
+
+        dy/dθ = ∂y/∂θ + ∂y/∂s · ds/dθ.
+
+    Raises if the responses depend on states that the equality constraints do
+    not determine, since no sensitivity can be computed for those.
+    """
+    import warnings
+
+    _, jnp = _require_jax()
+
+    J_s = np.asarray(jac(response_fns, state_indices))
+    if not np.any(J_s):
+        return J_theta
+
+    eq_fns, ineq_fns = [], []
+    for con in getattr(em.model, "_constraints", None) or []:
+        body, sense = getattr(con, "body", None), getattr(con, "sense", None)
+        if body is None or sense is None:
+            raise NotImplementedError(
+                f"cannot differentiate through a {type(con).__name__} constraint to "
+                "compute the state sensitivities the FIM needs."
+            )
+        fn = _compile_response(body - con.rhs, em.model)
+        (eq_fns if sense == "==" else ineq_fns).append(fn)
+
+    if not eq_fns:
+        raise ValueError(
+            "the responses depend on model variables that are neither unknown "
+            "parameters nor design inputs, and no equality constraint defines them, "
+            "so their sensitivity to the parameters is undefined."
+        )
+
+    # Constraint bodies may be vector-valued: one residual vector for all rows.
+    def g(x, p):
+        return jnp.concatenate([jnp.ravel(jnp.asarray(f(x, p))) for f in eq_fns])
+
+    rows = [lambda x, p, i=i: g(x, p)[i] for i in range(int(g(x_flat, p_flat).size))]
+    G_theta = np.asarray(jac(rows, param_indices))
+    G_s = np.asarray(jac(rows, state_indices))
+
+    # Only the state directions the responses actually see must be determined.
+    rank = int(np.linalg.matrix_rank(G_s))
+    if rank < len(state_indices):
+        null = np.linalg.svd(G_s)[2][rank:]
+        if np.linalg.norm(J_s @ null.T) > 1e-8 * max(1.0, float(np.linalg.norm(J_s))):
+            raise ValueError(
+                f"the equality constraints determine only {rank} of the "
+                f"{len(state_indices)} state variables the responses depend on, so "
+                "dy/dθ (and the FIM) is undefined. Every variable that is not an "
+                "unknown parameter or a design input must be fixed by the equality "
+                "constraints."
+            )
+
+    for fn in ineq_fns:
+        val = np.ravel(np.asarray(fn(x_flat, p_flat)))
+        if np.any(np.abs(val) <= 1e-6 * np.maximum(1.0, np.abs(val))):
+            warnings.warn(
+                "an inequality constraint is active at the nominal point; the FIM "
+                "sensitivities treat only the equality constraints as defining the "
+                "states, so they ignore the active inequality.",
+                stacklevel=3,
+            )
+            break
+
+    dS = -np.linalg.lstsq(G_s, G_theta, rcond=None)[0]
+    return J_theta + J_s @ dS
 
 
 def _compute_jacobian_autodiff(response_fns, x_flat, p_flat, param_indices):

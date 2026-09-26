@@ -366,6 +366,29 @@ def normalize_criterion(criterion: str) -> str:
     return name
 
 
+def trace_inverse(fim: np.ndarray) -> float:
+    """A-optimality ``trace(FIM^{-1})``, or ``inf`` unless the FIM is positive definite.
+
+    ``np.linalg.inv`` raises only for an *exactly* singular matrix. For a
+    numerically singular FIM (rank-deficient up to round-off, e.g. two sampling
+    times at the same point) it returns garbage whose trace is frequently a huge
+    *negative* number, and a minimizing search then prefers exactly the designs
+    that cannot estimate the parameters. Going through a Cholesky factor refuses
+    any matrix that is not positive definite, and computes the trace stably as
+    ``||L^{-1}||_F^2`` when it is.
+    """
+    fim = np.asarray(fim, dtype=float)
+    if not np.all(np.isfinite(fim)):
+        return float("inf")
+    try:
+        L = np.linalg.cholesky(0.5 * (fim + fim.T))
+        L_inv = np.linalg.inv(L)
+    except np.linalg.LinAlgError:
+        return float("inf")
+    value = float(np.sum(L_inv**2))
+    return value if np.isfinite(value) else float("inf")
+
+
 def evaluate_criterion(
     fim: np.ndarray, criterion: str, *, region: DesignRegion | None = None
 ) -> float:
@@ -389,10 +412,7 @@ def evaluate_criterion(
             return -np.inf
         return float(logdet)
     if criterion == A_OPTIMAL:
-        try:
-            return float(np.trace(np.linalg.inv(fim)))
-        except np.linalg.LinAlgError:
-            return np.inf
+        return trace_inverse(fim)
     if criterion == E_OPTIMAL:
         return float(np.min(np.linalg.eigvalsh(fim)))
     if criterion == ME_OPTIMAL:

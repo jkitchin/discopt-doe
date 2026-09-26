@@ -1,0 +1,22 @@
+== R3-4 fixed model Parameter inside the response ==
+  discopt: 0.0e+00
+  pyomo:   7.3e-07
+== R3-5 vector-valued design input (one Variable of size 3) ==
+  discopt compute_fim: 0.0e+00
+  discopt optimal_experiment ERROR ValueError: design input 't' is a vector of 3 entries; the design searches optimize scalar inputs and would set every entry to the same value. Declare t
+  scalar-inputs optimum: {'t0': 1.932163205875299, 't1': 1.9321644659204311, 't2': 10.0} logdet=14.57350
+== R3-6 six parameters, six sampling times (tri-exponential) ==
+  reference (200-start L-BFGS-B, exact gradients): 42.86975 (1s)
+  discopt: 42.86975 (1s)  t=[0.01, 0.175, 0.668, 2.003, 6.253, 26.805]
+  pyomo start 0 [maxIterations]: -110.84461 (17s)
+  pyomo start 1 [maxIterations]: -237.70228 (17s)
+  pyomo start 2 [maxIterations]: 2.12358 (13s)
+== R3-7 malformed prior FIMs ==
+  3x3 for 2 parameters   discopt: ValueError: prior_fim has shape (3, 3); expected (2, 2) for the parameters ['A', '
+                         pyomo:   ValueError: Shape of FIM provided should be n parameters by n parameters, or 2 by
+  not symmetric          discopt: ValueError: prior_fim is not symmetric
+                         pyomo:   ValueError: FIM provided is not symmetric using absolute tolerance 1e-06
+  indefinite             discopt: ValueError: prior_fim is not positive semi-definite (a Fisher information matrix c
+                         pyomo:   ValueError: FIM provided is not positive definite. It has one or more negative eig
+  contains nan           discopt: ValueError: prior_fim contains non-finite entries
+                         pyomo:   LinAlgError: Array must not contain infs or NaNs

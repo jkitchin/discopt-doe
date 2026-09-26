@@ -1,0 +1,25 @@
+== R4-1 model discrimination: first- vs second-order decay, design t ==
+  hunter_reiner  grid best t=5.425 (0.0071104) | discopt t=5.439 (0.0071104)
+  buzzi_ferraris grid best t=5.425 (4.569) | discopt t=5.431 (4.569)
+  box_hill       grid best t=5.425 (8.8881) | discopt t=5.431 (8.8881)
+  jensen_renyi   grid best t=5.425 (0.69301) | discopt t=5.836 (0.693)
+  HR vs closed form (w1 w2 (y1-y2)^2): max rel err 4.1e-14
+== R4-2 I-optimal design vs brute force (Michaelis-Menten, 2 points) ==
+  brute S=(0.412, 5.000) I=0.00193697 | discopt {'S1': 0.4106802638300366, 'S2': 5.0} I=0.00193697 (reported 0.00193697)
+== R4-3 robust (maximin-efficiency and expected log det) designs vs brute force ==
+  expected brute (0.910, 20.000) = 12.15468 | discopt {'t1': 20.0, 't2': 0.903} = 12.15474
+  maximin  brute (1.058, 20.000) = 0.33550 | discopt {'t1': 20.0, 't2': 1.084} = 0.34244
+== R4-4 symbolic (sympy) FIM vs exact ==
+  A*(1-exp(-k*t))                            rel err 1.2e-16
+  V*S/(K+S)                                  rel err 6.2e-17
+  a*exp(-E/(8.314*T))                        rel err 7.7e-14
+  b0 + b1*x + b2*x**2 + b12*x*z + b3*log(z)  rel err 1.7e-16
+  A*sin(w*t + phi)                           rel err 1.3e-16
+== R4-5 sequential_doe bookkeeping (noise-free simulator at the true parameters) ==
+  round 0: estimate {'A': 15.0, 'k': 0.5}, FIM vs sum of run FIMs 2.0e-16, design t=10.0000 (direct 10.0000)
+  round 1: estimate {'A': 15.0, 'k': 0.5}, FIM vs sum of run FIMs 2.0e-16, design t=10.0000 (direct 10.0000)
+  round 2: estimate {'A': 15.0, 'k': 0.5}, FIM vs sum of run FIMs 2.0e-16, design t=1.8971 (direct 1.8971)
+  round 3: estimate {'A': 15.0, 'k': 0.5}, FIM vs sum of run FIMs 1.1e-17, design t=10.0000 (direct 10.0000)
+== R4-6 identifiability / estimability on a known structure (a*b, inert c) ==
+  rank 2 of 4; null space [{'a': 0.7071, 'b': -0.7071, 'c': -0.0, 'k': -0.0}, {'a': -0.0, 'b': -0.0, 'c': 1.0, 'k': -0.0}] (expected (a,-b)/sqrt2 and c)
+  estimability ranking ['a', 'k', 'b', 'c'], projected norms [350.153817, 102.965868, 0.0, 0.0] (expected: a, k estimable; b collinear with a; c inert)

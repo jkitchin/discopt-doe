@@ -107,3 +107,6 @@ extend-exclude = ["docs/notebooks"]
 [tool.ruff.lint.per-file-ignores]
 # The discopt version guard must run before the API re-exports.
 "src/discopt/doe/__init__.py" = ["E402"]
+# Comparison scripts: JAX flags must be set before imports, and each test
+# problem is written as a one-line lambda shared by both packages.
+"benchmarks/**" = ["E402", "E731"]

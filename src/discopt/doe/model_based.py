@@ -250,10 +250,20 @@ class ParametricSurrogate:
 
         jax, jnp = _require_jax()
 
-        from discopt.doe.fim import _compile_response
+        from discopt.doe.fim import _compile_response, _design_source_map
         from discopt.parametric import flatten_params, variable_slices
 
         em = self.experiment.create_model(**self.initial_guess)
+        if _design_source_map(em) is None:
+            # The compiled predictor below sets only the design inputs and the
+            # parameters in x*; any other variable (a state fixed by a
+            # constraint) would silently be evaluated at 0.
+            raise ValueError(
+                "ParametricSurrogate needs an explicit-response Experiment (no "
+                "constraints; every variable an unknown parameter or a design input). "
+                "Write the response as an expression of the parameters and inputs, or "
+                "define implicit states with discopt.modeling.implicit."
+            )
         if self.response_name not in em.responses:
             raise ValueError(
                 f"experiment has no response {self.response_name!r}; "

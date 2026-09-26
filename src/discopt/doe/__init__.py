@@ -170,6 +170,8 @@ _SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
         "check_identifiability",
         "compute_fim",
         "diagnose_identifiability",
+        "ParameterScaledExperiment",
+        "predict_responses",
     ),
     "fractional": ("fractional_factorial_design",),
     "latin": (
@@ -449,6 +451,8 @@ __all__ = [
     "latin_square_design",
     "collinearity_index",
     "compute_fim",
+    "predict_responses",
+    "ParameterScaledExperiment",
     "d_optimal_subset",
     "design_matrix",
     "design_row",

@@ -135,13 +135,18 @@ def test_one_parameter_makes_d_i_and_g_agree() -> None:
 
 
 def test_an_i_optimal_design_beats_a_d_optimal_one_at_its_own_criterion() -> None:
-    """Otherwise the search is not optimizing what it claims to."""
+    """Otherwise the search is not optimizing what it claims to.
+
+    A second, fixed sampling time keeps the FIM full rank: with B measured at
+    t1 alone, two rate constants give a rank-1 FIM everywhere, both criteria
+    are round-off (~1e13), and the comparison is between noise.
+    """
     exp = ode_experiment(
         lambda t, x, p, u: {"A": -p["k1"] * x["A"], "B": p["k1"] * x["A"] - p["k2"] * x["B"]},
         states={"A": 1.0, "B": 0.0},
         parameters={"k1": (0.5, 1e-3, 10.0), "k2": (0.2, 1e-3, 10.0)},
         measured=["B"],
-        sample_times=["t1"],
+        sample_times=["t1", 5.0],
         design_inputs={"t1": (0.05, 20.0)},
         measurement_error=0.02,
     )

@@ -7,6 +7,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Found by cross-checking against `pyomo.contrib.doe` (see
+`benchmarks/pyomo_doe_comparison/REPORT.md`).
+
+### Fixed
+- **FIM of models with constraint-defined states was wrong.** When a response
+  depended on a variable fixed by an equality constraint (an equilibrium, a mass
+  balance, a discretized ODE), `compute_fim` differentiated the response with
+  the states held fixed, so `dz/dθ` was dropped: a response that *is* a state got
+  an all-zero Jacobian, and a mixed one a plausible but wrong, non-singular FIM
+  that moved the optimal design. The sensitivities now include the implicit
+  function theorem term `∂y/∂s · ds/dθ` (for `method="finite_difference"` too),
+  and a state the equality constraints do not determine raises instead.
+- **A nominal parameter outside its variable bounds was silently clipped.** The
+  FIM was then evaluated at a different parameter vector. `compute_fim` now
+  raises `ValueError`.
+- **A-optimal designs could pick a singular FIM.** `trace(FIM⁻¹)` used
+  `np.linalg.inv`, which returns garbage (often a large *negative* trace) for a
+  numerically singular FIM; the minimizing search then chose exactly those
+  designs. The A criterion now goes through a Cholesky factor and scores any
+  non-positive-definite FIM `inf` (`discopt.doe.linear_design.trace_inverse`).
+- **`optimal_experiment` stopped at local optima.** It refined only the single
+  best multi-start candidate, which misses the global optimum on multimodal
+  criteria and can stall when the first step hits a singular region. It now
+  refines the best `n_refine` candidates (new argument, default 4), and the A
+  and ME criteria are refined on a log scale.
+
+- **Model discrimination ignored constraint-defined states too.** The
+  prediction covariance behind every discrimination criterion took the same
+  partial Jacobian `compute_fim` used to; it now shares `compute_fim`'s
+  total-sensitivity path.
+- **`ParametricSurrogate` evaluated implicit states at 0.** Its compiled
+  predictor sets only the parameters and design inputs, so a constrained
+  model's states were silently zero in every prediction; it now refuses such a
+  model (as campaigns already did).
+- **Constrained designs from infeasible seeds.** When no random candidate
+  satisfied the constraints (four sampling times summing to <= 5 in
+  [0.05, 30]^4), SLSQP ran from one infeasible point and whatever feasible
+  corner it reached was returned -- a singular design (log det -39.7 against
+  an optimum of 30.43). Infeasible candidates are now pulled into the feasible
+  set (toward a max-slack interior point for inequalities, by projection for
+  equalities) and the best `n_refine` feasible seeds are refined. With no
+  random feasible point and `local_refine=False` a design is therefore returned
+  rather than an error.
+- **Joint batch designs could be worse than greedy ones.** The joint search
+  refined only its best random start (Michaelis-Menten, 4 runs: 13.75 against
+  a greedy 14.04). It is now seeded with the greedy batch and refines its best
+  few starts, so it is never worse than greedy.
+- **E-optimal designs stopped at the first step** when the minimum eigenvalue
+  is small in absolute terms (~1e-6 for an activation energy in J/mol): the
+  refiner's gradient tolerance is absolute. E is now refined on a log scale,
+  like A and ME (Arrhenius: 6.3e-7 -> 3.0e-6, the brute-force optimum).
+- **E- and ME-optimal searches did not leave nearly singular starts.** Both
+  criteria are nonsmooth, and random candidates are often nearly singular
+  (bi-exponential sampling times: E = 1e-7 against an optimum of 120, ME = 8e11
+  against 335). The D-optimal design is now added to their candidates, the
+  refinement runs on a smooth soft-min/soft-max of the log-eigenvalues
+  (tightened in stages), and a Nelder-Mead polish follows: L-BFGS-B's
+  finite-difference line search could stop after one iteration, depending on
+  round-off in the start point. Nine of the ten E/ME comparison problems reach
+  the brute-force optimum for every seed tried; ME on a multimodal sine model
+  does for 5 of 10 seeds at the default `n_starts=10` (9 of 10 at 40).
+- **Vector-valued parameters got one FIM label for several rows.** A parameter
+  declared as a single `Variable` of size n produced an n×n block but one
+  name, which crashed `diagnose_identifiability` and mislabelled standard
+  errors. Such parameters are now labelled `k[0] .. k[n-1]`
+  (`discopt.doe.fim.fim_parameter_names`).
+
+- **A blown-up ODE integration passed silently.** Explicit RK4 on a stiff
+  system (k1 = 500, 50 steps) overflows to an infinite FIM, which
+  `compute_fim` returned without comment, and `ODEExperiment.check_accuracy`
+  compared nans and reported success. Non-finite results now make
+  `check_accuracy` return `inf` and warn, and `compute_fim` warns about a
+  non-finite FIM.
+
+- **Designs over inputs spanning decades missed fast modes.** Multi-start
+  candidates were uniform in each input, so sampling times in [0.01, 60] almost
+  never fell early enough to see a rate constant of 5: every candidate FIM was
+  singular and flat, and a 6-parameter tri-exponential design came back at log
+  det -198 against an optimum of 42.87. Inputs whose bounds span two decades or
+  more (lower bound > 0) now also get log-uniform candidates.
+- **Vector-valued design inputs were collapsed to one value.** A single design
+  `Variable` of size n (three sampling times) was optimized as one scalar, so
+  all n entries came back equal. `optimal_experiment` and
+  `batch_optimal_experiment` now refuse it and ask for scalar inputs.
+- **Malformed prior FIMs were accepted or misreported.** A non-symmetric or
+  indefinite `prior_fim` was used as given, and a wrongly shaped or non-finite
+  one surfaced as "No feasible design point found". `compute_fim` and the
+  design searches now validate it (`discopt.doe.fim.check_prior_fim`).
+
+### Added
+- **Constraints on what an experiment does.** `optimal_experiment` and
+  `batch_optimal_experiment` take `response_bounds={"name": (lo, hi)}`, bounds
+  on *predicted* responses at the nominal parameters (a temperature limit, a
+  by-product cap), and `discopt.doe.predict_responses` exposes the predictions
+  for general output constraints, including unmeasured quantities. pyomo.doe
+  expresses these as model constraints; discopt could only constrain the design
+  settings.
+- **Relative-parameter FIM.** `scale_parameters=True` on both functions
+  evaluates the criterion on `S F S`, `S = diag(|θ_nominal|)` (pyomo.doe's
+  `scale_nominal_param_value`). This changes A-, E- and ME-optimal designs,
+  which depend on the parameters' units. `prior_fim` stays in unscaled units
+  (pyomo expects it pre-scaled, a silent trap), the returned FIM is unscaled,
+  and a zero nominal value is refused. `ParameterScaledExperiment` is the
+  underlying wrapper.
+- `ode_experiment` initial values may name an unknown parameter, so an
+  uncertain initial condition is estimated and enters the FIM (pyomo.doe
+  models this with a constraint; discopt could not express it).
+- `optimal_experiment(initial_designs=[...])`: designs to add to the
+  multi-start (the current operating point, a previous round's design). In a
+  10-variable design space random starts rarely reach the basin of a design
+  that is already known.
+- `ode_experiment(breakpoints=[...])`: times where the right-hand side jumps (a
+  piecewise temperature or feed profile). Integration is split there, so RK4
+  keeps its fourth-order accuracy: on pyomo.doe's reactor example the FIM
+  error drops from ~3e-3 (50 steps across the profile, converging only at
+  first order) to 1.7e-5 with 10 steps and 2e-8 with 50 steps per segment. All
+  segments run in one `lax.scan`, so this costs no extra compile time.
+- `optimal_experiment` warns when the FIM at the returned design is numerically
+  singular (condition number of its diagonal-normalized form above 1e12, or a
+  parameter with no information). Such a design optimizes round-off: e.g.
+  Arrhenius `A` and `E` from an experiment at one constant temperature.
+
 ## [0.4.0] - 2026-09-25
 
 A large release. Highlights: campaigns (runs with conditions), robust designs,

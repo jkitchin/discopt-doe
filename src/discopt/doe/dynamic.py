@@ -31,9 +31,10 @@ Neither scheme adapts its step: choose ``n_steps`` so the answer no longer
 changes when you double it.
 
 A collocation transcription (:mod:`discopt.dae`) is *not* used here on purpose:
-there the trajectory is a set of equality-constrained variables, and the FIM
-machinery -- which differentiates responses with respect to the parameters with
-everything else held fixed -- would see ``∂y/∂θ = 0``.
+there the trajectory is a set of equality-constrained variables, so every FIM
+evaluation needs a solve and an implicit-function-theorem correction (which
+:func:`~discopt.doe.compute_fim` applies), where this module needs one compiled
+Jacobian evaluation.
 
 Example
 -------
@@ -109,6 +110,7 @@ class ODEExperiment(Experiment):
     method: str = "rk4"
     t0: float = 0.0
     name: str = "ode"
+    breakpoints: tuple[float, ...] = ()
     response_names: list[str] = field(init=False)
     response_times: dict[str, float | str] = field(init=False)
 
@@ -152,35 +154,65 @@ class ODEExperiment(Experiment):
         return jnp.stack([jnp.asarray(v, dtype=float) for v in out])
 
     def _integrate(self, x0, t_end, p: dict, u: dict):
-        """State at ``t_end`` from ``x0`` at ``t0`` with ``n_steps`` fixed steps."""
+        """State at ``t_end`` from ``x0`` at ``t0``.
+
+        ``n_steps`` fixed steps, per segment when there are ``breakpoints``:
+        the interval is split at every breakpoint so no step straddles a jump
+        in the right-hand side (a piecewise-constant temperature or feed),
+        which would cut RK4 to first order. Segments past ``t_end`` have zero
+        length and are no-ops, so ``t_end`` may be a traced design input. All
+        segments run in one ``lax.scan`` over precomputed step times, so the
+        integrator compiles once however many breakpoints there are.
+        """
         jax, jnp = _jax()
         n = int(self.n_steps)
-        h = (t_end - self.t0) / n
-        f = lambda t, x: self._rhs_vec(t, x, p, u)  # noqa: E731
+        t_end = jnp.asarray(t_end, dtype=float)
+        t0 = jnp.asarray(self.t0, dtype=float)
+        clamp = bool(self.breakpoints)
+        edges = jnp.stack(
+            [t0] + [jnp.clip(float(b), self.t0, t_end) for b in self.breakpoints] + [t_end]
+        )
+        lo, hi = edges[:-1], edges[1:]  # one row per segment
+        h_seg = (hi - lo) / n
+        k = jnp.arange(n, dtype=float)
+        # Per step: its start time, size, and the segment it belongs to.
+        t_steps = (lo[:, None] + k[None, :] * h_seg[:, None]).ravel()
+        h_steps = jnp.repeat(h_seg, n)
+        lo_steps, hi_steps = jnp.repeat(lo, n), jnp.repeat(hi, n)
+
+        def rhs(t, x, a, b):
+            if clamp:
+                # Evaluate strictly inside the segment: at a breakpoint a
+                # piecewise input is ambiguous (which piece owns the jump is
+                # the model's convention), and either answer would put the
+                # neighbouring piece into this segment.
+                eps = 1e-12 * jnp.maximum(b - a, 1e-300)
+                t = jnp.clip(t, a + eps, b - eps)
+            return self._rhs_vec(t, x, p, u)
 
         if self.method == "rk4":
 
-            def step(carry, _):
-                t, x = carry
-                k1 = f(t, x)
-                k2 = f(t + h / 2, x + h / 2 * k1)
-                k3 = f(t + h / 2, x + h / 2 * k2)
-                k4 = f(t + h, x + h * k3)
-                return (t + h, x + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)), None
+            def step(x, inp):
+                t, h, a, b = inp
+                k1 = rhs(t, x, a, b)
+                k2 = rhs(t + h / 2, x + h / 2 * k1, a, b)
+                k3 = rhs(t + h / 2, x + h / 2 * k2, a, b)
+                k4 = rhs(t + h, x + h * k3, a, b)
+                return x + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4), None
 
         else:  # implicit trapezoid, Newton iterations unrolled (all AD modes work)
 
-            def step(carry, _):
-                t, x = carry
-                fx = f(t, x)
+            def step(x, inp):
+                t, h, a, b = inp
+                fx = rhs(t, x, a, b)
                 y = x + h * fx  # explicit Euler predictor
                 for _it in range(4):
-                    g = y - x - h / 2 * (fx + f(t + h, y))
-                    jac = jnp.eye(x.size) - h / 2 * jax.jacfwd(lambda z: f(t + h, z))(y)
+                    g = y - x - h / 2 * (fx + rhs(t + h, y, a, b))
+                    jac = jnp.eye(x.size) - h / 2 * jax.jacfwd(lambda z: rhs(t + h, z, a, b))(y)
                     y = y - jnp.linalg.solve(jac, g)
-                return (t + h, y), None
+                return y, None
 
-        (_, x_end), _ = jax.lax.scan(step, (jnp.asarray(self.t0, dtype=float), x0), None, length=n)
+        x_end, _ = jax.lax.scan(step, x0, (t_steps, h_steps, lo_steps, hi_steps))
         return x_end
 
     def _measure(self, x, p: dict, u: dict):
@@ -191,18 +223,23 @@ class ODEExperiment(Experiment):
             vals.append(xs[spec] if isinstance(spec, str) else spec(xs, p, u))
         return jnp.stack([jnp.asarray(v, dtype=float) for v in vals])
 
+    def _initial_state(self, p: Mapping, u: Mapping):
+        """Initial state vector; a string names an unknown parameter or a design input."""
+        _, jnp = _jax()
+        return jnp.stack(
+            [
+                jnp.asarray((p[v] if v in p else u[v]) if isinstance(v, str) else v, dtype=float)
+                for v in (self.initial[s] for s in self.state_names)
+            ]
+        )
+
     def _response_fn(self, *args):
         """All responses, ordered as :attr:`response_names`, from (θ..., u...)."""
         _, jnp = _jax()
         k = len(self.parameter_specs)
         p = self._as_dict(self.parameter_names, args[:k])
         u = self._as_dict(self.design_names, args[k:])
-        x0 = jnp.stack(
-            [
-                jnp.asarray(u[v] if isinstance(v, str) else v, dtype=float)
-                for v in (self.initial[s] for s in self.state_names)
-            ]
-        )
+        x0 = self._initial_state(p, u)
         jax, _ = _jax()
         t_ends = jnp.stack(
             [jnp.asarray(u[t] if isinstance(t, str) else t, dtype=float) for t in self.sample_times]
@@ -362,6 +399,12 @@ class ODEExperiment(Experiment):
             ),
             (self.jacobian(theta, design), fine.jacobian(theta, design)),
         ):
+            if not (np.all(np.isfinite(coarse_val)) and np.all(np.isfinite(fine_val))):
+                # An integration that blew up (explicit RK4 on a stiff system)
+                # gives inf/nan; every comparison with nan is False, so without
+                # this the check passed silently on exactly the worst case.
+                change = float("inf")
+                break
             scale = max(float(np.max(np.abs(fine_val))), 1e-300)
             change = max(change, float(np.max(np.abs(coarse_val - fine_val))) / scale)
         if warn and change > rtol:
@@ -408,12 +451,7 @@ class ODEExperiment(Experiment):
                 )
             t_max = max(float(u[t]) if isinstance(t, str) else float(t) for t in self.sample_times)
             times = np.linspace(self.t0, t_max, 101)
-        x0 = jnp.asarray(
-            [
-                float(u[v]) if isinstance(v, str) else float(v)
-                for v in (self.initial[s] for s in self.state_names)
-            ]
-        )
+        x0 = self._initial_state(p, u)
         xs = np.array(
             [
                 np.asarray(self._integrate(x0, float(t), p, u)) if t > self.t0 else np.asarray(x0)
@@ -570,6 +608,7 @@ def ode_experiment(
     method: str = "rk4",
     t0: float = 0.0,
     name: str = "ode",
+    breakpoints: Sequence[float] = (),
 ) -> ODEExperiment:
     """Build an :class:`~discopt.estimate.Experiment` from an ODE model.
 
@@ -583,7 +622,9 @@ def ode_experiment(
         ``lambda t, x, p, u: {"A": -p["k"] * jnp.exp(-p["E"] / u["T"]) * x["A"]}``.
     states : mapping name -> float or str
         Every state and its initial value. A string names a design input, so an
-        initial concentration can be designed.
+        initial concentration can be designed, or an unknown parameter, so an
+        uncertain initial condition is estimated (and its sensitivity enters
+        the FIM) like any rate constant.
     parameters : mapping name -> nominal or (nominal, lower, upper)
         The unknown parameters. Bounds default to ``(0, +inf)`` for a positive
         nominal and ``(-inf, +inf)`` otherwise; estimation respects them.
@@ -609,6 +650,13 @@ def ode_experiment(
         Start time of the experiment.
     name : str
         Model name.
+    breakpoints : sequence of float, optional
+        Times where the right-hand side jumps -- the switching times of a
+        piecewise-constant temperature or feed profile. Integration is split
+        there (``n_steps`` per segment), so no step straddles a jump. Without
+        them RK4 drops to first order across each jump: for a 9-level
+        temperature profile, 50 steps give a FIM ~3e-3 off, against 2e-8 with
+        50 steps per segment.
 
     Returns
     -------
@@ -625,8 +673,11 @@ def ode_experiment(
     if not states:
         raise ValueError("an ODE experiment needs at least one state")
     for s, v in states.items():
-        if isinstance(v, str) and v not in design:
-            raise ValueError(f"initial value of {s!r} names {v!r}, which is not a design input")
+        if isinstance(v, str) and v not in design and v not in parameters:
+            raise ValueError(
+                f"initial value of {s!r} names {v!r}, which is neither a design input nor "
+                "an unknown parameter"
+            )
     if not sample_times:
         raise ValueError("give at least one sampling time")
     for t in sample_times:
@@ -637,6 +688,12 @@ def ode_experiment(
                 raise ValueError(f"sampling time {t!r} must be bounded above t0={t0}")
         elif float(t) <= t0:
             raise ValueError(f"sampling time {t} must be after t0={t0}")
+
+    bps = tuple(sorted(float(b) for b in breakpoints))
+    if any(b <= t0 for b in bps):
+        raise ValueError(f"breakpoints must be after t0={t0}")
+    if len(set(bps)) != len(bps):
+        raise ValueError("breakpoints must be distinct")
 
     specs: dict[str, tuple[float, float, float]] = {}
     for n, v in parameters.items():
@@ -680,4 +737,5 @@ def ode_experiment(
         method=method,
         t0=float(t0),
         name=name,
+        breakpoints=bps,
     )

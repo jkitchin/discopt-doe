@@ -13,6 +13,8 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import discopt.modeling as dm
+import warnings
+
 import numpy as np
 import pytest
 from discopt.doe import (
@@ -166,17 +168,28 @@ class TestConstrainedOptimalExperiment:
         )
         assert abs(design.design["x1"] + design.design["x2"] - 1.0) < 1e-4
 
-    def test_no_feasible_seed_and_no_refine_raises(self):
+    def test_infeasible_random_seeds_are_projected_without_refine(self):
+        # No random candidate satisfies an equality constraint; they are now
+        # projected onto it, so a feasible design exists even without the
+        # local refinement (this used to raise).
         exp = MixtureExperiment()
         g = sum_constraint(["x1", "x2"], 1.0)
-        with pytest.raises(RuntimeError, match="feasible"):
-            optimal_experiment(
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            design = optimal_experiment(
                 exp,
                 {"a": 1.0, "b": 1.0},
                 self._bounds(),
                 equality_constraints=[g],
                 local_refine=False,
             )
+        assert abs(design.design["x1"] + design.design["x2"] - 1.0) < 1e-6
+
+    def test_infeasible_constraints_raise(self):
+        exp = MixtureExperiment()
+        g = sum_constraint(["x1", "x2"], 3.0)  # unreachable with both in [0, 1]
+        with pytest.raises(RuntimeError, match="feasible"):
+            optimal_experiment(exp, {"a": 1.0, "b": 1.0}, self._bounds(), equality_constraints=[g])
 
 
 class TestOptimalExperiment:
