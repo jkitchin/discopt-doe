@@ -211,3 +211,195 @@ class TestSingularOptimumWarning:
                 {"x": (0.1, 2.0)},
                 prior_fim=np.diag([1.0, 1.0]),
             )
+
+
+class TestOtherJacobianPathsWithStates:
+    """Every module that differentiates responses must see the implicit states."""
+
+    def test_discrimination_prediction_uses_total_sensitivity(self):
+        from discopt.doe.discrimination import _predict_with_covariance
+
+        pred = _predict_with_covariance(ImplicitStateExperiment(), THETA, {"x": 2.0}, None)
+        J, F = _exact_implicit(2.0)
+        np.testing.assert_allclose(pred.fim_result.jacobian, J, rtol=1e-6, atol=1e-7)
+        np.testing.assert_allclose(pred.fim_result.fim, F, rtol=1e-6)
+
+    def test_parametric_surrogate_refuses_implicit_states(self):
+        from discopt.doe.model_based import ParametricSurrogate
+
+        with pytest.raises(ValueError, match="explicit"):
+            ParametricSurrogate(
+                ImplicitStateExperiment(),
+                input_names=["x"],
+                response_name="y1",
+                initial_guess=THETA,
+            )
+
+
+def _biexp_experiment():
+    class BiExp(Experiment):
+        def create_model(self, **kwargs):
+            m = dm.Model("biexp")
+            p = {n: m.continuous(n, lb=0, ub=10) for n in ("a1", "k1", "a2", "k2")}
+            d = {f"t{i}": m.continuous(f"t{i}", lb=0.05, ub=30) for i in range(4)}
+            ys = {
+                f"y{i}": p["a1"] * dm.exp(-p["k1"] * d[f"t{i}"])
+                + p["a2"] * dm.exp(-p["k2"] * d[f"t{i}"])
+                for i in range(4)
+            }
+            return ExperimentModel(m, p, d, ys, {n: 0.01 for n in ys})
+
+    return BiExp()
+
+
+BIEXP_THETA = {"a1": 1.0, "k1": 2.0, "a2": 0.5, "k2": 0.1}
+BIEXP_BOUNDS = {f"t{i}": (0.05, 30.0) for i in range(4)}
+
+
+class TestConstrainedSeeding:
+    def test_no_feasible_random_candidate_still_finds_optimum(self):
+        # No random point in [0.05, 30]^4 has sum <= 5; seeding from a single
+        # infeasible point used to return a singular design (log det -39.7).
+        def budget(d):
+            return 5.0 - sum(d[f"t{i}"] for i in range(4))
+
+        res = optimal_experiment(
+            _biexp_experiment(), BIEXP_THETA, BIEXP_BOUNDS, inequality_constraints=[budget]
+        )
+        assert budget(res.design) >= -1e-6
+        assert res.criterion_value == pytest.approx(30.4335, abs=1e-3)
+
+
+class TestJointBatch:
+    def test_joint_is_never_worse_than_greedy(self):
+        from discopt.doe import BatchStrategy, batch_optimal_experiment
+
+        class MM(Experiment):
+            def create_model(self, **kwargs):
+                m = dm.Model("mm")
+                V = m.continuous("V", lb=0, ub=10)
+                K = m.continuous("K", lb=0, ub=10)
+                S = m.continuous("S", lb=0.01, ub=5)
+                return ExperimentModel(
+                    m, {"V": V, "K": K}, {"S": S}, {"y": V * S / (K + S)}, {"y": 0.05}
+                )
+
+        args = (MM(), {"V": 2.0, "K": 0.3}, {"S": (0.01, 5.0)}, 4)
+        greedy = batch_optimal_experiment(*args, strategy=BatchStrategy.GREEDY)
+        joint = batch_optimal_experiment(*args, strategy=BatchStrategy.JOINT)
+        # optimum: two runs at K*Smax/(2K+Smax) = 0.2679 and two at Smax = 5
+        assert joint.criterion_value >= greedy.criterion_value - 1e-9
+        assert joint.criterion_value == pytest.approx(14.0413, abs=1e-3)
+
+
+class TestInitialDesigns:
+    def test_initial_design_is_used_and_validated(self):
+        ex = _biexp_experiment()
+        good = {"t0": 0.361, "t1": 3.349, "t2": 0.05, "t3": 1.24}
+        budget = [lambda d: 5.0 - sum(d.values())]
+        res = optimal_experiment(
+            ex,
+            BIEXP_THETA,
+            BIEXP_BOUNDS,
+            inequality_constraints=budget,
+            initial_designs=[good],
+            n_starts=1,
+            local_refine=False,
+        )
+        assert res.criterion_value == pytest.approx(30.4335, abs=1e-2)
+        with pytest.raises(ValueError, match="missing design inputs"):
+            optimal_experiment(ex, BIEXP_THETA, BIEXP_BOUNDS, initial_designs=[{"t0": 1.0}])
+
+
+class TestODEBreakpoints:
+    def test_piecewise_input_keeps_rk4_accuracy(self):
+        import jax
+        import jax.numpy as jnp
+        from discopt.doe import ode_experiment
+
+        # dx/dt = -k(T) x with T switching at t = 0.3 and 0.7; exact solution
+        # is a product of exponentials.
+        edges = jnp.array([0.3, 0.7])
+
+        def rhs(t, x, p, u):
+            T = jnp.stack([u["T0"], u["T1"], u["T2"]])[jnp.searchsorted(edges, t, side="left")]
+            return {"x": -p["k"] * jnp.exp(-p["E"] / T) * x["x"]}
+
+        design = {"T0": 1.0, "T1": 3.0, "T2": 0.5}
+        theta = {"k": 2.0, "E": 1.0}
+
+        def exact(th):
+            k = lambda T: th[0] * jnp.exp(-th[1] / T)  # noqa: E731
+            return jnp.exp(-(0.3 * k(1.0) + 0.4 * k(3.0) + 0.3 * k(0.5)))
+
+        J_exact = np.asarray(jax.jacfwd(exact)(jnp.array([2.0, 1.0])))
+        kw = dict(
+            states={"x": 1.0},
+            parameters=theta,
+            measured=["x"],
+            sample_times=[1.0],
+            design_inputs={k: (0.1, 5.0) for k in design},
+            measurement_error=0.01,
+            n_steps=20,
+        )
+        plain = compute_fim(ode_experiment(rhs, **kw), theta, design).jacobian.ravel()
+        split = compute_fim(
+            ode_experiment(rhs, breakpoints=[0.3, 0.7], **kw), theta, design
+        ).jacobian.ravel()
+        assert np.max(np.abs(split - J_exact)) < 1e-7
+        assert np.max(np.abs(plain - J_exact)) > 100 * np.max(np.abs(split - J_exact))
+
+    def test_breakpoints_validated(self):
+        from discopt.doe import ode_experiment
+
+        with pytest.raises(ValueError, match="after t0"):
+            ode_experiment(
+                lambda t, x, p, u: {"x": -x["x"]},
+                states={"x": 1.0},
+                parameters={"k": 1.0},
+                measured=["x"],
+                sample_times=[1.0],
+                breakpoints=[0.0],
+            )
+
+
+class TestVectorParameter:
+    def _experiment(self):
+        class Quadratic(Experiment):
+            # One vector-valued unknown parameter k = (k0, k1, k2).
+            def create_model(self, **kwargs):
+                m = dm.Model("vec")
+                k = m.continuous("k", shape=(3,), lb=-10, ub=10)
+                x = m.continuous("x", lb=0, ub=2)
+                ys = {
+                    f"y{j}": k[0] + k[1] * (x * c) + k[2] * (x * c) ** 2
+                    for j, c in enumerate([0.5, 1.0, 1.5])
+                }
+                return ExperimentModel(m, {"k": k}, {"x": x}, ys, {n: 0.1 for n in ys})
+
+        return Quadratic()
+
+    def test_one_name_per_fim_row(self):
+        r = compute_fim(self._experiment(), {"k": np.array([1.0, -0.5, 0.3])}, {"x": 1.3})
+        assert r.fim.shape == (3, 3)
+        assert r.parameter_names == ["k[0]", "k[1]", "k[2]"]
+
+    def test_identifiability_diagnostics_run(self):
+        from discopt.doe import diagnose_identifiability
+
+        # used to fail with "negative dimensions are not allowed"
+        diagnose_identifiability(self._experiment(), {"k": np.array([1.0, -0.5, 0.3])}, {"x": 1.3})
+
+
+class TestEigenvalueCriteria:
+    @pytest.mark.parametrize(
+        ("criterion", "optimum"),
+        [(DesignCriterion.E_OPTIMAL, 119.667), (DesignCriterion.ME_OPTIMAL, 335.309)],
+    )
+    def test_biexp_reaches_brute_force_optimum(self, criterion, optimum):
+        # Random candidates are nearly singular and E/ME are nonsmooth, so the
+        # refiner never moved from them (E = 1e-7); the D-optimal seed fixes it.
+        res = optimal_experiment(
+            _biexp_experiment(), BIEXP_THETA, BIEXP_BOUNDS, criterion=criterion
+        )
+        assert res.criterion_value == pytest.approx(optimum, rel=1e-3)

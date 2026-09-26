@@ -33,7 +33,53 @@ Found by cross-checking against `pyomo.contrib.doe` (see
   refines the best `n_refine` candidates (new argument, default 4), and the A
   and ME criteria are refined on a log scale.
 
+- **Model discrimination ignored constraint-defined states too.** The
+  prediction covariance behind every discrimination criterion took the same
+  partial Jacobian `compute_fim` used to; it now shares `compute_fim`'s
+  total-sensitivity path.
+- **`ParametricSurrogate` evaluated implicit states at 0.** Its compiled
+  predictor sets only the parameters and design inputs, so a constrained
+  model's states were silently zero in every prediction; it now refuses such a
+  model (as campaigns already did).
+- **Constrained designs from infeasible seeds.** When no random candidate
+  satisfied the constraints (four sampling times summing to <= 5 in
+  [0.05, 30]^4), SLSQP ran from one infeasible point and whatever feasible
+  corner it reached was returned -- a singular design (log det -39.7 against
+  an optimum of 30.43). Infeasible candidates are now pulled into the feasible
+  set (toward a max-slack interior point for inequalities, by projection for
+  equalities) and the best `n_refine` feasible seeds are refined. With no
+  random feasible point and `local_refine=False` a design is therefore returned
+  rather than an error.
+- **Joint batch designs could be worse than greedy ones.** The joint search
+  refined only its best random start (Michaelis-Menten, 4 runs: 13.75 against
+  a greedy 14.04). It is now seeded with the greedy batch and refines its best
+  few starts, so it is never worse than greedy.
+- **E-optimal designs stopped at the first step** when the minimum eigenvalue
+  is small in absolute terms (~1e-6 for an activation energy in J/mol): the
+  refiner's gradient tolerance is absolute. E is now refined on a log scale,
+  like A and ME (Arrhenius: 6.3e-7 -> 3.0e-6, the brute-force optimum).
+- **E- and ME-optimal searches did not leave nearly singular starts.** Both
+  criteria are nonsmooth, and random candidates are often nearly singular
+  (bi-exponential sampling times: E = 1e-7 against an optimum of 120, ME = 8e11
+  against 335). The D-optimal design is now added to their candidates; all ten
+  E/ME comparison problems reach the brute-force optimum.
+- **Vector-valued parameters got one FIM label for several rows.** A parameter
+  declared as a single `Variable` of size n produced an n×n block but one
+  name, which crashed `diagnose_identifiability` and mislabelled standard
+  errors. Such parameters are now labelled `k[0] .. k[n-1]`
+  (`discopt.doe.fim.fim_parameter_names`).
+
 ### Added
+- `optimal_experiment(initial_designs=[...])`: designs to add to the
+  multi-start (the current operating point, a previous round's design). In a
+  10-variable design space random starts rarely reach the basin of a design
+  that is already known.
+- `ode_experiment(breakpoints=[...])`: times where the right-hand side jumps (a
+  piecewise temperature or feed profile). Integration is split there, so RK4
+  keeps its fourth-order accuracy: on pyomo.doe's reactor example the FIM
+  error drops from ~3e-3 (50 steps across the profile, converging only at
+  first order) to 1.7e-5 with 10 steps and 2e-8 with 50 steps per segment. All
+  segments run in one `lax.scan`, so this costs no extra compile time.
 - `optimal_experiment` warns when the FIM at the returned design is numerically
   singular (condition number of its diagonal-normalized form above 1e12, or a
   parameter with no information). Such a design optimizes round-off: e.g.

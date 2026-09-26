@@ -343,6 +343,7 @@ def optimal_experiment(
     n_starts: int = 10,
     local_refine: bool = True,
     n_refine: int = 4,
+    initial_designs: Sequence[Mapping[str, float]] | None = None,
     seed: int = 42,
 ) -> DesignResult:
     """Find optimal experimental conditions by maximizing information gain.
@@ -392,6 +393,12 @@ def optimal_experiment(
         scipy.optimize.minimize (L-BFGS-B without constraints, SLSQP
         when ``equality_constraints`` or ``inequality_constraints`` are
         supplied).
+    initial_designs : sequence of mapping, optional
+        Designs to add to the multi-start candidates -- the current operating
+        point, a design from a previous round, a literature design. In a
+        high-dimensional design space random starts rarely land in the basin
+        of a good design that is already known. Values are clipped to
+        ``design_bounds``; every design input must be given.
     n_refine : int, default 4
         Number of the best-scoring multi-start candidates the local solver is
         started from (unconstrained problems); the best refined design wins.
@@ -413,6 +420,54 @@ def optimal_experiment(
     candidates = _multi_start_candidates(
         design_bounds, n_starts, seed, projection=feasible_projection
     )
+    initial_designs = list(initial_designs or ())
+    if criterion in (DesignCriterion.E_OPTIMAL, DesignCriterion.ME_OPTIMAL):
+        # E and ME are nonsmooth (eigenvalues cross) and near-flat around the
+        # nearly singular designs random candidates tend to be, so a gradient
+        # refinement from them does not move (bi-exponential sampling times:
+        # E = 1e-7 against an optimum of 120). The D-optimal design spreads
+        # information over every direction and sits in the right basin, so it
+        # joins the candidates.
+        import warnings
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                d_seed = optimal_experiment(
+                    experiment,
+                    param_values,
+                    design_bounds,
+                    criterion=DesignCriterion.D_OPTIMAL,
+                    prior_fim=prior_fim,
+                    equality_constraints=eq,
+                    inequality_constraints=ineq,
+                    feasible_projection=feasible_projection,
+                    n_starts=n_starts,
+                    local_refine=local_refine,
+                    n_refine=n_refine,
+                    initial_designs=initial_designs,
+                    seed=seed,
+                )
+            initial_designs.append(d_seed.design)
+        except Exception:  # noqa: BLE001 - the E/ME search runs without the seed
+            pass
+    for given in initial_designs:
+        missing = [n for n in design_names if n not in given]
+        if missing:
+            raise ValueError(f"initial design {dict(given)} is missing design inputs {missing}")
+        candidates.append(
+            {
+                n: float(np.clip(float(given[n]), design_bounds[n][0], design_bounds[n][1]))
+                for n in design_names
+            }
+        )
+    if constrained and feasible_projection is None:
+        # Random points in the box rarely satisfy the constraints (four
+        # sampling times summing to <= 5 in [0.05, 30]^4: essentially never), so
+        # add each infeasible candidate's projection onto the feasible set.
+        # Without feasible seeds the refinement starts from one infeasible point
+        # and whatever feasible corner SLSQP reaches first is accepted.
+        candidates = candidates + _project_candidates(candidates, design_bounds, eq, ineq)
 
     # Best-by-criterion candidate, ignoring constraints — used only as the
     # SLSQP refinement seed. The scan ranks purely by the criterion, so when
@@ -467,10 +522,17 @@ def optimal_experiment(
 
     if local_refine:
         seeds = [seed_design]
-        if not constrained and n_refine > 1:
-            seeds = _top_candidates(
-                experiment, param_values, candidates, criterion, prior_fim, region, n_refine
-            ) or [seed_design]
+        if n_refine > 1:
+            pool = (
+                [c for c in candidates if _is_feasible(c, eq, ineq)] if constrained else candidates
+            )
+            top = _top_candidates(
+                experiment, param_values, pool, criterion, prior_fim, region, n_refine
+            )
+            if constrained:
+                seeds = top + ([seed_design] if seed_design not in top else [])
+            else:
+                seeds = top or [seed_design]
         refined = None
         for start in seeds:
             attempt = _refine_single_design(
@@ -654,6 +716,118 @@ def _scan_candidates(
     return best_design, best_criterion, best_fim_result
 
 
+def _project_candidates(
+    candidates: list[dict[str, float]],
+    design_bounds: dict[str, tuple[float, float]],
+    equality_constraints: Sequence[DesignConstraint],
+    inequality_constraints: Sequence[DesignConstraint],
+) -> list[dict[str, float]]:
+    """Constraint-feasible seeds derived from infeasible candidates.
+
+    With inequality constraints only, find one interior point that maximizes
+    the smallest constraint slack, then pull each infeasible candidate toward it
+    along the connecting segment (bisection) until it is feasible. Seeds stay
+    interior and keep the candidates' spread. A nearest-point projection would
+    instead pile them onto the constraint and the box faces -- for sampling
+    times, several at the same bound, which is a singular design SLSQP cannot
+    leave. Equality constraints fall back to that projection, the only
+    construction that keeps them satisfied. Work is in bounds-normalized
+    coordinates; candidates that cannot be made feasible are dropped.
+    """
+    names = list(design_bounds)
+    lo = np.array([design_bounds[n][0] for n in names], dtype=float)
+    span = np.array([design_bounds[n][1] - design_bounds[n][0] for n in names], dtype=float)
+    span[span == 0] = 1.0
+    eq, ineq = list(equality_constraints), list(inequality_constraints)
+
+    def to_design(z: np.ndarray) -> dict[str, float]:
+        return {n: float(v) for n, v in zip(names, lo + np.clip(z, 0.0, 1.0) * span)}
+
+    def feasible(z: np.ndarray) -> bool:
+        return _is_feasible(to_design(z), eq, ineq)
+
+    infeasible = [
+        (np.array([c[n] for n in names], dtype=float) - lo) / span
+        for c in candidates
+        if not _is_feasible(c, eq, ineq)
+    ]
+    if not infeasible:
+        return []
+    bounds01 = [(0.0, 1.0)] * len(names)
+
+    if not eq:
+        # max s  s.t.  h_i(x) >= s, x in the box
+        z0 = np.append(np.full(len(names), 0.5), 0.0)
+        cons = [
+            {"type": "ineq", "fun": (lambda v, h=h: float(h(to_design(v[:-1]))) - v[-1])}
+            for h in ineq
+        ]
+        try:
+            res = minimize(
+                lambda v: -v[-1],
+                z0,
+                jac=lambda v: np.append(np.zeros(len(names)), -1.0),
+                method="SLSQP",
+                bounds=bounds01 + [(None, None)],
+                constraints=cons,
+            )
+            center = np.clip(res.x[:-1], 0.0, 1.0)
+        except Exception:
+            center = None
+        if center is not None and feasible(center):
+            out = [to_design(center)]
+            for z in infeasible:
+                a, b = 0.0, 1.0  # fraction of the way from the center to z
+                for _ in range(30):
+                    mid = 0.5 * (a + b)
+                    if feasible(center + mid * (z - center)):
+                        a = mid
+                    else:
+                        b = mid
+                out.append(to_design(center + a * (z - center)))
+            return out
+
+    cons = [{"type": "eq", "fun": (lambda z, g=g: float(g(to_design(z))))} for g in eq] + [
+        {"type": "ineq", "fun": (lambda z, h=h: float(h(to_design(z))))} for h in ineq
+    ]
+    out = []
+    for z0 in infeasible:
+        try:
+            res = minimize(
+                lambda z: float(np.sum((z - z0) ** 2)),
+                z0,
+                jac=lambda z: 2.0 * (z - z0),
+                method="SLSQP",
+                bounds=bounds01,
+                constraints=cons,
+            )
+        except Exception:
+            continue
+        if feasible(res.x):
+            out.append(to_design(res.x))
+    return out
+
+
+# Criteria refined on a log scale. A, E and ME span many decades across a design
+# box (A: 1e-2 at the optimum, 1e7 near a singular corner; E: ~1e-6 in the
+# units of an activation energy), which stalls a gradient search -- L-BFGS-B's
+# gradient tolerance is absolute, so a criterion of size 1e-6 looks converged
+# at the first step. log() is monotone, so the optimum is unchanged.
+_LOG_SCALED_CRITERIA = (
+    DesignCriterion.A_OPTIMAL,
+    DesignCriterion.E_OPTIMAL,
+    DesignCriterion.ME_OPTIMAL,
+)
+
+
+def _log_objective(crit: float, maximize: bool) -> float:
+    """Minimization objective ``±log(crit)``; a non-positive value is singular."""
+    if not crit > 0:
+        return _SINGULAR_SENTINEL
+    value = float(np.log(crit))
+    return -value if maximize else value
+
+
 def _top_candidates(
     experiment: Experiment,
     param_values: dict[str, float],
@@ -714,7 +888,7 @@ def _refine_single_design(
     def to_design(x: np.ndarray) -> dict[str, float]:
         return {n: float(v) for n, v in zip(design_names, x)}
 
-    log_scale = criterion in (DesignCriterion.A_OPTIMAL, DesignCriterion.ME_OPTIMAL)
+    log_scale = criterion in _LOG_SCALED_CRITERIA
 
     def objective(x: np.ndarray) -> float:
         design = to_design(x)
@@ -726,10 +900,7 @@ def _refine_single_design(
         if not np.isfinite(crit):
             return _SINGULAR_SENTINEL
         if log_scale:
-            # A and ME span many decades across a design box (1e-2 at the optimum,
-            # 1e7 near a singular corner is typical), which stalls a gradient
-            # search. log() is monotone, so the optimum is unchanged.
-            return float(np.log(crit)) if crit > 0 else _SINGULAR_SENTINEL
+            return _log_objective(crit, maximize)
         return -crit if maximize else crit
 
     has_constraints = bool(equality_constraints) or bool(inequality_constraints)
@@ -964,6 +1135,30 @@ def batch_optimal_experiment(
             exchange_passes=exchange_passes,
         )
     elif strategy == BatchStrategy.JOINT:
+        # Seed the joint search with the greedy batch: the joint optimum is at
+        # least as good by definition, and a joint search from random stacks
+        # alone can end below it (replicated optima are hard to reach from
+        # distinct random points).
+        try:
+            greedy = _greedy_batch(
+                experiment,
+                param_values,
+                design_bounds,
+                n_experiments,
+                criterion=criterion,
+                prior_fim=prior_fim,
+                region=region,
+                equality_constraints=eq,
+                inequality_constraints=ineq,
+                feasible_projection=feasible_projection,
+                n_starts=n_starts,
+                local_refine=local_refine,
+                seed=seed,
+                exchange_passes=exchange_passes,
+            )
+            extra_starts = [greedy.designs]
+        except Exception:  # noqa: BLE001 - the joint search runs without it
+            extra_starts = []
         return _joint_batch(
             experiment,
             param_values,
@@ -978,6 +1173,7 @@ def batch_optimal_experiment(
             n_starts=n_starts,
             local_refine=local_refine,
             seed=seed,
+            extra_starts=extra_starts,
         )
     elif strategy == BatchStrategy.PENALIZED:
         return _penalized_batch(
@@ -1116,6 +1312,8 @@ def _joint_batch(
     n_starts: int,
     local_refine: bool,
     seed: int,
+    extra_starts: Sequence[list[dict[str, float]]] = (),
+    n_refine: int = 4,
 ) -> BatchDesignResult:
     """Galvanina-style joint batch: optimize N design vectors simultaneously."""
     design_names = list(design_bounds.keys())
@@ -1155,7 +1353,7 @@ def _joint_batch(
             total = total + prior_fim
         return total, pieces
 
-    log_scale = criterion in (DesignCriterion.A_OPTIMAL, DesignCriterion.ME_OPTIMAL)
+    log_scale = criterion in _LOG_SCALED_CRITERIA
 
     def objective(z: np.ndarray) -> float:
         designs = unpack(z)
@@ -1167,10 +1365,7 @@ def _joint_batch(
         if not np.isfinite(crit):
             return _SINGULAR_SENTINEL
         if log_scale:
-            # A and ME span many decades across a design box (1e-2 at the optimum,
-            # 1e7 near a singular corner is typical), which stalls a gradient
-            # search. log() is monotone, so the optimum is unchanged.
-            return float(np.log(crit)) if crit > 0 else _SINGULAR_SENTINEL
+            return _log_objective(crit, maximize)
         return -crit if maximize else crit
 
     rng = np.random.default_rng(seed)
@@ -1198,57 +1393,66 @@ def _joint_batch(
         structured = np.concatenate([lows + q * (highs - lows) for q in quantiles])
         starts.append(project_stack(structured))
 
-    best_z: np.ndarray | None = None
-    best_val = _SINGULAR_SENTINEL
-    for z0 in starts:
-        val = objective(z0)
-        if val < best_val:
-            best_val = val
-            best_z = z0.copy()
+    has_constraints = bool(equality_constraints) or bool(inequality_constraints)
+    scipy_cons = []
+    if has_constraints:
 
-    if best_z is None or not np.isfinite(best_val) or best_val >= _SINGULAR_SENTINEL:
-        raise RuntimeError("joint batch: no feasible starting point found")
+        def slot_dict(z: np.ndarray, i: int) -> dict[str, float]:
+            return {name: float(z[i * d + j]) for j, name in enumerate(design_names)}
 
-    final_z: np.ndarray = best_z
-    if local_refine:
-        has_constraints = bool(equality_constraints) or bool(inequality_constraints)
-        if has_constraints:
-
-            def slot_dict(z: np.ndarray, i: int) -> dict[str, float]:
-                return {name: float(z[i * d + j]) for j, name in enumerate(design_names)}
-
-            scipy_cons = []
-            for i in range(n_experiments):
-                for g in equality_constraints:
-                    scipy_cons.append(
-                        {"type": "eq", "fun": (lambda z, ii=i, gg=g: float(gg(slot_dict(z, ii))))}
-                    )
-                for h in inequality_constraints:
-                    scipy_cons.append(
-                        {"type": "ineq", "fun": (lambda z, ii=i, hh=h: float(hh(slot_dict(z, ii))))}
-                    )
-            try:
-                refined = minimize(
-                    objective,
-                    final_z,
-                    method="SLSQP",
-                    bounds=flat_bounds,
-                    constraints=scipy_cons,
+        for i in range(n_experiments):
+            for g in equality_constraints:
+                scipy_cons.append(
+                    {"type": "eq", "fun": (lambda z, ii=i, gg=g: float(gg(slot_dict(z, ii))))}
                 )
-                if np.isfinite(refined.fun) and refined.fun < best_val:
-                    final_z = np.asarray(refined.x)
-                    best_val = float(refined.fun)
-            except Exception:
-                pass
-        else:
-            try:
-                refined = minimize(objective, final_z, method="L-BFGS-B", bounds=flat_bounds)
-                if np.isfinite(refined.fun) and refined.fun < best_val:
-                    final_z = np.asarray(refined.x)
-                    best_val = float(refined.fun)
-            except Exception:
-                pass
+            for h in inequality_constraints:
+                scipy_cons.append(
+                    {"type": "ineq", "fun": (lambda z, ii=i, hh=h: float(hh(slot_dict(z, ii))))}
+                )
 
+    def _refine_joint(z0: np.ndarray) -> tuple[np.ndarray, float]:
+        """Local refinement of one stacked start: SLSQP with constraints, else L-BFGS-B."""
+        try:
+            if has_constraints:
+                res = minimize(
+                    objective, z0, method="SLSQP", bounds=flat_bounds, constraints=scipy_cons
+                )
+                # SLSQP need not end feasible: accept only a feasible stack.
+                if not all(
+                    _is_feasible(p, equality_constraints, inequality_constraints)
+                    for p in unpack(np.asarray(res.x))
+                ):
+                    return z0, _SINGULAR_SENTINEL
+            else:
+                res = minimize(objective, z0, method="L-BFGS-B", bounds=flat_bounds)
+        except Exception:
+            return z0, _SINGULAR_SENTINEL
+        if not np.isfinite(res.fun):
+            return z0, _SINGULAR_SENTINEL
+        return np.asarray(res.x), float(res.fun)
+
+    for stack in extra_starts:
+        starts.append(np.array([[p[n] for n in design_names] for p in stack], dtype=float).ravel())
+
+    scored = [(objective(z0), i) for i, z0 in enumerate(starts)]
+    scored = [(v, i) for v, i in scored if np.isfinite(v) and v < _SINGULAR_SENTINEL]
+    if not scored:
+        raise RuntimeError("joint batch: no feasible starting point found")
+    scored.sort()
+    best_val, best_i = scored[0]
+    final_z: np.ndarray = starts[best_i].copy()
+    # Refine the best few starts, not only the best: the joint criterion is
+    # multimodal in the stacked designs (every permutation is an optimum, and
+    # replicate structure separates basins).
+    refine_from = [starts[i] for _, i in scored[:n_refine]]
+    for extra in starts[len(starts) - len(extra_starts) :]:
+        if not any(extra is z for z in refine_from):
+            refine_from.append(extra)
+    if local_refine:
+        for z_start in refine_from:
+            z_ref, v_ref = _refine_joint(z_start)
+            if v_ref < best_val:
+                final_z, best_val = z_ref, v_ref
     designs = unpack(final_z)
     final = joint_fim_and_pieces(designs)
     if final is None:

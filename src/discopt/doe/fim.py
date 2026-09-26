@@ -361,7 +361,7 @@ class _FIMKernel:
         return FIMResult(
             fim=np.asarray(fim),
             jacobian=np.asarray(J),
-            parameter_names=self.em.parameter_names,
+            parameter_names=fim_parameter_names(self.em),
             response_names=self.em.response_names,
         )
 
@@ -666,25 +666,10 @@ def compute_fim(
         fn = _compile_response(em.responses[name], em.model)
         response_fns.append(fn)
 
-    # Find indices of unknown parameter variables in x_flat
-    param_indices = _get_param_indices(em)
-
     # Build p_flat for any model Parameters (distinct from unknown_parameters)
     p_flat = flatten_params(em.model)
 
-    if method == "autodiff":
-        jac = lambda fns, idx: _compute_jacobian_autodiff(fns, x_flat, p_flat, idx)  # noqa: E731
-    elif method == "finite_difference":
-        jac = lambda fns, idx: _compute_jacobian_fd(fns, x_flat, p_flat, idx, fd_step)  # noqa: E731
-    else:
-        raise ValueError(f"Unknown method: {method!r}. Use 'autodiff' or 'finite_difference'.")
-
-    state_indices = _get_state_indices(em)
-    J = np.asarray(jac(response_fns, param_indices))
-    if state_indices:
-        J = _add_implicit_sensitivity(
-            em, J, jac, response_fns, param_indices, state_indices, x_flat, p_flat
-        )
+    J = _total_jacobian(em, response_fns, x_flat, p_flat, method=method, fd_step=fd_step)
 
     # Measurement covariance (diagonal)
     sigma = _measurement_sigma(em)
@@ -699,7 +684,7 @@ def compute_fim(
     return FIMResult(
         fim=fim,
         jacobian=np.asarray(J),
-        parameter_names=em.parameter_names,
+        parameter_names=fim_parameter_names(em),
         response_names=em.response_names,
     )
 
@@ -1229,6 +1214,27 @@ def check_identifiability(
 # ─────────────────────────────────────────────────────────────
 
 
+def fim_parameter_names(em: ExperimentModel) -> list[str]:
+    """One name per FIM row/column, in ``x*`` order.
+
+    A scalar parameter keeps its name; a vector-valued one (a single
+    ``Variable`` of size n) expands to ``name[0] .. name[n-1]``, matching the
+    rows :func:`_get_param_indices` contributes. Using the bare
+    ``ExperimentModel.parameter_names`` there gave one name for n rows, and
+    everything that pairs names with rows (identifiability diagnostics,
+    standard errors, warnings) broke or mislabelled them.
+    """
+    from discopt.parametric import variable_slices
+
+    slices = variable_slices(em.model)
+    names: list[str] = []
+    for name, var in em.unknown_parameters.items():
+        sl = slices[var.name]
+        size = sl.stop - sl.start
+        names.extend([name] if size == 1 else [f"{name}[{i}]" for i in range(size)])
+    return names
+
+
 def _get_param_indices(em: ExperimentModel) -> list[int]:
     """Find indices of unknown parameter variables in the flat x vector."""
     from discopt.parametric import variable_slices
@@ -1239,6 +1245,29 @@ def _get_param_indices(em: ExperimentModel) -> list[int]:
         sl = slices[var.name]
         param_indices.extend(range(sl.start, sl.stop))
     return param_indices
+
+
+def _total_jacobian(em, response_fns, x_flat, p_flat, *, method="autodiff", fd_step=1e-5):
+    """``dy/dθ`` at a solved ``x*``, including the implicit states (see below).
+
+    The one place a response Jacobian is taken for a model that needed a solve;
+    everything that differentiates such a model goes through here.
+    """
+    param_indices = _get_param_indices(em)
+    if method == "autodiff":
+        jac = lambda fns, idx: _compute_jacobian_autodiff(fns, x_flat, p_flat, idx)  # noqa: E731
+    elif method == "finite_difference":
+        jac = lambda fns, idx: _compute_jacobian_fd(fns, x_flat, p_flat, idx, fd_step)  # noqa: E731
+    else:
+        raise ValueError(f"Unknown method: {method!r}. Use 'autodiff' or 'finite_difference'.")
+
+    J = np.asarray(jac(response_fns, param_indices))
+    state_indices = _get_state_indices(em)
+    if state_indices:
+        J = _add_implicit_sensitivity(
+            em, J, jac, response_fns, param_indices, state_indices, x_flat, p_flat
+        )
+    return J
 
 
 def _get_state_indices(em: ExperimentModel) -> list[int]:
