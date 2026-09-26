@@ -129,6 +129,36 @@ Found by cross-checking against `pyomo.contrib.doe` (see
   parameter with no information). Such a design optimizes round-off: e.g.
   Arrhenius `A` and `E` from an experiment at one constant temperature.
 
+### Fixed (discrimination search)
+- **Model-discrimination designs now really do multi-start.** The same defect
+  fixed above in `optimal_experiment` was live, independently, in
+  `_optimize_over_design`, which backs `discriminate_design` and
+  `discriminate_compound`: it scored `n_starts` random candidates plus the
+  `2*d` bound/centre points, then ran L-BFGS-B **once**, from the single best
+  *sample*. On a rugged objective the best sample routinely sits in a different
+  basin from the best optimum, so the other starts were never followed
+  downhill and raising `n_starts` could not fix a wrong answer. Every feasible
+  start is now refined and the best refined result wins; objective evaluations
+  are memoised to pay back part of the cost. The visible symptom was a compound
+  design that was not monotone in `discrimination_weight` -- at some weights it
+  returned a run worse on *both* of its own criteria than the run returned at a
+  neighbouring weight (measured: compound objective 2.44 where a 60x60 grid
+  found 3.32). Designs may differ from previous versions; where they do, the
+  new one has an objective value at least as good.
+
+### Added
+- **`discriminate_compound(..., normalize=True)`** combines **log-efficiencies**
+  rather than raw criterion values. The default sums a log-determinant and a
+  discrimination criterion that scales as `1/sigma^2`, so `lambda` is not
+  dimensionless and the precision/discrimination crossover moves when the noise
+  is restated -- halving sigma moves it from `lambda` 0.49 to 0.20 on the worked
+  example. `normalize=True` divides each term by its own optimum, which is the
+  compound criterion as Atkinson, Bogacka & Bogacki (1998) define it: both terms
+  are `<= 0`, both are `0` at their own optimum, and `lambda` means the same
+  thing across problems. It costs two extra optimisations and needs
+  `precision_criterion="determinant"`. The default is unchanged.
+
+
 ## [0.4.0] - 2026-09-25
 
 A large release. Highlights: campaigns (runs with conditions), robust designs,

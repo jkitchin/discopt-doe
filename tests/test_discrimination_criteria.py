@@ -445,3 +445,190 @@ class TestThreeModels:
             exps, pe, BOUNDS, criterion=DiscriminationCriterion.JR, n_starts=10, seed=0
         )
         assert r.design["x"] == pytest.approx(2.0, abs=1e-3)
+
+
+class TestMultiStartRefinement:
+    """``n_starts`` must buy local searches, not just a denser random scan.
+
+    Regression: ``_optimize_over_design`` scored every candidate, then ran
+    L-BFGS-B once from the single best *sample*. On a rugged objective the best
+    sample often sits in a different basin from the best optimum, so the extra
+    starts were never followed downhill and raising ``n_starts`` could not fix
+    a wrong answer. Seen in practice as a compound design whose chosen run was
+    worse on *both* of its own criteria than the run chosen at a neighbouring
+    ``discrimination_weight``.
+    """
+
+    @staticmethod
+    def _rugged(design):
+        # Two basins separated by a genuine barrier. The wide one (min -3.5 at
+        # x = 1) is where the best random sample lands; the narrow one
+        # (min -5 at x = 8) is the global optimum, reachable downhill only
+        # from a start near the upper bound.
+        x = design["x"]
+        return -3.5 * np.exp(-((x - 1.0) ** 2) / 2.0) - 5.0 * np.exp(
+            -((x - 8.0) ** 2) / (2 * 0.25**2)
+        )
+
+    def test_refines_from_more_than_the_best_sample(self):
+        from discopt.doe.discrimination import _optimize_over_design
+
+        best = _optimize_over_design(
+            self._rugged, {"x": (0.0, 8.3)}, n_starts=8, local_refine=True, seed=0
+        )
+        assert best is not None
+        # Refining only the best sample lands in the wide basin at -3.5.
+        assert best["x"] == pytest.approx(8.0, abs=1e-3)
+        assert self._rugged(best) == pytest.approx(-5.0, abs=1e-6)
+
+    @staticmethod
+    def _candidates(bounds, n_starts, seed):
+        """Rebuild the candidate list `_optimize_over_design` generates."""
+        names = list(bounds.keys())
+        rng = np.random.default_rng(seed)
+        cands = [{n: float(rng.uniform(*bounds[n])) for n in names} for _ in range(n_starts)]
+        for n in names:
+            for val in bounds[n]:
+                point = {nn: 0.5 * (bounds[nn][0] + bounds[nn][1]) for nn in names}
+                point[n] = float(val)
+                cands.append(point)
+        return cands
+
+    def test_without_refinement_the_result_is_one_of_the_samples(self):
+        from discopt.doe.discrimination import _optimize_over_design
+
+        bounds = {"x": (0.0, 8.3)}
+        best = _optimize_over_design(self._rugged, bounds, n_starts=8, local_refine=False, seed=0)
+        assert best is not None
+        # The real invariant: with no descent, the answer must be the best
+        # *sampled* candidate -- not merely a value on the wrong side of some
+        # threshold, which holds at seed 0 only by accident.
+        cands = self._candidates(bounds, 8, 0)
+        expected = min(cands, key=self._rugged)
+        assert best["x"] == pytest.approx(expected["x"], abs=1e-12)
+
+    def test_every_feasible_start_is_refined(self):
+        """Regression: a fixed budget dropped the lowest-ranked candidates.
+
+        The pool is ``n_starts + 2 * n_design_vars`` long, so slicing it to
+        ``n_starts`` always discarded the bottom ``2 * d`` -- precisely where
+        the bound and centre points sit, since they are chosen for coverage
+        rather than for their sampled value. Raising ``n_starts`` grew the
+        pool too, so it could never rescue a dropped start.
+        """
+        from discopt.doe import discrimination as _disc
+
+        bounds = {"x": (0.0, 8.3), "y": (0.0, 1.0)}
+        n_starts = 5
+        seen: list[float] = []
+        real_minimize = _disc.minimize
+
+        def counting_minimize(fun, x0, **kw):
+            seen.append(float(np.asarray(x0, dtype=float)[0]))
+            return real_minimize(fun, x0, **kw)
+
+        _disc.minimize = counting_minimize
+        try:
+            _disc._optimize_over_design(
+                lambda d: self._rugged(d) + d["y"],
+                bounds,
+                n_starts=n_starts,
+                local_refine=True,
+                seed=0,
+            )
+        finally:
+            _disc.minimize = real_minimize
+
+        expected = self._candidates(bounds, n_starts, 0)
+        assert len(seen) == len(expected), (
+            f"refined {len(seen)} starts but the pool holds {len(expected)}"
+        )
+        for cand in expected:
+            assert any(abs(cand["x"] - got) < 1e-12 for got in seen), (
+                f"start at x={cand['x']} was never refined"
+            )
+
+    def test_infeasible_candidates_are_skipped_not_refined(self):
+        from discopt.doe.discrimination import _SINGULAR_SENTINEL, _optimize_over_design
+
+        def half_broken(design):
+            x = design["x"]
+            if x < 4.0:
+                return _SINGULAR_SENTINEL
+            return (x - 6.0) ** 2
+
+        best = _optimize_over_design(
+            half_broken, {"x": (0.0, 10.0)}, n_starts=6, local_refine=True, seed=0
+        )
+        assert best is not None
+        assert best["x"] == pytest.approx(6.0, abs=1e-3)
+
+    def test_all_infeasible_returns_none(self):
+        from discopt.doe.discrimination import _SINGULAR_SENTINEL, _optimize_over_design
+
+        best = _optimize_over_design(
+            lambda d: _SINGULAR_SENTINEL, {"x": (0.0, 1.0)}, n_starts=4, local_refine=True, seed=0
+        )
+        assert best is None
+
+
+class TestCompoundNormalisation:
+    """`normalize=True` puts both terms on a common, dimensionless scale.
+
+    The raw compound objective adds a log-determinant to a discrimination
+    criterion that carries 1/sigma^2, so lambda is not dimensionless and the
+    precision/discrimination crossover moves when the noise is restated. The
+    normalised form combines log-efficiencies instead: each term is measured
+    against its own optimum, so both are <= 0 and both are exactly 0 there.
+    """
+
+    def test_endpoints_still_collapse(self):
+        r0 = discriminate_compound(
+            EXPS, PE, BOUNDS, discrimination_weight=0.0, normalize=True, n_starts=8, seed=0
+        )
+        r1 = discriminate_compound(
+            EXPS, PE, BOUNDS, discrimination_weight=1.0, normalize=True, n_starts=8, seed=0
+        )
+        pure = discriminate_design(
+            EXPS, PE, BOUNDS, criterion=DiscriminationCriterion.BF, n_starts=8, seed=0
+        )
+        assert r1.design["x"] == pytest.approx(pure.design["x"], abs=1e-3)
+        assert np.isfinite(r0.criterion_value)
+
+    def test_log_efficiency_is_zero_at_each_own_optimum(self):
+        # lambda = 0 optimises the precision term alone, so its log-efficiency
+        # -- and therefore the whole compound value -- must be 0 there.
+        r0 = discriminate_compound(
+            EXPS, PE, BOUNDS, discrimination_weight=0.0, normalize=True, n_starts=8, seed=0
+        )
+        assert r0.criterion_value == pytest.approx(0.0, abs=1e-6)
+        r1 = discriminate_compound(
+            EXPS, PE, BOUNDS, discrimination_weight=1.0, normalize=True, n_starts=8, seed=0
+        )
+        assert r1.criterion_value == pytest.approx(0.0, abs=1e-6)
+
+    def test_intermediate_weight_is_a_nonpositive_blend(self):
+        r = discriminate_compound(
+            EXPS, PE, BOUNDS, discrimination_weight=0.5, normalize=True, n_starts=8, seed=0
+        )
+        # Both terms are log-efficiencies, so neither can exceed its own optimum.
+        assert r.criterion_value <= 1e-9
+
+    def test_rejects_a_precision_criterion_it_cannot_normalise(self):
+        with pytest.raises(ValueError, match="determinant"):
+            discriminate_compound(
+                EXPS,
+                PE,
+                BOUNDS,
+                discrimination_weight=0.5,
+                normalize=True,
+                precision_criterion=DesignCriterion.A_OPTIMAL,
+                n_starts=4,
+                seed=0,
+            )
+
+    def test_unnormalised_remains_the_default(self):
+        plain = discriminate_compound(
+            EXPS, PE, BOUNDS, discrimination_weight=0.5, n_starts=8, seed=0
+        )
+        assert plain.criterion_value > 0.0  # a raw log-det blend, not an efficiency
