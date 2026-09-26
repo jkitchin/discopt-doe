@@ -13,7 +13,7 @@
   pyomo start 2 [maxIterations]: 2.12358 (13s)
 == R3-7 malformed prior FIMs ==
   3x3 for 2 parameters   discopt: ValueError: prior_fim has shape (3, 3); expected (2, 2) for the parameters ['A', '
-                         pyomo:   ValueError: Shape of FIM provided should be n parameters by n parameters, or 2 by 
+                         pyomo:   ValueError: Shape of FIM provided should be n parameters by n parameters, or 2 by
   not symmetric          discopt: ValueError: prior_fim is not symmetric
                          pyomo:   ValueError: FIM provided is not symmetric using absolute tolerance 1e-06
   indefinite             discopt: ValueError: prior_fim is not positive semi-definite (a Fisher information matrix c

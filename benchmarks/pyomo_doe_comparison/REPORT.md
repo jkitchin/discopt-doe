@@ -1,6 +1,6 @@
 # discopt.doe vs pyomo.doe — adversarial comparison
 
-**Versions:** discopt-doe 0.4.0 (+ the fixes below, from three rounds), discopt 0.9, Pyomo 6.10.1
+**Versions:** discopt-doe 0.4.0 (+ the fixes below, from four rounds), discopt 0.9, Pyomo 6.10.1
 (`pyomo.contrib.doe`), Ipopt 3.14.20 (MUMPS). Re-run with `./run_all.sh`; the logs
 are in `results/`.
 
@@ -483,3 +483,49 @@ checks.
   (results as low as log det −238), a solver error, or the intermittent
   `'NoneType' object has no attribute '_parent'` crash while building the
   Jacobian constraints, which reappeared here after round 2.
+
+---
+
+# Round 4 (no significant new differences — the loop stopped here)
+
+Areas with a direct pyomo.doe counterpart were covered by rounds 1–3 (FIM
+computation in every form pyomo offers, all six objectives including the grey
+box, priors, scaling, full-factorial grids, constraints, dynamic models, and
+pyomo's own examples). Round 4 therefore tested discopt.doe features pyomo
+lacks, against exact or brute-force references (`t4_discopt_only.py`,
+`results/t4_discopt_only.txt`):
+
+| # | Test | Result |
+|---|---|---|
+| R4-1 | Model discrimination (first- vs second-order decay), Hunter–Reiner / Buzzi-Ferraris / Box–Hill / Jensen–Rényi | optima match a 401-point grid; HR matches its closed form to 4e-14. JR saturates near ln 2, so its maximum is a plateau (discopt's t = 5.84 scores 0.6930 against the grid's 0.69301) |
+| R4-2 | I-optimal design (Michaelis–Menten, 2 points) | matches brute force (I = 0.00193697) |
+| R4-3 | Robust designs over 4 parameter samples, expected log det and maximin efficiency | expected: matches brute force; maximin: discopt 0.3424 vs 0.3355 on a 160×160 grid (discopt finer) |
+| R4-4 | Symbolic (sympy) FIM path, 5 models incl. 5 parameters and log/sin terms | exact to ≤ 8e-14 |
+| R4-5 | `sequential_doe` with a noise-free simulator | estimates recover the truth; each round's FIM = sum of its runs' FIMs (1e-16); each design = a direct `optimal_experiment` with that prior |
+| R4-6 | Identifiability / estimability on a known structure (only a·b identifiable, c inert) | rank 2 of 4; null space exactly (a, −b)/√2 and c; estimability ranks a, k estimable, b collinear, c inert |
+
+No bugs found, so the loop's stopping condition (a round without significant
+new differences) was met.
+
+## Overall summary (rounds 1–4)
+
+* **discopt.doe: 15 bugs found and fixed** (D1–D4 and D6–D15; D10 covers two
+  modules), all with regression tests in `tests/test_fim_correctness.py`, plus
+  a singular-design warning (D5) and three features the comparison showed were
+  missing: `initial_designs`, ODE `breakpoints`, and a parameter as an ODE
+  initial condition. The
+  serious ones were wrong answers without warning: FIMs of constraint-defined
+  states (all zero or wrong), the same bug in discrimination and the surrogate,
+  negative A-criteria for singular FIMs, singular designs from constrained or
+  multi-scale problems, collapsed vector design inputs, silently clipped nominal
+  values, silent ODE blow-ups, and search failures on multimodal or
+  ill-scaled criteria.
+* **pyomo.doe: 13 findings** (P1–P13): wrong forward/backward-difference FIMs
+  (also in the full-factorial grid), failures for zero or tiny parameters, FD
+  truncation (1–5% on oscillatory models, a 6e-5 floor on stiff ones), results
+  that don't match the returned design when Ipopt fails, a grey-box path that
+  crashes on numpy ≥ 2.5 or from singular starts and mislabels bad answers as
+  optimal, no multi-experiment design, and a silent prior-scaling trap.
+* **Where pyomo remains better:** global search on its large dynamic example
+  (R6) and speed on dynamic models. Improving discopt's search there is the
+  open follow-up.
