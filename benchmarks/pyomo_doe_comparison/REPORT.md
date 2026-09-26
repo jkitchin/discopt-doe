@@ -1,6 +1,6 @@
 # discopt.doe vs pyomo.doe — adversarial comparison
 
-**Versions:** discopt-doe 0.4.0 (+ the fixes below, from two rounds), discopt 0.9, Pyomo 6.10.1
+**Versions:** discopt-doe 0.4.0 (+ the fixes below, from three rounds), discopt 0.9, Pyomo 6.10.1
 (`pyomo.contrib.doe`), Ipopt 3.14.20 (MUMPS). Re-run with `./run_all.sh`; the logs
 are in `results/`.
 
@@ -420,3 +420,66 @@ by ~9 K (T₀ = 481.9 vs 472.9 exact in that basin).
   problem, and speed on dynamic models (seconds vs minutes, because discopt pays
   JAX compile time). A lifted or interior-point refinement in discopt, instead of
   L-BFGS-B on the reduced criterion, is the natural follow-up.
+
+---
+
+# Round 3
+
+Round 3 covers ODE features (stiff kinetics, unknown initial conditions,
+parameters in the measurement function) and structural variants (model
+`Parameter`s, vector-valued design inputs, a 6-parameter design, malformed prior
+FIMs). Scripts: `t3_ode.py`, `t3_structure.py`; logs: `results/t3_*.txt`.
+
+| # | Test | Outcome |
+|---|---|---|
+| R3-1 | Stiff A→B→C (k₁ = 500) | **discopt: RK4 overflow gave an infinite FIM silently, and `check_accuracy` passed it** (fixed, D12). Trapezoid: 1.5e-6. pyomo: stuck at 6e-5 whatever the mesh (FD truncation) |
+| R3-2 | Unknown initial condition as a parameter | **discopt couldn't express it** (added); now 8.6e-9. pyomo 1.1e-5 |
+| R3-3 | Response factor in the measurement function | both right (3.2e-8 / 2.2e-5) |
+| R3-4 | Fixed model `Parameter` in a response | both right (exact / 7.3e-7) |
+| R3-5 | Vector-valued design input | **discopt set all entries to one value** (now refused, D14) |
+| R3-6 | 6 parameters, 6 sampling times | **discopt −198 vs 42.87** (fixed, D13); pyomo reached 42.87 in 1 of 9 runs over 3 executions (others `maxIterations`, a solver error, the `_parent` crash) |
+| R3-7 | Malformed `prior_fim` | **discopt accepted or misreported them** (now validated, D15); pyomo validates all four |
+
+## New findings in discopt.doe (fixed; tests in `tests/test_fim_correctness.py`)
+
+### D12. A blown-up ODE integration passed silently
+Explicit RK4 on k₁ = 500 with 50 or 400 steps overflows (k₁h beyond RK4's
+stability limit ≈ 2.8). `compute_fim` returned an infinite FIM without comment,
+and `ODEExperiment.check_accuracy`, the tool meant to catch exactly this,
+compared nans (every comparison false) and reported success. It now returns
+`inf` and warns; `compute_fim` warns about any non-finite FIM.
+
+### D13. Uniform multistart candidates missed fast modes
+Tri-exponential with rate constants 5, 0.8, 0.05 and six sampling times in
+[0.01, 60]: every candidate had all its times above 7, where the fast modes
+have decayed to e⁻³⁵. Every FIM was numerically singular and flat, the
+refinement couldn't move, and the result was log det −198 (reference 42.87 from
+200 exact-gradient starts). Inputs spanning ≥ 2 decades now also get
+log-uniform candidates. discopt now reaches 42.87 for every seed tried, and all
+round-1/2 optima still hold (re-checked under three seeds).
+
+### D14. A vector-valued design input was optimized as one scalar
+`compute_fim` handles a size-3 design `Variable` correctly. The searches,
+though, treat every design name as one scalar, so all three sampling times came
+back equal (`{'t': 7.0}`), a degenerate design. Now refused with guidance to
+declare scalar inputs.
+
+### D15. Malformed prior FIMs
+A 3×3 prior for 2 parameters or a NaN entry: "No feasible design point found".
+A non-symmetric or indefinite prior: silently used. Now `ValueError`s naming
+the problem, in both `compute_fim` and the design searches, matching pyomo's
+checks.
+
+### Added
+* `ode_experiment` initial values may name an unknown parameter (R3-2).
+
+## New findings in pyomo.doe
+
+* **P12.** On stiff kinetics the FIM error plateaus at 6e-5 (10 or 40 finite
+  elements alike). The floor is the central-difference truncation at step 1e-3
+  where k₁t is large, not the discretization; refining the mesh can't fix it.
+* **P13.** On the 6-parameter design, `run_doe` reached the optimum in 1 of 9
+  random-start runs over three executions. The others hit `maxIterations`
+  (results as low as log det −238), a solver error, or the intermittent
+  `'NoneType' object has no attribute '_parent'` crash while building the
+  Jacobian constraints, which reappeared here after round 2.

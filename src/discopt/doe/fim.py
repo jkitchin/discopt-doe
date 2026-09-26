@@ -615,8 +615,11 @@ def compute_fim(
     """
 
     result = _compute_fim(
-        experiment, param_values, design_values, prior_fim=prior_fim, method=method, fd_step=fd_step
+        experiment, param_values, design_values, prior_fim=None, method=method, fd_step=fd_step
     )
+    if prior_fim is not None:
+        P = check_prior_fim(prior_fim, result.parameter_names)
+        result = dataclasses.replace(result, fim=result.fim + P)
     if not np.all(np.isfinite(result.fim)):
         import warnings
 
@@ -1229,6 +1232,32 @@ def check_identifiability(
 # ─────────────────────────────────────────────────────────────
 # Internal helpers
 # ─────────────────────────────────────────────────────────────
+
+
+def check_prior_fim(prior_fim: Any, parameter_names: list[str]) -> np.ndarray:
+    """Validate a prior FIM against the FIM's parameters; return it as an array.
+
+    It must be a finite, symmetric, positive semi-definite matrix with one
+    row and column per FIM parameter (see :func:`fim_parameter_names`).
+    """
+    P = np.asarray(prior_fim, dtype=float)
+    n = len(parameter_names)
+    if P.shape != (n, n):
+        raise ValueError(
+            f"prior_fim has shape {P.shape}; expected ({n}, {n}) for the parameters "
+            f"{parameter_names}"
+        )
+    if not np.all(np.isfinite(P)):
+        raise ValueError("prior_fim contains non-finite entries")
+    scale = max(float(np.max(np.abs(P))), 1e-300)
+    if np.max(np.abs(P - P.T)) > 1e-8 * scale:
+        raise ValueError("prior_fim is not symmetric")
+    if np.min(np.linalg.eigvalsh(0.5 * (P + P.T))) < -1e-8 * scale:
+        raise ValueError(
+            "prior_fim is not positive semi-definite (a Fisher information matrix "
+            "cannot have a negative eigenvalue)"
+        )
+    return P
 
 
 def fim_parameter_names(em: ExperimentModel) -> list[str]:

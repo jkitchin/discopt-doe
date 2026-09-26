@@ -414,6 +414,7 @@ def optimal_experiment(
         Optimal design, FIM, and metrics.
     """
     design_names = list(design_bounds.keys())
+    _validate_design_problem(experiment, param_values, design_bounds, prior_fim)
     eq = list(equality_constraints) if equality_constraints else []
     ineq = list(inequality_constraints) if inequality_constraints else []
     constrained = bool(eq or ineq)
@@ -646,6 +647,45 @@ def _warn_if_singular(fim_result: FIMResult) -> None:
         )
 
 
+def _validate_design_problem(
+    experiment: Experiment,
+    param_values: Mapping[str, float],
+    design_bounds: Mapping[str, tuple[float, float]],
+    prior_fim: np.ndarray | None,
+) -> None:
+    """Refuse inputs the searches would otherwise mis-handle silently.
+
+    * A vector-valued design input (one ``Variable`` of size n): the searches
+      treat every design input as one scalar, so its n entries were all set to
+      the same value -- n sampling times at one time, a degenerate design.
+    * A malformed ``prior_fim`` (wrong shape, non-finite, not symmetric, not
+      positive semi-definite): a wrong shape surfaced as "No feasible design
+      point found", and an asymmetric or indefinite matrix was used as given.
+    """
+    from discopt.doe.fim import check_prior_fim, fim_parameter_names
+
+    try:
+        em = experiment.create_model(**dict(param_values))
+    except Exception:  # noqa: BLE001 - let the search surface a build failure
+        return
+    for name in design_bounds:
+        var = em.design_inputs.get(name)
+        size = int(getattr(var, "size", 1) or 1) if var is not None else 1
+        if size > 1:
+            raise ValueError(
+                f"design input {name!r} is a vector of {size} entries; the design "
+                "searches optimize scalar inputs and would set every entry to the same "
+                f"value. Declare them as separate scalar inputs ({name}0, {name}1, ...)."
+            )
+    if prior_fim is not None:
+        check_prior_fim(prior_fim, fim_parameter_names(em))
+
+
+# An input whose bounds span at least this ratio (lower bound > 0) also gets
+# log-uniform multi-start candidates.
+_LOG_SPAN = 100.0
+
+
 def _multi_start_candidates(
     design_bounds: dict[str, tuple[float, float]],
     n_starts: int,
@@ -661,9 +701,20 @@ def _multi_start_candidates(
     rng = np.random.default_rng(seed)
     design_names = list(design_bounds.keys())
 
+    def draw(name: str, log_scale: bool) -> float:
+        lo, hi = design_bounds[name]
+        if log_scale and lo > 0 and hi / lo >= _LOG_SPAN:
+            return float(np.exp(rng.uniform(np.log(lo), np.log(hi))))
+        return float(rng.uniform(lo, hi))
+
     candidates: list[dict[str, float]] = []
-    for _ in range(n_starts):
-        candidates.append({name: rng.uniform(*design_bounds[name]) for name in design_names})
+    for i in range(n_starts):
+        # Every other candidate is drawn log-uniformly in inputs that span
+        # decades (sampling times, concentrations). Uniform draws on
+        # [0.01, 60] put a time below 2 only 3% of the time, so a model with a
+        # fast mode (a rate constant of 5) got no candidate that sees it: every
+        # FIM was singular and flat, and the refinement could not move.
+        candidates.append({name: draw(name, i % 2 == 1) for name in design_names})
 
     for name in design_names:
         lo, hi = design_bounds[name]
@@ -1165,6 +1216,7 @@ def batch_optimal_experiment(
     if n_experiments < 1:
         raise ValueError(f"n_experiments must be >= 1, got {n_experiments}")
 
+    _validate_design_problem(experiment, param_values, design_bounds, prior_fim)
     eq = list(equality_constraints) if equality_constraints else []
     ineq = list(inequality_constraints) if inequality_constraints else []
 

@@ -452,3 +452,53 @@ class TestODERound3:
         assert r.parameter_names == ["k1", "k2", "B0"]
         # responses are ordered A@t..., B@t... per time; compare as FIMs
         np.testing.assert_allclose(r.fim, J.T @ J / 0.01**2, rtol=1e-6)
+
+
+class TestRound3Structure:
+    def test_six_parameter_multiscale_times(self):
+        # Rate constants 5, 0.8, 0.05 with sampling times in [0.01, 60]: uniform
+        # candidates never put a time early enough to see the fast mode, every
+        # FIM was singular and flat, and the search returned log det -198.
+        class TriExp(Experiment):
+            def create_model(self, **kwargs):
+                m = dm.Model("triexp")
+                p = {n: m.continuous(n, lb=0, ub=100) for n in ("a1", "k1", "a2", "k2", "a3", "k3")}
+                d = {f"t{i}": m.continuous(f"t{i}", lb=0.01, ub=60) for i in range(6)}
+                ys = {
+                    f"y{i}": sum(p[f"a{j}"] * dm.exp(-p[f"k{j}"] * d[f"t{i}"]) for j in (1, 2, 3))
+                    for i in range(6)
+                }
+                return ExperimentModel(m, p, d, ys, {n: 0.01 for n in ys})
+
+        theta = {"a1": 1.0, "k1": 5.0, "a2": 0.5, "k2": 0.8, "a3": 0.2, "k3": 0.05}
+        res = optimal_experiment(TriExp(), theta, {f"t{i}": (0.01, 60.0) for i in range(6)})
+        assert res.criterion_value == pytest.approx(42.8698, abs=1e-3)
+
+    def test_vector_design_input_refused(self):
+        class VecDesign(Experiment):
+            def create_model(self, **kwargs):
+                m = dm.Model("vd")
+                A = m.continuous("A", lb=0, ub=100)
+                k = m.continuous("k", lb=0, ub=10)
+                t = m.continuous("t", shape=(3,), lb=0.1, ub=10)
+                ys = {f"y{i}": A * (1 - dm.exp(-k * t[i])) for i in range(3)}
+                return ExperimentModel(m, {"A": A, "k": k}, {"t": t}, ys, {n: 0.1 for n in ys})
+
+        with pytest.raises(ValueError, match="vector of 3"):
+            optimal_experiment(VecDesign(), {"A": 15.0, "k": 0.5}, {"t": (0.1, 10.0)})
+
+    @pytest.mark.parametrize(
+        ("prior", "match"),
+        [
+            (np.eye(3), "shape"),
+            (np.array([[1.0, 5.0], [0.0, 1.0]]), "symmetric"),
+            (np.array([[1.0, 0.0], [0.0, -5.0]]), "positive semi-definite"),
+            (np.array([[np.nan, 0.0], [0.0, 1.0]]), "non-finite"),
+        ],
+    )
+    def test_malformed_prior_refused(self, prior, match):
+        ex = ImplicitStateExperiment()
+        with pytest.raises(ValueError, match=match):
+            optimal_experiment(ex, THETA, {"x": (0.1, 5.0)}, prior_fim=prior)
+        with pytest.raises(ValueError, match=match):
+            compute_fim(ex, THETA, {"x": 1.0}, prior_fim=prior)

@@ -81,6 +81,21 @@ Found by cross-checking against `pyomo.contrib.doe` (see
   `check_accuracy` return `inf` and warn, and `compute_fim` warns about a
   non-finite FIM.
 
+- **Designs over inputs spanning decades missed fast modes.** Multi-start
+  candidates were uniform in each input, so sampling times in [0.01, 60] almost
+  never fell early enough to see a rate constant of 5: every candidate FIM was
+  singular and flat, and a 6-parameter tri-exponential design came back at log
+  det -198 against an optimum of 42.87. Inputs whose bounds span two decades or
+  more (lower bound > 0) now also get log-uniform candidates.
+- **Vector-valued design inputs were collapsed to one value.** A single design
+  `Variable` of size n (three sampling times) was optimized as one scalar, so
+  all n entries came back equal. `optimal_experiment` and
+  `batch_optimal_experiment` now refuse it and ask for scalar inputs.
+- **Malformed prior FIMs were accepted or misreported.** A non-symmetric or
+  indefinite `prior_fim` was used as given, and a wrongly shaped or non-finite
+  one surfaced as "No feasible design point found". `compute_fim` and the
+  design searches now validate it (`discopt.doe.fim.check_prior_fim`).
+
 ### Added
 - `ode_experiment` initial values may name an unknown parameter, so an
   uncertain initial condition is estimated and enters the FIM (pyomo.doe

@@ -1,0 +1,15 @@
+== R3-1 stiff kinetics (k1=500, k2=1), FIM rel. error vs closed form ==
+  cond(FIM)=9.9e+09
+  discopt rk4       n=   50: inf [check_accuracy warns] (1.9s)
+  discopt rk4       n=  400: inf [check_accuracy warns] (1.9s)
+  discopt rk4       n= 2000: 2.28e-14 (2.0s)
+  discopt trapezoid n=   50: 1.04e-04 [check_accuracy warns] (5.4s)
+  discopt trapezoid n=  400: 1.54e-06 (5.3s)
+  pyomo collocation nfe=10: 6.04e-05
+  pyomo collocation nfe=40: 6.19e-05
+== R3-2 unknown initial condition B0 (a parameter) ==
+  discopt rk4 n=50: 8.59e-09  names=['k1', 'k2', 'B0']
+  pyomo collocation nfe=10: 1.07e-05
+== R3-3 unknown response factor in the measurement function ==
+  discopt rk4 n=50: 3.20e-08  logdet=24.4541 (exact 24.4541)
+  pyomo collocation nfe=10: 2.19e-05  logdet=24.4544
