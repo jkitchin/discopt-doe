@@ -33,6 +33,12 @@ Found by cross-checking against `pyomo.contrib.doe` (see
   refines the best `n_refine` candidates (new argument, default 4), and the A
   and ME criteria are refined on a log scale.
 
+### Added
+- `optimal_experiment` warns when the FIM at the returned design is numerically
+  singular (condition number of its diagonal-normalized form above 1e12, or a
+  parameter with no information). Such a design optimizes round-off: e.g.
+  Arrhenius `A` and `E` from an experiment at one constant temperature.
+
 ## [0.4.0] - 2026-09-25
 
 A large release. Highlights: campaigns (runs with conditions), robust designs,

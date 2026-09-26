@@ -533,11 +533,55 @@ def optimal_experiment(
             "seed the multi-start with constraint-satisfying candidates."
         )
 
+    _warn_if_singular(best_fim_result)
+
     return DesignResult(
         design=best_design,
         fim_result=best_fim_result,
         criterion_value=best_criterion,
     )
+
+
+# A FIM whose correlation form (unit diagonal) is this ill-conditioned is
+# singular to working precision: its smallest eigenvalue is round-off, so the
+# D/A/E criterion values, and the design that optimizes them, are noise.
+_SINGULAR_CORRELATION_COND = 1e12
+
+
+def _warn_if_singular(fim_result: FIMResult) -> None:
+    """Warn when the optimal design's FIM cannot identify the parameters.
+
+    Uses the diagonal-normalized FIM, so parameters in very different units
+    (a pre-exponential factor and an activation energy) do not trigger it.
+    """
+    import warnings
+
+    fim = np.asarray(fim_result.fim, dtype=float)
+    diag = np.diag(fim)
+    names = list(fim_result.parameter_names)
+    if np.any(diag <= 0) or not np.all(np.isfinite(fim)):
+        blind = [n for n, d in zip(names, diag) if not d > 0]
+        warnings.warn(
+            f"the FIM at the optimal design carries no information about {blind}; "
+            "the design criterion is degenerate and the returned design is arbitrary.",
+            stacklevel=3,
+        )
+        return
+    scale = 1.0 / np.sqrt(diag)
+    corr = fim * scale[:, None] * scale[None, :]
+    eig, vec = np.linalg.eigh(0.5 * (corr + corr.T))
+    if eig[-1] <= 0 or eig[0] <= eig[-1] / _SINGULAR_CORRELATION_COND:
+        v = vec[:, 0]
+        involved = [n for n, c in zip(names, v) if abs(c) > 0.1]
+        warnings.warn(
+            "the FIM at the optimal design is numerically singular (condition number "
+            f"of its correlation form {eig[-1] / max(eig[0], 1e-300):.1e}): the "
+            f"combination of {involved} is not identifiable from this experiment, so "
+            "the criterion value and the design are dominated by round-off. Add a "
+            "prior_fim from other experiments, more responses, or fix/reparameterize "
+            "those parameters (see diagnose_identifiability).",
+            stacklevel=3,
+        )
 
 
 def _multi_start_candidates(

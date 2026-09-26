@@ -180,3 +180,34 @@ class TestMultimodalDesign:
             Osc(), {"amp": 1.0, "w": 3.0}, {"x": (0.0, 10.0)}, prior_fim=np.diag([100.0, 1.0])
         )
         assert res.criterion_value == pytest.approx(13.6984, abs=1e-3)
+
+
+class TestSingularOptimumWarning:
+    def _experiment(self):
+        class Product(Experiment):
+            # Only the product a*b is identifiable: the FIM is singular everywhere.
+            def create_model(self, **kwargs):
+                m = dm.Model("product")
+                a = m.continuous("a", lb=0, ub=10)
+                b = m.continuous("b", lb=0, ub=10)
+                x = m.continuous("x", lb=0, ub=2)
+                ys = {"y1": a * b * x, "y2": a * b * x**2}
+                return ExperimentModel(m, {"a": a, "b": b}, {"x": x}, ys, {"y1": 0.1, "y2": 0.1})
+
+        return Product()
+
+    def test_warns_when_optimal_fim_is_singular(self):
+        with pytest.warns(UserWarning, match="numerically singular"):
+            optimal_experiment(self._experiment(), {"a": 1.0, "b": 2.0}, {"x": (0.1, 2.0)})
+
+    def test_prior_restores_identifiability_and_silences_it(self):
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            optimal_experiment(
+                self._experiment(),
+                {"a": 1.0, "b": 2.0},
+                {"x": (0.1, 2.0)},
+                prior_fim=np.diag([1.0, 1.0]),
+            )
