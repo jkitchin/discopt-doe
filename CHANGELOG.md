@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A locally-solved row-selection MILP is no longer reported as an infeasible
+  design.** `fractional_factorial_design` tested the solver status against a
+  hardcoded `{"optimal", "feasible"}`. discopt 0.9 split locally-found results
+  into their own terminal statuses (`discopt.status.LOCAL_STATUSES`), so a
+  `local_optimal` answer -- a perfectly good fraction -- was rejected with
+  *"MILP infeasible or unsolved; try a larger n_runs or lower resolution"*,
+  blaming the user's parameters for a label change. Row selection is a pure
+  feasibility problem (the objective is a constant), so the rows are now
+  **verified directly**: the count, and every interaction column that has to
+  balance. That is stronger than any status test and does not depend on the
+  status taxonomy staying still. A design that comes back unbalanced now says
+  so instead of being returned as if it had the requested resolution.
+
+### Changed
+- **An estimation result's `solve_result.status` now uses discopt 0.9's local
+  vocabulary.** The `_FitStatus` stand-in returned by `ODEExperiment.estimate`
+  and `campaign_experiment` reported `"optimal"` on success and `"failed"`
+  otherwise. A nonlinear least-squares fit that converged is a *local* result
+  and makes no claim about the global problem, and because this object stands in
+  for `SolveResult` a caller may put it through
+  `discopt.status.is_certified_status` -- which must not answer `True` for a
+  local fit. It now reports `local_optimal` and `local_limit`. Read `.success`
+  and `.message` for the precise outcome; code matching the literal
+  `"optimal"` needs updating.
+
 Found by cross-checking against `pyomo.contrib.doe` (see
 `benchmarks/pyomo_doe_comparison/REPORT.md`).
 

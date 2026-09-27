@@ -443,7 +443,19 @@ class _FitStatus:
 
     @property
     def status(self) -> str:
-        return "optimal" if self.success else "failed"
+        """A local optimiser's verdict, in ``discopt.status`` vocabulary.
+
+        This is a nonlinear least-squares fit, so even a converged result is a
+        *local* one: it makes no claim about the global problem. discopt 0.9
+        added terminal statuses for exactly that distinction, and since this
+        class stands in for ``SolveResult`` a caller may reasonably put it
+        through ``discopt.status.is_certified_status`` -- which must not answer
+        True for a local fit. Use ``success`` and ``message`` for the precise
+        outcome.
+        """
+        from discopt.status import LOCAL_LIMIT, LOCAL_OPTIMAL
+
+        return LOCAL_OPTIMAL if self.success else LOCAL_LIMIT
 
 
 def campaign_experiment(
