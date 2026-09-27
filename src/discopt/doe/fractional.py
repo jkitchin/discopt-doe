@@ -439,9 +439,19 @@ def _solve_row_milp(
     from discopt.modeling.core import SolveResult
 
     result = cast(SolveResult, m.solve(time_limit=time_limit, gap_tolerance=1e-9))
-    if result.x is None or result.status not in {"optimal", "feasible"}:
+
+    # Check the rows that come back, not the label on them. This is a pure
+    # feasibility problem -- the objective is a constant -- so a point that
+    # satisfies the constraints is the answer however the solver got there, and
+    # a *locally* found point is worth exactly as much as a certified one.
+    # discopt 0.9 split local results out into their own terminal statuses
+    # (``discopt.status.LOCAL_STATUSES``), so a whitelist of the two
+    # certified-looking names would reject a perfectly good fraction and blame
+    # it on `n_runs`. Verifying the balance columns here is both stronger than
+    # any status test and immune to the taxonomy changing again.
+    if result.x is None:
         raise ValueError(
-            f"fractional factorial MILP infeasible or unsolved "
+            f"fractional factorial MILP returned no solution "
             f"(status={result.status}); try a larger n_runs or lower resolution"
         )
 
@@ -450,6 +460,13 @@ def _solve_row_milp(
     if len(selected) != n_runs:
         raise ValueError(
             f"MILP returned {len(selected)} runs, expected {n_runs} (status={result.status})"
+        )
+    unbalanced = [col for col in seen if sum(col[r] for r in selected) != 0]
+    if unbalanced:
+        raise ValueError(
+            f"MILP returned {len(selected)} runs leaving {len(unbalanced)} of {len(seen)} "
+            f"interaction columns unbalanced (status={result.status}); the design would not "
+            f"have the requested resolution. Try a larger n_runs or lower resolution"
         )
     return selected
 

@@ -235,3 +235,75 @@ def test_effects_estimates_rejects_nonfinite_response():
         rows = [{"A": -1, "y": 1.0}, {"A": 1, "y": bad}]
         with pytest.raises(ValueError, match="non-finite or extreme"):
             effects_estimates(rows, response="y")
+
+
+class TestRowMilpAcceptsWhatItCanVerify:
+    """The row-selection MILP judges the rows, not the solver's status label.
+
+    It is a pure feasibility problem -- the objective is a constant -- so a
+    point satisfying the balance constraints is the answer however it was
+    found. discopt 0.9 split locally-found results into their own terminal
+    statuses (``discopt.status.LOCAL_STATUSES``), which a whitelist of
+    ``{"optimal", "feasible"}`` would reject while blaming ``n_runs``.
+    """
+
+    FACTORS = {f"x{i}": (-1, 1) for i in range(5)}
+
+    def test_a_local_status_is_still_a_usable_design(self, monkeypatch):
+        import discopt.modeling as dm
+
+        real_solve = dm.Model.solve
+        seen: list[str] = []
+
+        def local_solve(self, *a, **k):
+            result = real_solve(self, *a, **k)
+            seen.append(result.status)
+            # Same point, relabelled as a local result.
+            object.__setattr__(result, "status", "local_optimal") if hasattr(
+                result, "__dataclass_fields__"
+            ) else setattr(result, "status", "local_optimal")
+            return result
+
+        monkeypatch.setattr(dm.Model, "solve", local_solve)
+        design = fractional_factorial_design(self.FACTORS, resolution=3)
+        assert seen, "the MILP path was not exercised"
+        coded = _coded(design)
+        assert coded.shape[0] == 8
+        # Resolution III: every main effect column is balanced.
+        assert np.allclose(coded.sum(axis=0), 0.0)
+
+    def test_an_unbalanced_answer_is_rejected(self, monkeypatch):
+        import discopt.modeling as dm
+        import numpy as _np
+
+        real_solve = dm.Model.solve
+
+        def bad_solve(self, *a, **k):
+            result = real_solve(self, *a, **k)
+            if result.x is not None and "x" in result.x:
+                # Keep the row count but take the first n rows, which do not
+                # balance the interaction columns.
+                xv = _np.asarray(result.x["x"], dtype=float).ravel()
+                n = int(round(xv.sum()))
+                broken = _np.zeros_like(xv)
+                broken[:n] = 1.0
+                result.x["x"] = broken
+            return result
+
+        monkeypatch.setattr(dm.Model, "solve", bad_solve)
+        with pytest.raises(ValueError, match="unbalanced"):
+            fractional_factorial_design(self.FACTORS, resolution=3)
+
+    def test_no_solution_still_raises(self, monkeypatch):
+        import discopt.modeling as dm
+
+        real_solve = dm.Model.solve
+
+        def empty_solve(self, *a, **k):
+            result = real_solve(self, *a, **k)
+            result.x = None
+            return result
+
+        monkeypatch.setattr(dm.Model, "solve", empty_solve)
+        with pytest.raises(ValueError, match="no solution"):
+            fractional_factorial_design(self.FACTORS, resolution=3)
