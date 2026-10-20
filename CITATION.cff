@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "discopt-doe: design of experiments for discopt"
+type: software
+authors:
+  - family-names: Kitchin
+    given-names: John R.
+    orcid: "https://orcid.org/0000-0003-2625-9232"
+    affiliation: Carnegie Mellon University
+repository-code: "https://github.com/jkitchin/discopt-doe"
+version: "0.4.0"
+date-released: "2026-10-20"
+license: EPL-2.0
+abstract: "Design-of-experiments plugin for the discopt modeling language: active-learning optimization, classical factorial and mixture designs, and model-based D/A/E-optimal design."
+keywords: [design of experiments, optimization, active learning]
