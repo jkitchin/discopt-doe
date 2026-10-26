@@ -19,6 +19,8 @@ parts:
       - file: notebooks/identifiability-estimability
       - file: notebooks/model-based-active-learning
       - file: notebooks/model-discrimination
+      - file: notebooks/multi-objective-model-based
+      - file: notebooks/design-tradeoffs
   - caption: Active-Learning Optimization
     chapters:
       - file: notebooks/active-learning

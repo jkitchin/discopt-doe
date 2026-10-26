@@ -192,6 +192,9 @@ _SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
         "batch_design_from_basis",
         "design_matrix",
         "design_row",
+        "design_tradeoff",
+        "TradeoffPoint",
+        "TradeoffResult",
         "linear_batch_design",
         "linear_fim",
         "linear_optimal_design",
@@ -206,6 +209,7 @@ _SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
     ),
     "model_based": (
         "ModelBasedRoundResult",
+        "MultiResponseParametricSurrogate",
         "ParametricSurrogate",
         "model_based_optimize_round",
     ),
@@ -300,6 +304,7 @@ _SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
         "sample_simplex",
         "sum_constraint",
     ),
+    "tradeoff": ("TradeoffPoint", "TradeoffResult", "design_tradeoff"),
     "surrogate": ("GPSurrogate", "Surrogate", "coerce_surrogate", "gp_surrogate"),
     "templates": (
         "TEMPLATE_NAMES",
@@ -420,6 +425,7 @@ __all__ = [
     "LinearBatchDesignResult",
     "LinearDesignResult",
     "ModelBasedRoundResult",
+    "MultiResponseParametricSurrogate",
     "ModelCard",
     "ModelSyntaxError",
     "ModelSelectionResult",
