@@ -516,6 +516,11 @@ nb["metadata"] = {
     "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
     "language_info": {"name": "python"},
 }
-out = Path(__file__).resolve().parent.parent / "docs" / "notebooks" / "multi-objective-model-based.ipynb"
+out = (
+    Path(__file__).resolve().parent.parent
+    / "docs"
+    / "notebooks"
+    / "multi-objective-model-based.ipynb"
+)
 nbf.write(nb, out)
 print(f"wrote {out}")

@@ -51,9 +51,7 @@ def duration(d):
 
 @pytest.fixture(scope="module")
 def front():
-    return design_tradeoff(
-        SamplingTimes(), THETA, TIMES, tradeoff=duration, n_levels=5, n_starts=6
-    )
+    return design_tradeoff(SamplingTimes(), THETA, TIMES, tradeoff=duration, n_levels=5, n_starts=6)
 
 
 def test_reference_is_the_unconstrained_optimum(front) -> None:
@@ -133,9 +131,7 @@ def test_validation() -> None:
     with pytest.raises(ValueError, match="not a response"):
         design_tradeoff(Yield(), {"k": 0.5}, {"x": (0.1, 10.0)}, tradeoff="z", n_starts=2)
     with pytest.raises(TypeError, match="initial_designs"):
-        design_tradeoff(
-            Yield(), {"k": 0.5}, {"x": (0.1, 10.0)}, initial_designs=[{"x": 1.0}], **kw
-        )
+        design_tradeoff(Yield(), {"k": 0.5}, {"x": (0.1, 10.0)}, initial_designs=[{"x": 1.0}], **kw)
     # x is already at its cheapest at the information optimum: nothing to trade.
     with pytest.raises(ValueError, match="no trade-off"):
         design_tradeoff(
