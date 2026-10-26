@@ -94,6 +94,26 @@ result = optimize_round(
 print(result.next_designs)
 ```
 
+Several objectives at once -- with a mechanistic model, or trading information
+against cost:
+
+```python
+from discopt.doe import design_tradeoff, model_based_optimize_round
+
+# Yield vs. impurity: model-based ParEGO; returns the model's predicted Pareto front.
+result = model_based_optimize_round(
+    "reactor.xlsx", experiment=experiment,
+    objectives={"yield": "maximize", "impurity": "minimize"}, batch_size=3,
+)
+
+# How much information does each hour of experiment cost?
+front = design_tradeoff(
+    experiment, param_values, design_bounds,
+    tradeoff=lambda d: max(d.values()), sense="minimize",
+)
+print(front.summary())
+```
+
 Identifiability diagnostics before you spend beam time:
 
 ```python

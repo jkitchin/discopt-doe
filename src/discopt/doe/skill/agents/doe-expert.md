@@ -14,6 +14,7 @@ You are an expert on model-based design of experiments (MBDoE) using `discopt.do
 - **Single-experiment design**: `optimal_experiment` wraps SciPy's `minimize` around the FIM criterion. Supports continuous design variables with bounds.
 - **Batch / parallel design**: `batch_optimal_experiment` with `BatchStrategy.GREEDY`, `JOINT`, or `PENALIZED`. Greedy is fast and near-optimal; joint maximizes the combined FIM but is NLP-hard.
 - **Sequential DoE**: `sequential_doe` loops estimation → design → optional experiment-run callback. Accumulates data across rounds and uses prior FIM.
+- **Trade-offs (multi-objective design)**: `design_tradeoff` sweeps the Pareto front between the information criterion and a second objective (experiment duration, cost, a yield the run must deliver) by the ε-constraint method; efficiencies are relative to the unconstrained optimum. For several *process* objectives of one mechanistic model (yield vs. impurity), `model_based_optimize_round(objectives={...})` runs model-based ParEGO and returns the model's predicted Pareto front.
 - **Exploration before optimization**: `explore_design_space` does grid sweeps of the criterion surface — essential before trusting the optimizer.
 - **Connection to estimation/identifiability/estimability/discrimination**: the same `Experiment` interface feeds every tool. Know when to branch.
 
@@ -24,12 +25,15 @@ You are an expert on model-based design of experiments (MBDoE) using `discopt.do
 - `from discopt.doe import batch_optimal_experiment, BatchStrategy` — parallel designs.
 - `from discopt.doe import sequential_doe, DoERound` — closed-loop MBDoE.
 - `from discopt.doe import explore_design_space, ExplorationResult` — criterion surface scan.
+- `from discopt.doe import design_tradeoff, TradeoffResult` — information-vs-cost Pareto fronts (`.knee`, `.summary()`, `.plot()`).
 - `from discopt.estimate import Experiment, ExperimentModel` — the shared model contract.
 
 ### Key files
 - `src/discopt/doe/fim.py` — `compute_fim`, `FIMResult` with `d_optimal`, `a_optimal`, `e_optimal`, `me_optimal`, `metrics` properties.
 - `src/discopt/doe/design.py` — `optimal_experiment`, `batch_optimal_experiment`, `DesignResult`, `BatchDesignResult` (both with `.summary()`, `.parameter_covariance`, `.predicted_standard_errors`).
 - `src/discopt/doe/sequential.py` — `sequential_doe` + `DoERound` (round index, estimation, design, data_collected).
+- `src/discopt/doe/tradeoff.py` — `design_tradeoff`, `TradeoffResult`, `TradeoffPoint`.
+- `src/discopt/doe/model_based.py` — `model_based_optimize_round` (incl. `objectives=`), `MultiResponseParametricSurrogate`.
 - `src/discopt/doe/exploration.py` — grid over design ranges; returns all four metrics per point.
 - `discopt.estimate` module — `ExperimentModel` metadata (`unknown_parameters`, `design_inputs`, `responses`, `measurement_error`), `Experiment.create_model()` factory.
 
@@ -74,6 +78,8 @@ The MBDoE taxonomy, FIM/Cramér-Rao theory, and the sloppy-model picture (long f
 - **"Why did the optimizer return a boundary design?"** Usually correct — FIM typically increases monotonically in the design variable. Always run `explore_design_space` first; a monotone surface is a structural signal.
 - **"Can I add prior information?"** Yes — pass `prior_fim=` to `optimal_experiment` / `batch_optimal_experiment` / `sequential_doe`. `sequential_doe` accumulates the prior automatically across rounds.
 - **"Can I limit what the experiment does — a max temperature, a by-product cap?"** Yes — `response_bounds={"name": (lo, hi)}` on `optimal_experiment` / `batch_optimal_experiment` bounds the *predicted* responses at the nominal parameters. For anything more general (a function of several responses, or a quantity you don't measure), write an `inequality_constraints` callable that calls `predict_responses(experiment, theta, design)`; for an unmeasured quantity, predict with a second experiment that returns it as a response.
+- **"The optimal experiment takes too long / makes nothing I can sell — what does compromising cost?"** `design_tradeoff(exp, theta, bounds, tradeoff=g_or_response_name, sense="minimize"|"maximize")` returns the efficiency-vs-objective front. D-efficiency e means 1/e replicates to match the optimum, so efficiency/(duration + overhead) is information per reactor-hour — often maximized well below the D-optimal duration. With `prior_fim`, efficiency is of the whole campaign, not the new run alone.
+- **"I have two objectives (yield and impurity) and a mechanistic model"** → `model_based_optimize_round(wb, experiment=..., objectives={"yield": "maximize", "impurity": "minimize"})`: joint multi-response fit, ParEGO weights per run, `predicted_front` with standard errors. Without a trusted model, use `optimize_round(objectives=...)` (GP).
 - **"My parameters have wildly different units — does A/E/ME depend on that?"** Yes: A-, E- and ME-optimal designs change with the parameters' units (D-, I- and G-optimal ones don't). `scale_parameters=True` optimizes the criterion of the relative parameters (FIM scaled by the nominal values, like pyomo.doe's `scale_nominal_param_value`). Keep passing `prior_fim` in ordinary units — it is scaled along with the FIM.
 
 ## When to Defer

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Multi-objective model-based optimization.** `model_based_optimize_round` takes
+  `objectives=` (response names, or a mapping name -> `"maximize"`/`"minimize"`),
+  mirroring `optimize_round`. The responses of one mechanistic model are fitted
+  *jointly* by weighted least squares, each with its own measurement error
+  (`MultiResponseParametricSurrogate`; `measurement_noise_override` accepts a
+  per-response mapping). Each recommended run draws a ParEGO weight vector; the
+  model's predictions are scalarized with the augmented Chebyshev function and
+  scored with its linearized uncertainty. The result carries `pareto_front`
+  (measured), `predicted_front` (the fitted model's whole trade-off curve with
+  standard errors) and `scalarization_weights`.
+- **`design_tradeoff`: information-vs-cost Pareto fronts for optimal design.**
+  Sweeps the ε-constraint front between a design criterion and a second
+  objective -- a response of the experiment (e.g. a yield the run must deliver)
+  or any function of the design (duration, cost) -- each point an
+  `optimal_experiment` solve, warm-started along the sweep. Returns a
+  `TradeoffResult` with per-point efficiencies relative to the unconstrained
+  optimum, `knee`, `summary()`, `rows()` and `plot()`.
+- Two notebooks: *Multi-objective optimization with a mechanistic model* and
+  *Trade-offs in optimal design*.
+
 ### Fixed
 - **A locally-solved row-selection MILP is no longer reported as an infeasible
   design.** `fractional_factorial_design` tested the solver status against a
