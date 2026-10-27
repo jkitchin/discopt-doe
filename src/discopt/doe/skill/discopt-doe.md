@@ -6,8 +6,9 @@ description: >-
   conditions for a model with unknown parameters. Supports
   sequential/active-learning DoE. Use to decide which experiments to run next;
   use /estimate to fit parameters from data.
+license: EPL-2.0
 argument-hint: '[model + design vars + nominal params, e.g. "y=A*exp(-Ea/(R*T)) design T in [300,500]"]'
-allowed-tools: Read, Grep, Glob, Bash, Write
+allowed-tools: Read Grep Glob Bash Write
 ---
 
 # DoE: Optimal Design of Experiments

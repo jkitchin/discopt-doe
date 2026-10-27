@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **knowhow / Agent Skills layout.** The skill and expert agents can be installed straight
+  from GitHub with [knowhow](https://github.com/jkitchin/knowhow)
+  (`uvx knowhow add jkitchin/discopt-doe --skill discopt-doe`) or `npx skills`.
+  `skills/discopt-doe/SKILL.md` and `agents/*.md` at the repository root are symlinks to the
+  packaged files; the packaged skill is now `discopt/doe/skill/discopt-doe.md` (the
+  `discopt-doe-install-skill` command still installs it as `SKILL.md`), so the repository
+  holds exactly one `SKILL.md`. Its `allowed-tools` is now the spec's space-separated form,
+  and it declares `license: EPL-2.0`. CI runs `knowhow validate`.
 - **Multi-objective model-based optimization.** `model_based_optimize_round` takes
   `objectives=` (response names, or a mapping name -> `"maximize"`/`"minimize"`),
   mirroring `optimize_round`. The responses of one mechanistic model are fitted

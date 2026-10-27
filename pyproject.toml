@@ -84,7 +84,7 @@ include = ["discopt.doe*"]
 namespaces = true
 
 [tool.setuptools.package-data]
-"discopt.doe" = ["gui/discopt-logo.png", "skill/SKILL.md", "skill/agents/*.md"]
+"discopt.doe" = ["gui/discopt-logo.png", "skill/discopt-doe.md", "skill/agents/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

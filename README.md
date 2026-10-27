@@ -222,6 +222,22 @@ discopt-doe-install-skill            # install to ~/.claude
 discopt-doe-install-skill --project  # install to ./.claude (versioned)
 ```
 
+The skill and agents also follow the [Agent Skills](https://agentskills.io/specification)
+repository layout (`skills/discopt-doe/SKILL.md`, `agents/*.md`), so they can be installed
+straight from GitHub with [knowhow](https://github.com/jkitchin/knowhow), for Claude Code,
+VS Code (Copilot), Codex, OpenCode, Gemini CLI, Cursor and other agents, without
+installing this package first. The skill still needs `discopt-doe` installed to run.
+
+```bash
+uvx knowhow add jkitchin/discopt-doe --list               # what's available
+uvx knowhow add jkitchin/discopt-doe --skill discopt-doe  # the skill, into this project
+uvx knowhow add jkitchin/discopt-doe --all -g                  # skill + agents, all projects
+# or, skill only: npx skills add jkitchin/discopt-doe --skill discopt-doe
+```
+
+knowhow records installs in lock files, so `uvx knowhow check` / `upgrade` pick up new
+versions of the skill.
+
 ## Related work
 
 discopt-doe is not the only open-source option, and for some jobs it is not the
