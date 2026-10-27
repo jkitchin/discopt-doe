@@ -1,8 +1,12 @@
 """Install the bundled Claude skill and expert agents.
 
-Console script ``discopt-doe-install-skill``: copies the packaged ``SKILL.md``
-into a Claude skills directory (auto-discovered by Claude Code) and the
+Console script ``discopt-doe-install-skill``: copies the packaged skill into a
+Claude skills directory as ``SKILL.md`` (auto-discovered by Claude Code) and the
 bundled expert agents into the matching ``agents`` directory.
+
+The packaged skill is ``skill/discopt-doe.md`` rather than ``skill/SKILL.md`` so
+that the repository holds exactly one ``SKILL.md`` (``skills/discopt-doe/``, a
+symlink to it) for ``knowhow`` / ``npx skills`` to discover.
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ def install_skill(claude_dir: Path, force: bool = False) -> list[Path]:
         print(f"skill already installed: {dest}\n  (use --force to overwrite)")
     else:
         dest.write_text(
-            _skill_root().joinpath("SKILL.md").read_text(encoding="utf-8"), encoding="utf-8"
+            _skill_root().joinpath(f"{SKILL_NAME}.md").read_text(encoding="utf-8"), encoding="utf-8"
         )
         print(f"installed skill -> {dest}")
         installed.append(dest)
