@@ -231,7 +231,7 @@ installing this package first. The skill still needs `discopt-doe` installed to 
 ```bash
 uvx knowhow add jkitchin/discopt-doe --list               # what's available
 uvx knowhow add jkitchin/discopt-doe --skill discopt-doe  # the skill, into this project
-uvx knowhow add jkitchin/discopt-doe -s discopt-doe --subagent '*' -g  # skill + agents, all projects
+uvx knowhow add jkitchin/discopt-doe --all -g                # skill + agents, all projects
 # or, skill only: npx skills add jkitchin/discopt-doe --skill discopt-doe
 ```
 
