@@ -15,6 +15,15 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uvx pre-commit run --all-files --show-diff-on-failure
 
+  # The skill and agents are installable with knowhow / npx skills straight from
+  # this repo; check the layout and SKILL.md frontmatter against the Agent Skills spec.
+  skills:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uvx knowhow validate .
+
   test:
     runs-on: ubuntu-latest
     strategy:

@@ -32,7 +32,7 @@ def test_gui_logo_ships_as_package_data():
 
 
 def test_skill_ships_as_package_data():
-    skill = resources.files("discopt.doe").joinpath("skill", "SKILL.md")
+    skill = resources.files("discopt.doe").joinpath("skill", "discopt-doe.md")
     assert skill.is_file()
     text = skill.read_text()
     assert text.startswith("---")

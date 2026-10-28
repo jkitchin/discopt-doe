@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **knowhow / Agent Skills layout.** The skill and expert agents can be installed straight
+  from GitHub with [knowhow](https://github.com/jkitchin/knowhow)
+  (`uvx knowhow add jkitchin/discopt-doe --skill discopt-doe`) or `npx skills`.
+  `skills/discopt-doe/SKILL.md` and `agents/*.md` at the repository root are symlinks to the
+  packaged files; the packaged skill is now `discopt/doe/skill/discopt-doe.md` (the
+  `discopt-doe-install-skill` command still installs it as `SKILL.md`), so the repository
+  holds exactly one `SKILL.md`. Its `allowed-tools` is now the spec's space-separated form,
+  and it declares `license: EPL-2.0`. CI runs `knowhow validate`.
+- **Multi-objective model-based optimization.** `model_based_optimize_round` takes
+  `objectives=` (response names, or a mapping name -> `"maximize"`/`"minimize"`),
+  mirroring `optimize_round`. The responses of one mechanistic model are fitted
+  *jointly* by weighted least squares, each with its own measurement error
+  (`MultiResponseParametricSurrogate`; `measurement_noise_override` accepts a
+  per-response mapping). Each recommended run draws a ParEGO weight vector; the
+  model's predictions are scalarized with the augmented Chebyshev function and
+  scored with its linearized uncertainty. The result carries `pareto_front`
+  (measured), `predicted_front` (the fitted model's whole trade-off curve with
+  standard errors) and `scalarization_weights`.
+- **`design_tradeoff`: information-vs-cost Pareto fronts for optimal design.**
+  Sweeps the ε-constraint front between a design criterion and a second
+  objective -- a response of the experiment (e.g. a yield the run must deliver)
+  or any function of the design (duration, cost) -- each point an
+  `optimal_experiment` solve, warm-started along the sweep. Returns a
+  `TradeoffResult` with per-point efficiencies relative to the unconstrained
+  optimum, `knee`, `summary()`, `rows()` and `plot()`.
+- Two notebooks: *Multi-objective optimization with a mechanistic model* and
+  *Trade-offs in optimal design*.
+
 ### Changed
 - **Requires `discopt[jax]>=0.10` (was `discopt>=0.9`).** discopt 0.10 made JAX
   an optional extra, and `discopt.estimate` / `discopt.parametric` -- which the

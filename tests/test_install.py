@@ -1,5 +1,7 @@
 """Tests for the skill installer (discopt-doe-install-skill)."""
 
+from pathlib import Path
+
 import pytest
 
 from discopt.doe.install import SKILL_NAME, install_skill, main
@@ -47,3 +49,22 @@ def test_main_project_scope(tmp_path, monkeypatch):
     assert main(["--project"]) == 0
     assert (tmp_path / ".claude" / "skills" / SKILL_NAME / "SKILL.md").exists()
     assert (tmp_path / ".claude" / "agents" / "doe-expert.md").exists()
+
+
+# knowhow / npx skills discover skills/<name>/SKILL.md and agents/*.md at the repo
+# root; those are symlinks to the packaged files, so the two can never drift.
+_REPO = Path(__file__).resolve().parents[1]
+_PKG_SKILL = _REPO / "src" / "discopt" / "doe" / "skill"
+
+
+@pytest.mark.skipif(not (_REPO / "skills").is_dir(), reason="not a source checkout")
+def test_repo_layout_links_to_packaged_skill():
+    skill = _REPO / "skills" / SKILL_NAME / "SKILL.md"
+    assert skill.resolve() == (_PKG_SKILL / f"{SKILL_NAME}.md").resolve()
+    agents = {p.name: p.resolve() for p in (_REPO / "agents").glob("*.md")}
+    assert set(agents) == EXPECTED_AGENTS
+    for name, target in agents.items():
+        assert target == (_PKG_SKILL / "agents" / name).resolve()
+    # exactly one SKILL.md, so knowhow sees no duplicate skill
+    found = [*(_REPO / "skills").rglob("SKILL.md"), *(_REPO / "src").rglob("SKILL.md")]
+    assert found == [skill]

@@ -94,6 +94,26 @@ result = optimize_round(
 print(result.next_designs)
 ```
 
+Several objectives at once -- with a mechanistic model, or trading information
+against cost:
+
+```python
+from discopt.doe import design_tradeoff, model_based_optimize_round
+
+# Yield vs. impurity: model-based ParEGO; returns the model's predicted Pareto front.
+result = model_based_optimize_round(
+    "reactor.xlsx", experiment=experiment,
+    objectives={"yield": "maximize", "impurity": "minimize"}, batch_size=3,
+)
+
+# How much information does each hour of experiment cost?
+front = design_tradeoff(
+    experiment, param_values, design_bounds,
+    tradeoff=lambda d: max(d.values()), sense="minimize",
+)
+print(front.summary())
+```
+
 Identifiability diagnostics before you spend beam time:
 
 ```python
@@ -201,6 +221,22 @@ estimability, identifiability, model discrimination) for Claude Code:
 discopt-doe-install-skill            # install to ~/.claude
 discopt-doe-install-skill --project  # install to ./.claude (versioned)
 ```
+
+The skill and agents also follow the [Agent Skills](https://agentskills.io/specification)
+repository layout (`skills/discopt-doe/SKILL.md`, `agents/*.md`), so they can be installed
+straight from GitHub with [knowhow](https://github.com/jkitchin/knowhow), for Claude Code,
+VS Code (Copilot), Codex, OpenCode, Gemini CLI, Cursor and other agents, without
+installing this package first. The skill still needs `discopt-doe` installed to run.
+
+```bash
+uvx knowhow add jkitchin/discopt-doe --list               # what's available
+uvx knowhow add jkitchin/discopt-doe --skill discopt-doe  # the skill, into this project
+uvx knowhow add jkitchin/discopt-doe --all -g                  # skill + agents, all projects
+# or, skill only: npx skills add jkitchin/discopt-doe --skill discopt-doe
+```
+
+knowhow records installs in lock files, so `uvx knowhow check` / `upgrade` pick up new
+versions of the skill.
 
 ## Related work
 
