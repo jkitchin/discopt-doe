@@ -14,8 +14,14 @@ from pathlib import Path
 SKILL_NAME = "discopt-doe"
 
 
+# Laid out as knowhow / `npx skills` expect: skills/<name>/SKILL.md (the folder
+# must match the skill's name) and agents/*.md beside it.
 def _skill_root():
-    return resources.files("discopt.doe").joinpath("skill")
+    return resources.files("discopt.doe").joinpath("skills", SKILL_NAME)
+
+
+def _agents_root():
+    return resources.files("discopt.doe").joinpath("agents")
 
 
 def install_skill(claude_dir: Path, force: bool = False) -> list[Path]:
@@ -35,7 +41,7 @@ def install_skill(claude_dir: Path, force: bool = False) -> list[Path]:
 
     agents_dir = Path(claude_dir) / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
-    for agent in _skill_root().joinpath("agents").iterdir():
+    for agent in _agents_root().iterdir():
         if not agent.name.endswith(".md"):
             continue
         adest = agents_dir / agent.name

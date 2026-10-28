@@ -32,6 +32,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once, on the joint FIM of the whole batch, and still fires when that is
   singular.
 
+### Changed (packaging)
+- **The bundled skill follows the Agent Skills layout, so knowhow and `npx skills`
+  can install it.** `SKILL.md` moves from `discopt/doe/skill/` to
+  `discopt/doe/skills/discopt-doe/` (the spec requires the folder to match the
+  skill's `name`), and the four expert agents move to `discopt/doe/agents/`.
+  `knowhow validate` now passes, and
+  `uvx knowhow add jkitchin/discopt-doe/src/discopt/doe -s discopt-doe --subagent '*'`
+  installs the skill and agents from GitHub. `discopt-doe-install-skill` works
+  as before.
+
 ### Docs
 - Notebook outputs re-executed against discopt 0.10.
 - The model-based DoE page lists the batch, robust, ODE and constrained design
