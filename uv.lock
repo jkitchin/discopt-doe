@@ -415,23 +415,27 @@ wheels = [
 
 [[package]]
 name = "discopt"
-version = "0.9.0"
+version = "0.10.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "highspy" },
-    { name = "jax" },
-    { name = "jaxlib" },
     { name = "numpy" },
     { name = "pounce-solver" },
     { name = "scipy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/81/47/b89c1d773b2a30bd36e5df7f42db5f84f953eb0484afc55ecde7f03950e4/discopt-0.9.0.tar.gz", hash = "sha256:35c1a0b6bbcba2c97564fc0b48452354fe098447cdd382c71ef5dec4af8b050b", size = 3788858, upload-time = "2026-09-24T20:14:46.678Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d2/23/ce7bf788b1721d5e1533e4f155028d145f05bdaf17f6d9039118701e050e/discopt-0.10.0.tar.gz", hash = "sha256:b0a1422210361ec616a1b3ebfdd7d4f78ef5e0c839885af4d46040804adc679d", size = 4843285, upload-time = "2026-10-28T22:14:04.044Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3f/ec/209be7d14924609ac4cc798fda077805e658a62474b518429eace025d826/discopt-0.9.0-cp312-abi3-macosx_10_12_x86_64.whl", hash = "sha256:5ef838d29621045c1d7155c31c0751ab035f6a5efb828f75d9f0d2ad36b72089", size = 5684350, upload-time = "2026-09-24T20:14:36.326Z" },
-    { url = "https://files.pythonhosted.org/packages/7c/73/cf3b2f8682a93904b4d341bd876c38b252788bee583efae9ae19d9f07b03/discopt-0.9.0-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:fdcda9680c52ea7a23285b69b986aaa78bf0880cc4cf2165b0a601e3582c5b5c", size = 5570393, upload-time = "2026-09-24T20:14:39.325Z" },
-    { url = "https://files.pythonhosted.org/packages/af/9c/070fa9b839339310833753b296f85aa109260c9ef8ce2e2a3585fbe00b46/discopt-0.9.0-cp312-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:02511fda8e0765873bc2d7bf36cde23a16d8182902e6e1993583d1dd59e0b63d", size = 5688677, upload-time = "2026-09-24T20:14:41.032Z" },
-    { url = "https://files.pythonhosted.org/packages/93/05/b4fee334b9d59c9af4ec2cfab118d6f55ba012a8a6708b88593c53255bd5/discopt-0.9.0-cp312-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:43bf795131c66dc572ed920a82a5855619c8702bb7e6e239a289c8ed060361d0", size = 5811967, upload-time = "2026-09-24T20:14:42.88Z" },
-    { url = "https://files.pythonhosted.org/packages/f2/8e/e2235284193468fb27691b7b7a4ca3e8e9732820b987a2092c4fa4717bd0/discopt-0.9.0-cp312-abi3-win_amd64.whl", hash = "sha256:3d8cf19c29c73ab11125a53ce74ce8eca234b375b54b8ced8940d3b045fb52f2", size = 5678024, upload-time = "2026-09-24T20:14:44.62Z" },
+    { url = "https://files.pythonhosted.org/packages/19/c9/829e4c05c04f99290af5a23a647a0edc3920d85a9fc65ce49de412c1c36a/discopt-0.10.0-cp312-abi3-macosx_10_12_x86_64.whl", hash = "sha256:9223297945a3d2fb4207f50ef7dbc64fb6c0d6e024547ac15d257f51db511ac2", size = 6936711, upload-time = "2026-10-28T22:13:52.422Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/1a/3f79f4c5410f95b5b2b2f33f50edf07e1beb78f1b88f5d28958415ad519d/discopt-0.10.0-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:ed78b3a4bcf1c56129cf4291dcca93a31e489e2c605d370f49c60ed767f8bdd5", size = 6802626, upload-time = "2026-10-28T22:13:55.224Z" },
+    { url = "https://files.pythonhosted.org/packages/25/ec/3548eb67689c2f5eece7b410881dffa5c2ec5da3e30b454beb355ce58145/discopt-0.10.0-cp312-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:40862f331d275629725654ffc059f3faff45866feae3d5917533db6d944c1bd7", size = 6936961, upload-time = "2026-10-28T22:13:57.14Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/41/960fb754f606a940153255ef97ce04b96cd4bf002603b7fff88baca4ccb8/discopt-0.10.0-cp312-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:fc5f7157bfd70b6c2626c7c8e690596d7e46ed795f2db297691a10f2fd1460ff", size = 7084039, upload-time = "2026-10-28T22:13:59.556Z" },
+    { url = "https://files.pythonhosted.org/packages/12/d9/c01260c292432264f12e4f404b15da833d9d70ff95ffb4a07e4aef01bbd7/discopt-0.10.0-cp312-abi3-win_amd64.whl", hash = "sha256:2050528b3581a885d86367497bd537c1db6e299a6fd611b4b10d44c1b4b9eca7", size = 6953850, upload-time = "2026-10-28T22:14:01.936Z" },
+]
+
+[package.optional-dependencies]
+jax = [
+    { name = "jax" },
+    { name = "jaxlib" },
 ]
 
 [[package]]
@@ -439,7 +443,7 @@ name = "discopt-doe"
 version = "0.4.1"
 source = { editable = "." }
 dependencies = [
-    { name = "discopt" },
+    { name = "discopt", extra = ["jax"] },
     { name = "jax" },
     { name = "numpy" },
     { name = "openpyxl" },
@@ -474,7 +478,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "discopt", specifier = ">=0.9" },
+    { name = "discopt", extras = ["jax"], specifier = ">=0.10" },
     { name = "jax", specifier = ">=0.4" },
     { name = "matplotlib", marker = "extra == 'gui'", specifier = ">=3.5" },
     { name = "numpy", specifier = ">=1.24" },
@@ -1755,19 +1759,19 @@ wheels = [
 
 [[package]]
 name = "pounce-solver"
-version = "0.12.0"
+version = "0.14.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
     { name = "scipy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5e/74/0491a1bbe6c6b219e20b8e9dbc08f0b3cf6fb236a30b58fc6898d830d3c3/pounce_solver-0.12.0.tar.gz", hash = "sha256:b377345421bf0fccd05b581e8d0d084f942a674a58968ddc9857671260719711", size = 3830932, upload-time = "2026-09-19T11:41:40.05Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7b/da/9dc672bb006877ac192636c1695a1f3dd074036cb819bb2651d2651b3952/pounce_solver-0.14.0.tar.gz", hash = "sha256:770ec2ff18c68f458ae7953a465232a6f9af0963abef243859ee60fd9edfbed1", size = 4689874, upload-time = "2026-10-28T11:53:43.745Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/57/e6/0a0ccc881607bf52f17f333ea09d835e18d68a2e3473b63bfe56b9653964/pounce_solver-0.12.0-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:38017d9d36384ee71aab67a3bf52a0fec612d0ac25ec7c5f831b43eac67c4d0a", size = 8945706, upload-time = "2026-09-19T11:41:28.038Z" },
-    { url = "https://files.pythonhosted.org/packages/62/40/6c230c72c297b16ea1cc3d0b31aff117169628402c8687e5fc7289002342/pounce_solver-0.12.0-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:b7dbb26597aefb351717e8d6064077ef9124f8d4a7e9a28c05bea5dec3e9dcc4", size = 7998837, upload-time = "2026-09-19T11:41:30.271Z" },
-    { url = "https://files.pythonhosted.org/packages/aa/2b/9414cc6bfa599a4ae3b143e36613f95914bf0b02b1772502c15f8624afea/pounce_solver-0.12.0-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:84be92124251e9a32a35ec817831eb665daa37b32a6dfc438562081bdf0b63e0", size = 17981451, upload-time = "2026-09-19T11:41:32.479Z" },
-    { url = "https://files.pythonhosted.org/packages/73/af/0f16787a53d2c0916040162d7665d7589682ed2f8848ac86b839844395c7/pounce_solver-0.12.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:fb4e3040d6bb2e90f55640f35733899cff339d8412352be6e1c6e404990613ef", size = 20846086, upload-time = "2026-09-19T11:41:34.986Z" },
-    { url = "https://files.pythonhosted.org/packages/78/63/b3319802f3acfd009a7cae456978fdab7deaa9161bd6e3ecd9d8cc1cbab7/pounce_solver-0.12.0-cp39-abi3-win_amd64.whl", hash = "sha256:e128654ab807ab9f3fd84ab0e87c4ec961d751b343934f209d4fd892c139b646", size = 9396856, upload-time = "2026-09-19T11:41:37.636Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/05/37fc629d28faf58f3f9f08889bc1e9cdcaa6bbb6db4ea686de32cd3e3e89/pounce_solver-0.14.0-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:4aa916a7e0cd8edeef94d9a1f1f59872926084419f82666c85443d85bf79f894", size = 10679838, upload-time = "2026-10-28T11:53:31.511Z" },
+    { url = "https://files.pythonhosted.org/packages/ad/bc/7990b8d0140af7d2101b188294794caac6f10773fbbd0ae4670dd2199e6f/pounce_solver-0.14.0-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:912aaf4de854394ff3023a1265e2ddf5478ebd4865f4ab47aa95af5a196e29ff", size = 9626294, upload-time = "2026-10-28T11:53:34.014Z" },
+    { url = "https://files.pythonhosted.org/packages/88/38/dce303523f6a9ef5a9ab98705dc074b9ca89d86a7bc789172cb7bb8cbaf8/pounce_solver-0.14.0-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:08a8e279209deac2efb4b8bfa8b31ce469a3e3de06773aae9563397eba181426", size = 21245394, upload-time = "2026-10-28T11:53:36.62Z" },
+    { url = "https://files.pythonhosted.org/packages/43/70/921e6220179b0831220409b52de3fe148e404f606ae538aafb6d26b3e552/pounce_solver-0.14.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:50eaccc1db7be0ec7473e844fad0e331ef5d79ed3cd775b991162ff4d86bbc51", size = 24573831, upload-time = "2026-10-28T11:53:38.954Z" },
+    { url = "https://files.pythonhosted.org/packages/6a/e2/97a7ba50f3fb75c109a0416003cabc446772e8eb0596aaa62e9a4447b9e2/pounce_solver-0.14.0-cp39-abi3-win_amd64.whl", hash = "sha256:3955a437e9bcad23e3011021a5e9dabf7f8100bc66705ea5a5e85f0569c97600", size = 11282651, upload-time = "2026-10-28T11:53:41.657Z" },
 ]
 
 [[package]]

@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so instead of being returned as if it had the requested resolution.
 
 ### Changed
+- **Requires `discopt[jax]>=0.10` (was `discopt>=0.9`).** discopt 0.10 made JAX
+  an optional extra, and `discopt.estimate` / `discopt.parametric` -- which the
+  FIM, model-based design and workbook layers import -- raise `MissingJaxError`
+  without it, so the dependency now names the `jax` extra explicitly. The import
+  guard's floor (`_MIN_DISCOPT`) moves to `(0, 10)`. `uv.lock` is refreshed to
+  discopt 0.10.0, which pulls `pounce-solver` 0.14.0 (discopt's new floor;
+  this package does not use pounce directly).
 - **An estimation result's `solve_result.status` now uses discopt 0.9's local
   vocabulary.** The `_FitStatus` stand-in returned by `ODEExperiment.estimate`
   and `campaign_experiment` reported `"optimal"` on success and `"failed"`
