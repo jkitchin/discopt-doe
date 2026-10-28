@@ -202,15 +202,6 @@ discopt-doe-install-skill            # install to ~/.claude
 discopt-doe-install-skill --project  # install to ./.claude (versioned)
 ```
 
-The skill and agents also install straight from GitHub with
-[knowhow](https://github.com/jkitchin/knowhow), without installing this package
-first, and the skill works with `npx skills` and other agents (Codex, Cursor,
-Gemini CLI, ...). The skill still needs `discopt-doe` installed to run.
-
-```bash
-uvx knowhow add jkitchin/discopt-doe/src/discopt/doe -s discopt-doe --subagent '*'
-```
-
 ## Related work
 
 discopt-doe is not the only open-source option, and for some jobs it is not the
