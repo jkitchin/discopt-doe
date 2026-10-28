@@ -212,6 +212,43 @@ class TestSingularOptimumWarning:
                 prior_fim=np.diag([1.0, 1.0]),
             )
 
+    def _line(self):
+        class Line(Experiment):
+            # y = a + b x: one run cannot identify both, two can.
+            def create_model(self, **kwargs):
+                m = dm.Model("line")
+                a = m.continuous("a", lb=-10, ub=10)
+                b = m.continuous("b", lb=-10, ub=10)
+                x = m.continuous("x", lb=0, ub=1)
+                return ExperimentModel(m, {"a": a, "b": b}, {"x": x}, {"y": a + b * x}, {"y": 0.1})
+
+        return Line()
+
+    @pytest.mark.parametrize("strategy", ["greedy", "joint"])
+    def test_batch_does_not_warn_about_its_partial_picks(self, strategy):
+        # The first greedy pick of a 2-parameter batch has a singular FIM by
+        # construction; only the finished batch's FIM should be judged.
+        import warnings
+
+        from discopt.doe import batch_optimal_experiment
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            res = batch_optimal_experiment(
+                self._line(), {"a": 1.0, "b": 2.0}, {"x": (0.0, 1.0)}, 2, strategy=strategy
+            )
+        assert sorted(d["x"] for d in res.designs) == pytest.approx([0.0, 1.0], abs=1e-6)
+
+    def test_batch_still_warns_when_the_whole_batch_is_singular(self):
+        from discopt.doe import batch_optimal_experiment
+
+        # The joint strategy is the one that returns a design here; greedy and
+        # penalized give up on the second pick, when every candidate is singular.
+        with pytest.warns(UserWarning, match="numerically singular"):
+            batch_optimal_experiment(
+                self._experiment(), {"a": 1.0, "b": 2.0}, {"x": (0.1, 2.0)}, 3, strategy="joint"
+            )
+
 
 class TestOtherJacobianPathsWithStates:
     """Every module that differentiates responses must see the implicit states."""

@@ -148,11 +148,18 @@ Key entry points:
 
 **`discopt.doe`**
 - {func}`~discopt.doe.compute_fim` — Fisher Information Matrix via JAX autodiff
-- {func}`~discopt.doe.optimal_experiment` — find best experimental conditions
+- {func}`~discopt.doe.optimal_experiment` — find best experimental conditions,
+  optionally subject to {class}`~discopt.doe.DesignConstraint` or response bounds
+- {func}`~discopt.doe.batch_optimal_experiment` — several runs at once (greedy,
+  joint or penalized; see {class}`~discopt.doe.BatchStrategy`)
+- {func}`~discopt.doe.robust_optimal_experiment` — designs that hold up over
+  several parameter guesses
+- {func}`~discopt.doe.ode_experiment` — dynamic (ODE) experiments with sampling times
 - {func}`~discopt.doe.explore_design_space` — grid evaluation with plotting
 - {func}`~discopt.doe.sequential_doe` — full estimate-design loop
 - {func}`~discopt.doe.check_identifiability` — parameter identifiability check
-- {class}`~discopt.doe.DesignCriterion` — D/A/E/ME optimality constants
+- {class}`~discopt.doe.DesignCriterion` — D/A/E/ME/I/G optimality constants
+  (I and G average or bound the prediction variance over a design region)
 - {class}`~discopt.doe.FIMResult` — FIM with all optimality metrics
 
 **`discopt.estimate`** (base package)
@@ -164,9 +171,13 @@ Key entry points:
 
 | Feature | Pyomo.DoE {cite:p}`Wang2022` | discopt.doe |
 |---------|------------|-------------|
-| Sensitivity Jacobian | Finite differences (2N extra solves) | Exact JAX autodiff |
-| FIM gradient w.r.t. design | Cholesky variables in NLP | JAX autodiff through FIM |
+| Sensitivity Jacobian | Finite differences (relative step $10^{-3}\theta$) | Exact JAX autodiff |
+| Design search | One simultaneous NLP solved by Ipopt, single start | Multistart scan + L-BFGS-B / SLSQP |
+| Dynamic models | `pyomo.dae` discretization + finite differences | RK4 / trapezoid integration, autodiff |
+| Multi-experiment (batch) designs | Not supported | Greedy, joint and penalized |
 | GPU acceleration | No | Yes (JAX backend) |
 | Parameter estimation | Separate package (parmest) | Integrated (`discopt.estimate`) |
-| Mixed-integer designs | Not supported | Native MINLP |
-| Implicit differentiation | Not available | Envelope theorem |
+
+A head-to-head comparison against exact references, including where Pyomo.DoE
+finds better optima, is in `benchmarks/pyomo_doe_comparison/REPORT.md` in the
+repository.

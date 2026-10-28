@@ -581,6 +581,13 @@ def test_save_writes_one_time_backup(tmp_path):
     assert bak.read_bytes() == original
 
 
+def test_new_workbook_writes_no_backup(tmp_path):
+    """The .bak protects a user's file; a freshly created one has nothing to protect."""
+    out = do_new(_new_params(tmp_path, template="linear", inputs=[("x", 0.0, 10.0)], n=3))
+    wb_path = Path(out["workbook_path"])
+    assert not wb_path.with_name(wb_path.name + ".bak").exists()
+
+
 def test_open_warns_on_embedded_chart(tmp_path):
     from openpyxl.chart import BarChart, Reference
 

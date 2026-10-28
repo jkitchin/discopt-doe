@@ -214,7 +214,7 @@ design experiments from a mechanistic model and its Fisher information.
 
 - [**Pyomo.DoE**](https://pyomo.readthedocs.io/en/stable/explanation/analysis/doe/doe.html)
   — MBDoE for models written in Pyomo, solving the design problem as a
-  (stochastic) nonlinear program with sensitivities from `k_aug`. If your model
+  nonlinear program with finite-difference sensitivities. If your model
   is already an algebraic or DAE Pyomo model, or you need design variables
   subject to serious process constraints, this is more powerful than what is
   here. Wang & Dowling, *AIChE J* **68** (2022), e17813. The two packages are

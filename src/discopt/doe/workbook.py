@@ -316,7 +316,11 @@ class Workbook:
 
         path.parent.mkdir(parents=True, exist_ok=True)
         wb.save(path)
-        return cls(path, wb)
+        obj = cls(path, wb)
+        # The file on disk is the skeleton just written, nothing of the user's,
+        # so the first save in this session has nothing to back up.
+        obj._backed_up = True
+        return obj
 
     @classmethod
     def open(cls, path: Path | str) -> "Workbook":
