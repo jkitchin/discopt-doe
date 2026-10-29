@@ -38,7 +38,7 @@ machine. See [docs/browser-app.md](docs/browser-app.md).
 
 ## Install
 
-Both `discopt-doe` and its `discopt>=0.9` dependency are published on
+Both `discopt-doe` and its `discopt>=0.10` dependency are published on
 [PyPI](https://pypi.org/project/discopt-doe/), so a plain pip install resolves
 everything:
 
@@ -250,7 +250,7 @@ design experiments from a mechanistic model and its Fisher information.
 
 - [**Pyomo.DoE**](https://pyomo.readthedocs.io/en/stable/explanation/analysis/doe/doe.html)
   — MBDoE for models written in Pyomo, solving the design problem as a
-  (stochastic) nonlinear program with sensitivities from `k_aug`. If your model
+  nonlinear program with finite-difference sensitivities. If your model
   is already an algebraic or DAE Pyomo model, or you need design variables
   subject to serious process constraints, this is more powerful than what is
   here. Wang & Dowling, *AIChE J* **68** (2022), e17813. The two packages are

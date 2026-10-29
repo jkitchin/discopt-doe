@@ -36,6 +36,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Two notebooks: *Multi-objective optimization with a mechanistic model* and
   *Trade-offs in optimal design*.
 
+### Changed
+- **Requires `discopt[jax]>=0.10` (was `discopt>=0.9`).** discopt 0.10 made JAX
+  an optional extra, and `discopt.estimate` / `discopt.parametric` -- which the
+  FIM, model-based design and workbook layers import -- raise `MissingJaxError`
+  without it, so the dependency now names the `jax` extra explicitly. The import
+  guard's floor (`_MIN_DISCOPT`) moves to `(0, 10)`. `uv.lock` is refreshed to
+  discopt 0.10.0, which pulls `pounce-solver` 0.14.0 (discopt's new floor;
+  this package does not use pounce directly).
+
+### Fixed
+- **A new workbook no longer gets a useless `.bak`.** The one-time backup exists
+  to keep a user's file safe from openpyxl dropping charts on the first in-place
+  save. `discopt doe new` writes the workbook and then saves it again, so every
+  new campaign got a `.bak` holding the half-written skeleton the package itself
+  had just made. A workbook created in the current session is now not backed up;
+  an opened one still is.
+- **Batch designs no longer warn about a singular FIM they do not have.**
+  `batch_optimal_experiment` builds its batch from single-run optimisations, and
+  the first few picks are singular by construction (fewer runs than
+  parameters), so the greedy strategy -- and the joint strategy, which it seeds
+  -- emitted *"the FIM at the optimal design is singular"* once per early pick
+  even when the finished batch was perfectly informative. The check now runs
+  once, on the joint FIM of the whole batch, and still fires when that is
+  singular.
+- **Greedy batch designs no longer depend on BLAS roundoff for their first
+  picks.** While the accumulated FIM had fewer runs than parameters, every
+  candidate scored log det = -inf, so the pick was decided by roundoff: on
+  macOS an arbitrary point won, and on Linux (exact zeros) greedy -- and the
+  joint strategy it seeds -- failed with *"No feasible design point found"*.
+  Candidates are now ranked against the running FIM plus a ridge 1e-8 times
+  the FIM's own scale while it is rank-deficient; the recorded FIMs stay
+  exact. The four-component mixture batch in the docs now lands on the
+  textbook vertices, edge midpoints and face centroids, with a higher log det.
+
+### Docs
+- Notebook outputs re-executed against discopt 0.10.
+- The model-based DoE page lists the batch, robust, ODE and constrained design
+  entry points and the I/G criteria, and its Pyomo.DoE comparison now matches
+  the benchmark report (finite-difference sensitivities, single-start Ipopt
+  search, no batch designs) instead of claiming MINLP and envelope-theorem
+  features this package does not have. The README no longer says Pyomo.DoE
+  takes sensitivities from `k_aug`.
+- The CLI notebook describes the 10-run initial batch it actually builds.
+
+## [0.4.1] - 2026-10-21
+
 ### Fixed
 - **A locally-solved row-selection MILP is no longer reported as an infeasible
   design.** `fractional_factorial_design` tested the solver status against a
@@ -961,7 +1007,8 @@ First public release on PyPI.
 ### Changed
 - Depend on `discopt>=0.6` from PyPI (removed the temporary `[tool.uv.sources]` git pin).
 
-[Unreleased]: https://github.com/jkitchin/discopt-doe/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jkitchin/discopt-doe/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/jkitchin/discopt-doe/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jkitchin/discopt-doe/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jkitchin/discopt-doe/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jkitchin/discopt-doe/releases/tag/v0.2.0

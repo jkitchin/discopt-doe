@@ -644,7 +644,7 @@ def optimal_experiment(
             "seed the multi-start with constraint-satisfying candidates."
         )
 
-    _warn_if_singular(best_fim_result)
+    _warn_if_singular(best_fim_result.fim, best_fim_result.parameter_names)
 
     return DesignResult(
         design=best_design,
@@ -659,23 +659,25 @@ def optimal_experiment(
 _SINGULAR_CORRELATION_COND = 1e12
 
 
-def _warn_if_singular(fim_result: FIMResult) -> None:
+def _warn_if_singular(fim: np.ndarray, parameter_names: Sequence[str], stacklevel: int = 3) -> None:
     """Warn when the optimal design's FIM cannot identify the parameters.
 
     Uses the diagonal-normalized FIM, so parameters in very different units
     (a pre-exponential factor and an activation energy) do not trigger it.
+    ``stacklevel`` counts from this function, so the default points at the
+    caller of a public function that calls it directly.
     """
     import warnings
 
-    fim = np.asarray(fim_result.fim, dtype=float)
+    fim = np.asarray(fim, dtype=float)
     diag = np.diag(fim)
-    names = list(fim_result.parameter_names)
+    names = list(parameter_names)
     if np.any(diag <= 0) or not np.all(np.isfinite(fim)):
         blind = [n for n, d in zip(names, diag) if not d > 0]
         warnings.warn(
             f"the FIM at the optimal design carries no information about {blind}; "
             "the design criterion is degenerate and the returned design is arbitrary.",
-            stacklevel=3,
+            stacklevel=stacklevel,
         )
         return
     scale = 1.0 / np.sqrt(diag)
@@ -691,7 +693,7 @@ def _warn_if_singular(fim_result: FIMResult) -> None:
             "the criterion value and the design are dominated by round-off. Add a "
             "prior_fim from other experiments, more responses, or fix/reparameterize "
             "those parameters (see diagnose_identifiability).",
-            stacklevel=3,
+            stacklevel=stacklevel,
         )
 
 
@@ -1351,7 +1353,7 @@ def batch_optimal_experiment(
         )
 
     if strategy == BatchStrategy.GREEDY:
-        return _greedy_batch(
+        res = _greedy_batch(
             experiment,
             param_values,
             design_bounds,
@@ -1392,7 +1394,7 @@ def batch_optimal_experiment(
             extra_starts = [greedy.designs]
         except Exception:  # noqa: BLE001 - the joint search runs without it
             extra_starts = []
-        return _joint_batch(
+        res = _joint_batch(
             experiment,
             param_values,
             design_bounds,
@@ -1409,7 +1411,7 @@ def batch_optimal_experiment(
             extra_starts=extra_starts,
         )
     elif strategy == BatchStrategy.PENALIZED:
-        return _penalized_batch(
+        res = _penalized_batch(
             experiment,
             param_values,
             design_bounds,
@@ -1427,6 +1429,10 @@ def batch_optimal_experiment(
         )
     else:
         raise ValueError(f"Unknown batch strategy: {strategy!r}")
+    # Judged on the whole batch: the runs picked on the way there are
+    # singular by construction until there are as many as parameters.
+    _warn_if_singular(res.joint_fim, res.fim_results[0].parameter_names)
+    return res
 
 
 def _greedy_batch(
@@ -1455,20 +1461,50 @@ def _greedy_batch(
     fim_results: list[FIMResult] = []
     per_round: list[float] = []
 
+    import warnings
+
+    # With fewer runs than parameters the accumulated FIM is singular, so every
+    # candidate scores log det = -inf and which one "wins" is decided by BLAS
+    # roundoff (or, where the roundoff is exact, nothing wins and the search
+    # fails). While the running FIM is rank-deficient, candidates are ranked
+    # against it plus a ridge far below the FIM's own scale. The ridge only
+    # steers the choice; the FIMs recorded below are exact.
+    ridge = None
+    try:
+        centre = {n: 0.5 * (lo + hi) for n, (lo, hi) in design_bounds.items()}
+        f0 = compute_fim(experiment, param_values, centre, prior_fim=None).fim
+        scale = float(np.trace(f0)) / f0.shape[0]
+        ridge = 1e-8 * (scale if np.isfinite(scale) and scale > 0 else 1.0) * np.eye(f0.shape[0])
+    except Exception:  # noqa: BLE001 - without a scale the picks run unregularized
+        pass
+
+    def _selection_prior(running):
+        if ridge is None:
+            return running
+        if running is None:
+            return ridge
+        if np.linalg.matrix_rank(running) < running.shape[0]:
+            return running + ridge
+        return running
+
     for i in range(n_experiments):
-        picked = optimal_experiment(
-            experiment,
-            param_values,
-            design_bounds,
-            criterion=criterion,
-            prior_fim=running_prior,
-            equality_constraints=equality_constraints or None,
-            inequality_constraints=inequality_constraints or None,
-            feasible_projection=feasible_projection,
-            n_starts=n_starts,
-            local_refine=local_refine,
-            seed=seed + i,
-        )
+        # With fewer runs than parameters the accumulated FIM is singular by
+        # construction; batch_optimal_experiment checks the finished batch.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="the FIM at the optimal design")
+            picked = optimal_experiment(
+                experiment,
+                param_values,
+                design_bounds,
+                criterion=criterion,
+                prior_fim=_selection_prior(running_prior),
+                equality_constraints=equality_constraints or None,
+                inequality_constraints=inequality_constraints or None,
+                feasible_projection=feasible_projection,
+                n_starts=n_starts,
+                local_refine=local_refine,
+                seed=seed + i,
+            )
         per_fim = compute_fim(experiment, param_values, picked.design, prior_fim=None)
         designs.append(picked.design)
         fim_results.append(per_fim)
@@ -1485,19 +1521,21 @@ def _greedy_batch(
         for i in range(len(designs)):
             others = running_prior - fim_results[i].fim
             try:
-                picked = optimal_experiment(
-                    experiment,
-                    param_values,
-                    design_bounds,
-                    criterion=criterion,
-                    prior_fim=others,
-                    equality_constraints=equality_constraints or None,
-                    inequality_constraints=inequality_constraints or None,
-                    feasible_projection=feasible_projection,
-                    n_starts=n_starts,
-                    local_refine=local_refine,
-                    seed=seed + n_experiments + sweep * n_experiments + i,
-                )
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message="the FIM at the optimal design")
+                    picked = optimal_experiment(
+                        experiment,
+                        param_values,
+                        design_bounds,
+                        criterion=criterion,
+                        prior_fim=others,
+                        equality_constraints=equality_constraints or None,
+                        inequality_constraints=inequality_constraints or None,
+                        feasible_projection=feasible_projection,
+                        n_starts=n_starts,
+                        local_refine=local_refine,
+                        seed=seed + n_experiments + sweep * n_experiments + i,
+                    )
             except Exception:  # noqa: BLE001 - a failed re-search keeps the greedy pick
                 continue
             per_fim = compute_fim(experiment, param_values, picked.design, prior_fim=None)

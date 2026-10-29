@@ -15,8 +15,11 @@ dependencies = [
     # 0.8 fixed solver answers this package relies on: a GDP disjunction wrongly
     # declared infeasible, a false `Unbounded` on a bounded LP, vectorized
     # models silently unrelaxed, and a non-zero `Constraint.rhs` silently
-    # ignored through the public API. The floor is now 0.9.
-    "discopt>=0.9",
+    # ignored through the public API. 0.9 split locally-found results into their
+    # own terminal statuses. The floor is now 0.10 (which pulls pounce-solver>=0.14).
+    # 0.10 made JAX an optional extra; discopt.estimate and discopt.parametric,
+    # which fim.py / model_based.py / workbook.py import, need it.
+    "discopt[jax]>=0.10",
     "jax>=0.4",          # fim.py / model_based.py use jax directly
     "numpy>=1.24",
     "scipy>=1.10",
