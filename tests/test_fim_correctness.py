@@ -239,6 +239,27 @@ class TestSingularOptimumWarning:
             )
         assert sorted(d["x"] for d in res.designs) == pytest.approx([0.0, 1.0], abs=1e-6)
 
+    @pytest.mark.parametrize("strategy", ["greedy", "joint", "penalized"])
+    def test_batch_starts_when_singular_fims_score_exactly_minus_inf(self, monkeypatch, strategy):
+        # On Linux/OpenBLAS a rank-deficient FIM has an exactly zero determinant,
+        # so every first pick scores -inf and the search used to fail with "no
+        # feasible design point". macOS roundoff hid it; emulate the exact zeros.
+        from discopt.doe import batch_optimal_experiment
+
+        real_slogdet = np.linalg.slogdet
+
+        def exact_slogdet(a):
+            a = np.asarray(a)
+            if a.ndim == 2 and np.linalg.matrix_rank(a) < a.shape[0]:
+                return np.float64(0.0), np.float64(-np.inf)
+            return real_slogdet(a)
+
+        monkeypatch.setattr(np.linalg, "slogdet", exact_slogdet)
+        res = batch_optimal_experiment(
+            self._line(), {"a": 1.0, "b": 2.0}, {"x": (0.0, 1.0)}, 2, strategy=strategy
+        )
+        assert sorted(d["x"] for d in res.designs) == pytest.approx([0.0, 1.0], abs=1e-6)
+
     def test_batch_still_warns_when_the_whole_batch_is_singular(self):
         from discopt.doe import batch_optimal_experiment
 

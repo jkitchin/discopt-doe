@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The penalized batch strategy no longer picks by roundoff, or fails on
+  Linux, while the batch has fewer runs than parameters** (#40). It scanned
+  candidates against the singular running FIM, so every one scored log det =
+  -inf: an arbitrary pick on macOS, and *"penalized batch: no feasible
+  candidate found"* where the zeros are exact. It now ranks against the same
+  ridged prior as the greedy strategy (0.5.0). The ridge helpers are shared,
+  and a regression test emulates exact zeros, so it fails on every platform.
+
 ## [0.5.0] - 2026-10-28
 
 ### Added
