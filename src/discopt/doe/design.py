@@ -1435,6 +1435,41 @@ def batch_optimal_experiment(
     return res
 
 
+def _selection_ridge(
+    experiment: Experiment,
+    param_values: dict[str, float],
+    design_bounds: dict[str, tuple[float, float]],
+) -> np.ndarray | None:
+    """A ridge far below the FIM's own scale, for ranking one-at-a-time picks.
+
+    With fewer runs than parameters the accumulated FIM is singular, so every
+    candidate scores log det = -inf and which one "wins" is decided by BLAS
+    roundoff (or, where the roundoff is exact, nothing wins and the search
+    fails). The scale comes from one run at the centre of the design box.
+    """
+    try:
+        centre = {n: 0.5 * (lo + hi) for n, (lo, hi) in design_bounds.items()}
+        f0 = compute_fim(experiment, param_values, centre, prior_fim=None).fim
+        scale = float(np.trace(f0)) / f0.shape[0]
+        return 1e-8 * (scale if np.isfinite(scale) and scale > 0 else 1.0) * np.eye(f0.shape[0])
+    except Exception:  # noqa: BLE001 - without a scale the picks run unregularized
+        return None
+
+
+def _selection_prior(running: np.ndarray | None, ridge: np.ndarray | None) -> np.ndarray | None:
+    """The prior to rank the next pick against: ``running`` plus ``ridge`` while singular.
+
+    The ridge only steers the choice; callers record the exact per-run FIMs.
+    """
+    if ridge is None:
+        return running
+    if running is None:
+        return ridge
+    if np.linalg.matrix_rank(running) < running.shape[0]:
+        return running + ridge
+    return running
+
+
 def _greedy_batch(
     experiment: Experiment,
     param_values: dict[str, float],
@@ -1463,29 +1498,7 @@ def _greedy_batch(
 
     import warnings
 
-    # With fewer runs than parameters the accumulated FIM is singular, so every
-    # candidate scores log det = -inf and which one "wins" is decided by BLAS
-    # roundoff (or, where the roundoff is exact, nothing wins and the search
-    # fails). While the running FIM is rank-deficient, candidates are ranked
-    # against it plus a ridge far below the FIM's own scale. The ridge only
-    # steers the choice; the FIMs recorded below are exact.
-    ridge = None
-    try:
-        centre = {n: 0.5 * (lo + hi) for n, (lo, hi) in design_bounds.items()}
-        f0 = compute_fim(experiment, param_values, centre, prior_fim=None).fim
-        scale = float(np.trace(f0)) / f0.shape[0]
-        ridge = 1e-8 * (scale if np.isfinite(scale) and scale > 0 else 1.0) * np.eye(f0.shape[0])
-    except Exception:  # noqa: BLE001 - without a scale the picks run unregularized
-        pass
-
-    def _selection_prior(running):
-        if ridge is None:
-            return running
-        if running is None:
-            return ridge
-        if np.linalg.matrix_rank(running) < running.shape[0]:
-            return running + ridge
-        return running
+    ridge = _selection_ridge(experiment, param_values, design_bounds)
 
     for i in range(n_experiments):
         # With fewer runs than parameters the accumulated FIM is singular by
@@ -1497,7 +1510,7 @@ def _greedy_batch(
                 param_values,
                 design_bounds,
                 criterion=criterion,
-                prior_fim=_selection_prior(running_prior),
+                prior_fim=_selection_prior(running_prior, ridge),
                 equality_constraints=equality_constraints or None,
                 inequality_constraints=inequality_constraints or None,
                 feasible_projection=feasible_projection,
@@ -1766,8 +1779,12 @@ def _penalized_batch(
     designs: list[dict[str, float]] = []
     fim_results: list[FIMResult] = []
     per_round: list[float] = []
+    ridge = _selection_ridge(experiment, param_values, design_bounds)
 
     for i in range(n_experiments):
+        # Ranked against a ridged prior while the batch has fewer runs than
+        # parameters (see _selection_ridge); the recorded FIMs are exact.
+        selection_prior = _selection_prior(running_prior, ridge)
         candidates = _multi_start_candidates(
             design_bounds, n_starts, seed + i, projection=feasible_projection
         )
@@ -1785,7 +1802,7 @@ def _penalized_batch(
             )
 
         best, best_crit, best_fim = _scan_candidates(
-            experiment, param_values, filtered, criterion, running_prior
+            experiment, param_values, filtered, criterion, selection_prior
         )
 
         if best is None or best_fim is None:
@@ -1799,7 +1816,7 @@ def _penalized_batch(
                 design_names,
                 design_bounds,
                 criterion,
-                running_prior,
+                selection_prior,
                 equality_constraints=equality_constraints,
                 inequality_constraints=inequality_constraints,
             )
