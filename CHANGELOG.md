@@ -60,6 +60,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   even when the finished batch was perfectly informative. The check now runs
   once, on the joint FIM of the whole batch, and still fires when that is
   singular.
+- **Greedy batch designs no longer depend on BLAS roundoff for their first
+  picks.** While the accumulated FIM had fewer runs than parameters, every
+  candidate scored log det = -inf, so the pick was decided by roundoff: on
+  macOS an arbitrary point won, and on Linux (exact zeros) greedy -- and the
+  joint strategy it seeds -- failed with *"No feasible design point found"*.
+  Candidates are now ranked against the running FIM plus a ridge 1e-8 times
+  the FIM's own scale while it is rank-deficient; the recorded FIMs stay
+  exact. The four-component mixture batch in the docs now lands on the
+  textbook vertices, edge midpoints and face centroids, with a higher log det.
 
 ### Docs
 - Notebook outputs re-executed against discopt 0.10.

@@ -1463,6 +1463,30 @@ def _greedy_batch(
 
     import warnings
 
+    # With fewer runs than parameters the accumulated FIM is singular, so every
+    # candidate scores log det = -inf and which one "wins" is decided by BLAS
+    # roundoff (or, where the roundoff is exact, nothing wins and the search
+    # fails). While the running FIM is rank-deficient, candidates are ranked
+    # against it plus a ridge far below the FIM's own scale. The ridge only
+    # steers the choice; the FIMs recorded below are exact.
+    ridge = None
+    try:
+        centre = {n: 0.5 * (lo + hi) for n, (lo, hi) in design_bounds.items()}
+        f0 = compute_fim(experiment, param_values, centre, prior_fim=None).fim
+        scale = float(np.trace(f0)) / f0.shape[0]
+        ridge = 1e-8 * (scale if np.isfinite(scale) and scale > 0 else 1.0) * np.eye(f0.shape[0])
+    except Exception:  # noqa: BLE001 - without a scale the picks run unregularized
+        pass
+
+    def _selection_prior(running):
+        if ridge is None:
+            return running
+        if running is None:
+            return ridge
+        if np.linalg.matrix_rank(running) < running.shape[0]:
+            return running + ridge
+        return running
+
     for i in range(n_experiments):
         # With fewer runs than parameters the accumulated FIM is singular by
         # construction; batch_optimal_experiment checks the finished batch.
@@ -1473,7 +1497,7 @@ def _greedy_batch(
                 param_values,
                 design_bounds,
                 criterion=criterion,
-                prior_fim=running_prior,
+                prior_fim=_selection_prior(running_prior),
                 equality_constraints=equality_constraints or None,
                 inequality_constraints=inequality_constraints or None,
                 feasible_projection=feasible_projection,
