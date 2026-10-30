@@ -3039,7 +3039,7 @@ def add_subparser(subparsers) -> None:
         help="Design of experiments with Excel-workbook campaigns",
         description=(
             "Optimal experimental design. Verbs: templates, new, status, "
-            "fit, anova, extend, optimize, gui. Each accepts --json for "
+            "fit, anova, extend, foldover, optimize, gui. Each accepts --json for "
             "machine-readable output."
         ),
     )

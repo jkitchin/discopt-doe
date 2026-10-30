@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-30
+
 ### Added
 - **`discopt doe extend` augments classical designs.** A central composite,
   Box-Behnken, definitive screening or Latin hypercube campaign used to be
@@ -1043,7 +1045,8 @@ First public release on PyPI.
 ### Changed
 - Depend on `discopt>=0.6` from PyPI (removed the temporary `[tool.uv.sources]` git pin).
 
-[Unreleased]: https://github.com/jkitchin/discopt-doe/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/jkitchin/discopt-doe/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/jkitchin/discopt-doe/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/jkitchin/discopt-doe/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/jkitchin/discopt-doe/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/jkitchin/discopt-doe/compare/v0.4.0...v0.4.1
