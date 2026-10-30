@@ -25,7 +25,8 @@ You are a design of experiments assistant for discopt. Given a model with unknow
   discopt doe new response-surface-2d -o c.xlsx --input T:300:500 --input P:1:5 --n 8
   discopt doe status c.xlsx                    # campaign state + suggested next step
   discopt doe fit c.xlsx                       # estimate params from completed runs
-  discopt doe extend c.xlsx --n 4              # append optimal runs using cumulative FIM
+  discopt doe extend c.xlsx --n 4              # append optimal runs (cumulative FIM; classical designs via their basis)
+  discopt doe foldover c.xlsx                  # mirror a 2-level screening design to de-alias it
   discopt doe anova c.xlsx                     # ANOVA for Latin-family designs
   discopt doe optimize c.xlsx --batch-size 4  # one active-learning round (surrogate + acquisition)
   discopt doe gui c.xlsx                       # Streamlit GUI (needs discopt-doe[gui])

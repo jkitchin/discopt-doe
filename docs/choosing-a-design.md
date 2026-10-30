@@ -67,7 +67,8 @@ resolution; the search needs the base `discopt` solver. Every fraction aliases
 some effects with others. `alias_structure(design)` prints the defining
 relation, the resolution and the alias groups, so check it *before* you run
 anything. `fold_over(design)` adds the mirror-image runs that break a
-resolution III design's main-effect aliases.
+resolution III design's main-effect aliases; for a campaign workbook,
+`discopt doe foldover` does the same and appends them as a second batch.
 
 **`plackett-burman`** estimates up to $N-1$ main effects in $N$ runs, where $N$
 is a multiple of 4 {cite:p}`PlackettBurman1946`. Its main effects are only

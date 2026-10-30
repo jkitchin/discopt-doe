@@ -984,14 +984,13 @@ class Workbook:
         if template in CLASSICAL_TEMPLATES:
             # A classical design records a regression basis, not a generative
             # model, so there is no Experiment to rebuild. `fit` works via
-            # parameter_names(); `extend` has no meaning here — augmenting a
-            # central-composite or Box-Behnken design means generating a new
-            # block, not searching for the next most informative point.
+            # parameter_names(), and `extend` augments the design through that
+            # basis (`linear_batch_design`) without needing an Experiment.
             raise ValueError(
                 f"workbook uses classical design template {template!r}, which carries a "
-                "regression basis rather than a model; `discopt doe fit` and `anova` work, "
-                "but `extend` does not. Generate an additional design block instead, or "
-                "use discopt.doe.linear_design.linear_batch_design for a model-driven batch."
+                "regression basis rather than a model, so there is no Experiment to "
+                "rebuild. `discopt doe fit`, `anova` and `extend` all work from the basis; "
+                "in Python use discopt.doe.linear_design.linear_batch_design."
             )
         specs = self.input_specs()
         response = self.response_name()

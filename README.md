@@ -135,6 +135,7 @@ discopt doe status run.xlsx
 discopt doe fit run.xlsx              # fit parameters to completed rows
 discopt doe anova run.xlsx           # ANOVA F-table (latin/factorial designs)
 discopt doe extend run.xlsx --n 4     # design the next batch
+discopt doe foldover screen.xlsx      # de-alias a 2-level screening design
 discopt doe optimize run.xlsx        # one active-learning round (optimize template)
 discopt doe gui run.xlsx              # Streamlit GUI (needs [gui] extra)
 ```
@@ -150,7 +151,24 @@ discopt doe new box-behnken       -o bbd.xlsx --input T:300:400 --input P:1:5 --
 
 `fit` estimates the recorded basis (`--basis linear|quadratic`) by least
 squares, so a Box-Behnken or central-composite campaign goes straight from
-`new` to `fit` with no model definition. Central-composite keeps every run
+`new` to `fit` with no model definition. `extend` augments it through the same
+basis: the new runs are D-optimal given every run already planned (measured or
+not, since a linear model's information does not depend on the responses), and
+it reports how much narrower the coefficient intervals become.
+
+A two-level screening campaign (`factorial-2level`, `fractional-factorial`,
+`plackett-burman`) is followed up differently. Optimal runs would not undo its
+aliasing, so `extend` refuses it and points to `foldover`, which appends the
+mirror image of the original corner runs as batch 2: every main effect is then
+clear of the two-factor interactions. `--factor NAME` reverses one factor only,
+which clears that factor and its interactions.
+
+```bash
+discopt doe new fractional-factorial -o screen.xlsx \
+    --factor a:-1:1 --factor b:-1:1 --factor c:-1:1 --factor d:-1:1 --factor e:-1:1 \
+    --generator d=ab --generator e=ac          # resolution III, 8 runs
+discopt doe foldover screen.xlsx              # + 8 mirror runs: resolution IV
+``` Central-composite keeps every run
 inside the bounds you give by default; pass `--outside-bounds` for the textbook
 scaling where the axial points sit beyond them.
 

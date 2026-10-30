@@ -358,6 +358,18 @@ class ExtendParams:
     n_starts: int
 
 
+@dataclass
+class FoldoverParams:
+    """Inputs to :func:`do_foldover`.
+
+    ``factor=None`` reverses every factor (the full fold-over); a factor name
+    reverses only that one.
+    """
+
+    workbook: Path
+    factor: str | None = None
+
+
 # ──────────────────────────────────────────────────────────────────
 # Internal: build Experiment + parameter-name list from spec
 # ──────────────────────────────────────────────────────────────────
@@ -2566,9 +2578,19 @@ def _cmd_anova(args) -> int:
 
 
 def do_extend(params: ExtendParams) -> dict[str, Any]:
+    from discopt.doe.templates import CLASSICAL_TEMPLATES
+
     wb = Workbook.open(params.workbook)
     if wb.template_name() == "symbolic":
         return _do_extend_symbolic(wb, params)
+    if wb.template_name() in CLASSICAL_TEMPLATES:
+        return _do_extend_classical(wb, params)
+    if wb.template_name() in FOLDOVER_TEMPLATES:
+        raise DoEError(
+            f"workbook uses screening template {wb.template_name()!r}; adding 'optimal' "
+            "runs does not undo its aliasing. Use `discopt doe foldover` to append the "
+            "mirror-image runs, or `discopt doe anova` to analyse what you have."
+        )
 
     from discopt.doe import batch_optimal_experiment
 
@@ -2662,6 +2684,191 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
     }
 
 
+def _do_extend_classical(wb: Workbook, params: ExtendParams) -> dict[str, Any]:
+    """Augment a classical design with D-optimal runs for its own regression basis.
+
+    A central composite, Box-Behnken, definitive screening or Latin hypercube
+    records a regression basis (``--basis``) rather than a model, so there is no
+    ``Experiment`` to rebuild; the basis is enough. Its information matrix does
+    not depend on the responses, so *every* run already in the workbook --
+    measured or still pending -- counts as prior information, and the new runs
+    go where the existing design leaves the coefficients least certain.
+    """
+    from discopt.doe.linear_design import design_row, linear_batch_design
+
+    template = wb.template_name() or ""
+    args = wb.template_args()
+    names = list(wb.parameter_names())
+    specs = wb.input_specs()
+    input_names = [s.name for s in specs]
+    sigma = float(wb.measurement_error() or 1.0)
+    rows = wb.all_runs()
+    batch_idx = wb.next_batch_index()
+
+    X = np.array([design_row(template, args, names, input_names, row) for row in rows], dtype=float)
+    prior = (X.T @ X) / sigma**2 if len(rows) else None
+    criterion = wb.criterion()
+    if criterion not in ("determinant", "trace", "min_eigenvalue", "condition_number"):
+        # Classical workbooks record no optimality criterion of their own.
+        criterion = "determinant"
+
+    result = linear_batch_design(
+        template,
+        int(params.n),
+        parameter_names=names,
+        input_names=input_names,
+        design_bounds={s.name: (s.lb, s.ub) for s in specs},
+        template_args=args,
+        measurement_error=sigma,
+        criterion=criterion,
+        prior_fim=prior,
+        n_starts=int(params.n_starts),
+        seed=wb.seed() + batch_idx,
+    )
+    designs = [{nm: float(d[nm]) for nm in input_names} for d in result.designs]
+    new_ids = wb.append_runs(batch_idx, designs)
+    wb.log("extend", {"n": params.n, "batch": batch_idx, "mode": "classical-augment"})
+    wb.save()
+
+    # Per-parameter geometric precision gain: how much the confidence intervals
+    # shrink on average, from the change in log det of the information.
+    gain = None
+    if prior is not None:
+        s0, ld0 = np.linalg.slogdet(prior)
+        s1, ld1 = np.linalg.slogdet(np.asarray(result.joint_fim, dtype=float))
+        if s0 > 0 and s1 > 0:
+            gain = float(np.exp((ld1 - ld0) / (2 * len(names))))
+
+    return {
+        "workbook_path": str(wb.path),
+        "batch": batch_idx,
+        "new_run_ids": new_ids,
+        "designs": [{"run_id": rid, **d} for rid, d in zip(new_ids, designs)],
+        "criterion": result.criterion,
+        "criterion_value": float(result.criterion_value),
+        "parameter_names": names,
+        "precision_gain": gain,
+        "warnings": [],
+        "next_command": f"discopt doe status {wb.path}",
+    }
+
+
+#: Two-level screening templates that `foldover` can mirror.
+FOLDOVER_TEMPLATES = frozenset({"factorial-2level", "fractional-factorial", "plackett-burman"})
+
+
+def do_foldover(params: FoldoverParams) -> dict[str, Any]:
+    """Append the fold-over of a two-level screening campaign.
+
+    The full fold-over (``factor=None``) reverses every factor's level in each
+    original corner run: in a resolution III design it separates every main
+    effect from every two-factor interaction. Reversing one factor clears that
+    factor's main effect and all its two-factor interactions. Centre runs are not
+    mirrored (their mirror is themselves). The new runs form batch 2, in a fresh
+    seeded random order, so a shift between the two halves shows up as a batch
+    difference -- run them as a block.
+
+    The workbook counterpart of :func:`discopt.doe.fold_over`.
+    """
+    wb = Workbook.open(params.workbook)
+    template = wb.template_name() or ""
+    if template not in FOLDOVER_TEMPLATES:
+        raise DoEError(
+            f"fold-over applies to two-level screening designs "
+            f"({', '.join(sorted(FOLDOVER_TEMPLATES))}); this workbook uses {template!r}"
+        )
+    rows = wb.all_runs()
+    if any(int(r.get("batch") or 1) > 1 for r in rows):
+        raise DoEError(
+            "this campaign has already been followed up; a second fold-over only "
+            "duplicates runs. Analyse what you have with `discopt doe anova`."
+        )
+    input_names = [s.name for s in wb.input_specs()]
+    if params.factor is not None and params.factor not in input_names:
+        raise DoEError(f"unknown factor {params.factor!r}; known: {input_names}")
+
+    def extremes(name: str) -> tuple[Any, Any] | None:
+        seen: list[Any] = []
+        for r in rows:
+            v = r.get(name)
+            if v is not None and v not in seen:
+                seen.append(v)
+        numeric = [v for v in seen if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        if numeric and len(numeric) == len(seen):
+            lo, hi = min(numeric), max(numeric)
+            return (lo, hi) if lo != hi else None
+        return (seen[0], seen[1]) if len(seen) == 2 else None
+
+    levels = {name: extremes(name) for name in input_names}
+    flipped = [params.factor] if params.factor is not None else input_names
+
+    new: list[dict[str, Any]] = []
+    for r in rows:
+        point = {name: r.get(name) for name in input_names}
+        # Only corner runs are mirrored: every factor must sit at one of its two
+        # extreme levels.
+        if any(levels[n] is None or point[n] not in levels[n] for n in input_names):
+            continue
+        for name in flipped:
+            lo, hi = levels[name]  # type: ignore[misc]
+            point[name] = hi if point[name] == lo else lo
+        new.append(point)
+    if not new:
+        raise DoEError("no two-level corner runs to mirror in this workbook")
+
+    import random
+
+    batch_idx = wb.next_batch_index()
+    random.Random(wb.seed() + batch_idx).shuffle(new)
+    new_ids = wb.append_runs(batch_idx, new)
+    wb.log("foldover", {"factor": params.factor, "batch": batch_idx})
+    wb.save()
+
+    resolution = None
+    try:
+        from discopt.doe.aliasing import alias_structure
+
+        resolution = alias_structure(
+            [dict(r) for r in Workbook.open(wb.path).all_runs()], input_names
+        ).resolution
+    except Exception:  # noqa: BLE001 -- best-effort report, never a failure
+        resolution = None
+
+    return {
+        "workbook_path": str(wb.path),
+        "batch": batch_idx,
+        "factor": params.factor,
+        "new_run_ids": new_ids,
+        "designs": [{"run_id": rid, **d} for rid, d in zip(new_ids, new)],
+        "resolution": resolution,
+        "warnings": [
+            "Run the fold-over as its own block: any shift since the first half then "
+            "shows up as a difference between batches rather than in the effects."
+        ],
+        "next_command": f"discopt doe anova {wb.path}",
+    }
+
+
+def _cmd_foldover(args) -> int:
+    try:
+        out = do_foldover(FoldoverParams(workbook=Path(args.workbook), factor=args.factor))
+    except (DoEError, FileNotFoundError, OSError, ValueError, TypeError) as e:
+        return _fail(args, str(e), workbook_path=args.workbook)
+    for _w in out.get("warnings", []):
+        print(f"warning: {_w}", file=sys.stderr)
+    if args.json:
+        print(_dump_json(out, indent=2))
+    else:
+        what = f"factor {out['factor']!r} reversed" if out["factor"] else "every factor reversed"
+        new_ids = out["new_run_ids"]
+        print(f"folded workbook: {out['workbook_path']}")
+        print(f"  batch:        {out['batch']}  (run_ids {min(new_ids)}-{max(new_ids)}, {what})")
+        if out["resolution"] is not None:
+            print(f"  resolution:   {out['resolution']} (original and fold-over together)")
+        print(f"  next:         {out['next_command']}")
+    return 0
+
+
 def _cmd_extend(args) -> int:
     try:
         out = do_extend(
@@ -2682,6 +2889,9 @@ def _cmd_extend(args) -> int:
         new_ids = out["new_run_ids"]
         print(f"  batch:        {out['batch']}  (run_ids {min(new_ids)}-{max(new_ids)})")
         print(f"  criterion:    {out['criterion']} = {out['criterion_value']:.6g}")
+        if out.get("precision_gain"):
+            shrink = (1 - 1 / out["precision_gain"]) * 100
+            print(f"  precision:    confidence intervals ~{shrink:.0f}% narrower on average")
         print("  new runs:")
         if out["designs"]:
             keys = [k for k in out["designs"][0].keys() if k != "run_id"]
@@ -3205,6 +3415,20 @@ def add_subparser(subparsers) -> None:
     )
     _add_json(p_ext)
     p_ext.set_defaults(doe_func=_cmd_extend)
+
+    # --- foldover ---
+    p_fold = doe_sub.add_parser(
+        "foldover",
+        help="Append the mirror-image runs of a 2-level screening design (de-aliasing).",
+    )
+    p_fold.add_argument("workbook", help="Path to the .xlsx workbook.")
+    p_fold.add_argument(
+        "--factor",
+        default=None,
+        help="Reverse only this factor (clears it and its 2FIs); default reverses every factor.",
+    )
+    _add_json(p_fold)
+    p_fold.set_defaults(doe_func=_cmd_foldover)
 
     # --- gui ---
     p_gui = doe_sub.add_parser(
