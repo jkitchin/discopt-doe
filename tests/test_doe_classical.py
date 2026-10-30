@@ -399,14 +399,27 @@ class TestClassicalWorkbooks:
         # `extend` has no meaning for a closed-form design, so don't suggest it.
         assert "anova" in fitted["next_command"]
 
-    def test_extend_is_rejected_with_an_actionable_message(self, tmp_path) -> None:
-        from discopt.doe.cli import DoEError, ExtendParams, do_extend
+    def test_extend_augments_through_the_regression_basis(self, tmp_path) -> None:
+        # There is no Experiment to rebuild for a classical design, but `extend`
+        # no longer needs one: it augments through the recorded basis. (The
+        # detailed checks live in test_doe_cli_followups.py.)
+        from discopt.doe.cli import ExtendParams, do_extend
 
         out = self._new(
             tmp_path, "central-composite", [("a", 0.0, 1.0), ("b", 0.0, 1.0)], basis="quadratic"
         )
-        with pytest.raises((DoEError, ValueError), match="classical design template"):
-            do_extend(ExtendParams(workbook=Path(out["workbook_path"]), n=2, n_starts=1))
+        ext = do_extend(ExtendParams(workbook=Path(out["workbook_path"]), n=2, n_starts=1))
+        assert len(ext["designs"]) == 2
+        assert ext["precision_gain"] > 1.0
+
+    def test_rebuild_experiment_still_explains_the_classical_case(self, tmp_path) -> None:
+        from discopt.doe.workbook import Workbook
+
+        out = self._new(
+            tmp_path, "central-composite", [("a", 0.0, 1.0), ("b", 0.0, 1.0)], basis="quadratic"
+        )
+        with pytest.raises(ValueError, match="classical design template"):
+            Workbook.open(Path(out["workbook_path"])).rebuild_experiment()
 
     def test_latin_hypercube_defaults_to_a_linear_basis(self, tmp_path) -> None:
         out = self._new(

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`discopt doe extend` augments classical designs.** A central composite,
+  Box-Behnken, definitive screening or Latin hypercube campaign used to be
+  refused ("carries a regression basis rather than a model"). It is now
+  augmented through that basis with `linear_batch_design`: the new runs are
+  D-optimal given every run already in the workbook -- measured or still
+  pending, since a linear model's information does not depend on the responses
+  -- so two extends in a row do not pile onto the same points. The result
+  reports `precision_gain`, the average factor by which the coefficient
+  intervals shrink (and the CLI prints it as a percentage).
+- **`discopt doe foldover`** (`do_foldover`, `FoldoverParams`): the workbook
+  counterpart of `fold_over`. Appends the mirror image of every corner run of a
+  `factorial-2level`, `fractional-factorial` or `plackett-burman` campaign as
+  batch 2, in a seeded random order, and reports the combined resolution.
+  `--factor NAME` reverses only that factor. Centre runs are not mirrored, and
+  a campaign that has already been followed up is refused rather than
+  duplicated.
+
+### Changed
+- `extend` on a two-level screening workbook now says why optimal runs are the
+  wrong follow-up and points to `foldover`, instead of the generic "use
+  `anova`" refusal.
+
 ## [0.5.1] - 2026-10-28
 
 ### Fixed
