@@ -255,3 +255,35 @@ def test_latin_subparser_rejects_inapplicable_flags():
     for bad in (["--n", "10"], ["--criterion", "trace"], ["--n-starts", "5"]):
         with pytest.raises(SystemExit):
             top.parse_args([*base, *bad])
+
+
+def test_save_responses_writes_every_response_column(tmp_path: Path) -> None:
+    """The runs grid saves each response column; a cleared cell saves as blank."""
+    import pandas as pd
+
+    from discopt.doe.gui.app import _save_responses
+    from discopt.doe.workbook import InputSpec, ResponseSpec, Workbook
+
+    path = tmp_path / "multi.xlsx"
+    wb = Workbook.create(
+        path,
+        template=None,
+        template_args={},
+        input_specs=[InputSpec("pH", 2.0, 8.0)],
+        criterion="determinant",
+        measurement_error=1.0,
+        seed=1,
+        response_name="y",
+        responses=[ResponseSpec("A_org", 0.02), ResponseSpec("A_aq", 0.02)],
+    )
+    wb.append_runs(1, [{"pH": 3.0}, {"pH": 6.0}])
+    wb.save()
+    edited = pd.DataFrame(
+        {"run_id": [1, 2], "pH": [3.0, 6.0], "A_org": [0.4, None], "A_aq": [None, 0.9]}
+    )
+    assert _save_responses(str(path), edited, ["A_org", "A_aq"]) == 2
+    wb = Workbook.open(path)
+    rows = {int(r["run_id"]): r for r in wb.all_runs()}
+    assert rows[1]["A_org"] == 0.4 and rows[1]["A_aq"] is None
+    assert rows[2]["A_org"] is None and rows[2]["A_aq"] == 0.9
+    assert len(wb.completed_runs()) == 2

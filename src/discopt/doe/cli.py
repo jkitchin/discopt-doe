@@ -41,7 +41,13 @@ from discopt.doe.templates import (
     template_parameter_names,
 )
 from discopt.doe.linear_design import design_row
-from discopt.doe.workbook import InputSpec, Workbook, _load_module_callable
+from discopt.doe.workbook import (
+    InputSpec,
+    ResponseSpec,
+    Workbook,
+    _load_module_callable,
+    module_experiment_with_sigmas,
+)
 
 # Ridge added to the prior FIM whenever no fitted prior exists. Keeps
 # log-det-FIM finite for the very first batch of a linear-in-parameters
@@ -166,13 +172,30 @@ def _experiment_reference_fim(
 
 
 _DEFAULT_CRITERION = "determinant"
-_CRITERION_CHOICES = ("determinant", "trace", "min_eigenvalue", "condition_number")
+# The last two are about *predictions* rather than parameters: the average (I)
+# and worst-case (G) variance of the fitted response over the design box. Every
+# design path builds that region from the factor bounds when none is given.
+_CRITERION_CHOICES = (
+    "determinant",
+    "trace",
+    "min_eigenvalue",
+    "condition_number",
+    "average_variance",
+    "max_variance",
+)
+_PREDICTION_CRITERIA = ("average_variance", "max_variance")
 _CRITERION_ALIASES = {
     "D": "determinant",
     "A": "trace",
     "E": "min_eigenvalue",
     "ME": "condition_number",
+    "I": "average_variance",
+    "G": "max_variance",
 }
+# How `extend` spreads a batch over the design space (see
+# discopt.doe.batch_optimal_experiment). Only models designed through an
+# Experiment have the choice; the basis-driven paths are greedy.
+_BATCH_STRATEGIES = ("greedy", "joint", "penalized")
 
 
 class DoEError(Exception):
@@ -327,6 +350,12 @@ class NewParams:
     # travel with the runs and `anova_report` can pick them up as blocking
     # factors. "replicate" is added automatically by the designs that need it.
     extra_columns: list[str] = field(default_factory=list)
+    # `--module` only: per-response measurement-error overrides. A module
+    # experiment takes its response names and errors from the ExperimentModel
+    # it returns (response_name / measurement_error above are ignored); these
+    # replace the model's sigma for the named responses, in the design and in
+    # every later fit/extend.
+    sigma_overrides: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -356,6 +385,8 @@ class ExtendParams:
     workbook: Path
     n: int
     n_starts: int
+    # "greedy" | "joint" | "penalized"; see batch_optimal_experiment.
+    batch_strategy: str = "greedy"
 
 
 @dataclass
@@ -400,9 +431,37 @@ def _build_experiment_from_new(params: NewParams):
         )
         return exp, names
 
-    exp = _load_module_callable(params.module_callable)  # type: ignore[arg-type]
+    exp, _specs = _module_experiment_from_new(params)
     em = exp.create_model(**params.param_initial_guess)
     return exp, em.parameter_names
+
+
+def _module_experiment_from_new(params: NewParams) -> tuple[Any, list[ResponseSpec]]:
+    """Load a ``--module`` experiment with any ``--sigma`` overrides applied.
+
+    Returns the experiment to design with and the response columns it implies:
+    one per response of the model, with the model's own measurement error unless
+    ``sigma_overrides`` names it.
+    """
+    exp = _load_module_callable(params.module_callable)  # type: ignore[arg-type]
+    em = exp.create_model(**params.param_initial_guess)
+    names = list(em.response_names)
+    overrides = dict(params.sigma_overrides or {})
+    unknown = [k for k in overrides if k not in names]
+    if unknown:
+        raise DoEError(f"--sigma names {unknown} that are not responses of the model ({names})")
+    sigmas = {n: float(overrides.get(n, em.measurement_error[n])) for n in names}
+    try:
+        exp = module_experiment_with_sigmas(exp, sigmas, params.param_initial_guess)
+    except ValueError as e:
+        raise DoEError(str(e)) from e
+    missing_inputs = [n for n in em.design_inputs if n not in {s[0] for s in params.inputs}]
+    if missing_inputs:
+        raise DoEError(
+            f"the model's design input(s) {missing_inputs} have no --bounds; give "
+            "NAME:LB:UB for every design input"
+        )
+    return exp, [ResponseSpec(n, sigmas[n]) for n in names]
 
 
 def _mixture_constraints(
@@ -512,6 +571,66 @@ def _cumulative_fim_from_completed(
     # Ridge last, scaled to what the completed runs actually carry — the sum
     # is its own best scale reference.
     return fim + _scaled_ridge(fim, n_p)
+
+
+def _module_campaign_runs(
+    wb: Workbook, completed: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], int]:
+    """Completed rows as ``campaign_experiment`` runs, plus the count of blank cells.
+
+    Each run carries its ``run_id``, every design input, and every response;
+    a blank response is ``None``, which ``data_from_runs`` drops from the
+    likelihood (a missing value, not a zero).
+    """
+    input_names = [s.name for s in wb.input_specs()]
+    response_names = wb.response_names()
+    runs: list[dict[str, Any]] = []
+    n_missing = 0
+    for row in completed:
+        run: dict[str, Any] = {"run_id": row.get("run_id")}
+        for nm in input_names:
+            v = row.get(nm)
+            if v is None or (isinstance(v, str) and not v.strip()):
+                raise DoEError(
+                    f"run {row.get('run_id')} has a blank value for input {nm!r}; "
+                    "fill it in (or clear its responses to mark the run pending)."
+                )
+            run[nm] = float(v)
+        for rn in response_names:
+            value = _coerce_response(row.get(rn), row.get("run_id"), rn)
+            n_missing += value is None
+            run[rn] = value
+        runs.append(run)
+    return runs, n_missing
+
+
+def _coerce_response(v: Any, run_id: Any, name: str) -> float | None:
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError) as e:
+        raise DoEError(f"run {run_id}: response {name!r} is {v!r}, not a number") from e
+
+
+def _measured_fim(
+    experiment: Any,
+    runs: list[dict[str, Any]],
+    param_values: dict[str, float],
+) -> np.ndarray:
+    """Information in the responses actually measured in ``runs``, at ``param_values``.
+
+    Summing ``compute_fim`` over runs counts every response of every run; with
+    blank cells that overstates what is known. The campaign holds every run at
+    its own conditions, and its weighted Jacobian over just the measured
+    entries gives the information they carry.
+    """
+    from discopt.doe.runs import _weighted_fit, campaign_experiment
+
+    camp = campaign_experiment(experiment, runs)
+    data = camp.data_from_runs(runs)
+    fixed = {n: float(param_values.get(n, 0.0)) for n in camp.parameter_names}
+    return np.asarray(_weighted_fit(camp, data, initial_guess=None, fixed_parameters=fixed)["fim"])
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -683,7 +802,11 @@ def _validate_new_column_names(params: NewParams) -> None:
     else:
         names = [s[0] for s in params.inputs]
 
-    reserved = {"run_id", "batch", "measured_at", "replicate", params.response_name}
+    # A module experiment's response columns come from its model, so they are
+    # checked against the inputs when the model is loaded (Workbook.create).
+    reserved = {"run_id", "batch", "measured_at", "replicate"}
+    if not params.module_callable:
+        reserved.add(params.response_name)
     seen: set[str] = set()
     for name in names:
         if name in reserved:
@@ -742,9 +865,15 @@ def do_new(params: NewParams) -> dict[str, Any]:
     if params.use_linear_design:
         return _do_new_linear(params)
 
-    experiment, parameter_names = _build_experiment_from_new(params)
+    response_specs: list[ResponseSpec] | None = None
+    if params.module_callable and params.template is None:
+        experiment, response_specs = _module_experiment_from_new(params)
+        parameter_names = experiment.create_model(**params.param_initial_guess).parameter_names
+    else:
+        experiment, parameter_names = _build_experiment_from_new(params)
     bounds = _design_bounds(params.inputs)
     input_names = [s[0] for s in params.inputs]
+    _check_prediction_criterion(params.criterion, params.template)
 
     n_p = len(parameter_names)
 
@@ -815,6 +944,7 @@ def do_new(params: NewParams) -> dict[str, Any]:
         module_callable=params.module_callable,
         param_initial_guess=params.param_initial_guess or None,
         extra_columns=_extra_columns(params),
+        responses=response_specs,
     )
     new_ids = wb.append_runs(1, designs)
     wb.log(
@@ -842,8 +972,24 @@ def do_new(params: NewParams) -> dict[str, Any]:
         "criterion_value": criterion_value,
         "parameter_names": parameter_names,
         "n_parameters": len(parameter_names),
+        "response_names": wb.response_names(),
         "next_command": f"discopt doe status {wb.path}",
     }
+
+
+def _check_prediction_criterion(criterion: str, template: str | None) -> None:
+    """Reject I/G on a mixture template designed through an Experiment.
+
+    That path samples the prediction region from the factor box, which for a
+    mixture is mostly off the simplex the runs live on, so the criterion would
+    average over blends that cannot be made.
+    """
+    if criterion in _PREDICTION_CRITERIA and template and template.startswith("scheffe-"):
+        raise DoEError(
+            f"criterion {criterion!r} needs a prediction region on the mixture simplex; "
+            "use determinant/trace/min_eigenvalue/condition_number for a Scheffé "
+            "template, or build the design in Python with prediction_points="
+        )
 
 
 def _do_new_factorial(params: NewParams) -> dict[str, Any]:
@@ -1094,6 +1240,142 @@ def _do_fit_symbolic(wb: Workbook, completed: list[dict[str, Any]]) -> dict[str,
         "expression": model.source,
         "converged": out["success"],
         "solver_message": out["message"],
+        "next_command": f"discopt doe extend {wb.path} --n N",
+    }
+
+
+def _do_fit_module(wb: Workbook, completed: list[dict[str, Any]]) -> dict[str, Any]:
+    """Fit a user-defined ``--module`` experiment to the completed runs.
+
+    This is the estimate :func:`discopt.doe.sequential_doe` makes from
+    ``initial_runs``: the per-run model is stacked over every completed run's
+    conditions (:func:`discopt.doe.campaign_experiment`), blank responses are
+    dropped from the likelihood, and the parameters are found by weighted least
+    squares starting from the campaign's parameter guesses. Uncertainty uses the
+    declared measurement errors (``covariance = inv(FIM)``), as the Python API
+    does; the reduced chi-square in the summary says whether those errors look
+    right for the scatter actually seen.
+    """
+    from scipy.stats import t as t_dist
+
+    from discopt.doe.runs import campaign_experiment
+
+    experiment, names = wb.rebuild_experiment()
+    runs, n_missing = _module_campaign_runs(wb, completed)
+    try:
+        camp = campaign_experiment(experiment, runs)
+        data = camp.data_from_runs(runs)
+        est = camp.estimate(data, initial_guess=wb.param_initial_guess())
+    except (ValueError, RuntimeError, KeyError) as e:
+        raise DoEError(f"fit failed: {e}") from e
+
+    names = list(est.parameter_names)
+    n_obs = int(est.n_observations)
+    n_p = len(names)
+    dof = n_obs - n_p
+    se = est.standard_errors
+    cis = est.confidence_intervals
+    std_errors = {n: float(se[n]) for n in names}
+    ci_map = {n: (float(cis[n][0]), float(cis[n][1])) for n in names}
+    estimates = {n: float(est.parameters[n]) for n in names}
+
+    # The FIM is on the declared-sigma scale and the standard errors come from
+    # it directly, so the "fitted sigma" that turns one into the other is the
+    # declared one (read_covariance then returns inv(FIM) unchanged).
+    declared = wb.measurement_error()
+    wb.write_parameters(
+        names, estimates, std_errors, ci_map, sigma=declared, sigma_source="declared"
+    )
+    fim = np.asarray(est.fim, dtype=np.float64)
+    wb.write_fim(fim, names)
+
+    deviance = float(est.objective)
+    reduced_chi2 = deviance / dof if dof > 0 else float("nan")
+    coefficients: list[dict[str, Any]] = []
+    for n in names:
+        s_ = std_errors[n]
+        t_stat = estimates[n] / s_ if s_ > 0 and np.isfinite(s_) else float("nan")
+        p_val = (
+            float(2.0 * t_dist.sf(abs(t_stat), df=dof))
+            if dof > 0 and np.isfinite(t_stat)
+            else float("nan")
+        )
+        coefficients.append(
+            {
+                "name": n,
+                "estimate": estimates[n],
+                "std_error": s_,
+                "t_statistic": float(t_stat),
+                "p_value": p_val,
+                "ci_lower_95": ci_map[n][0],
+                "ci_upper_95": ci_map[n][1],
+            }
+        )
+    fit_summary: list[tuple[str, Any]] = [
+        ("Observations", n_obs),
+        ("Missing responses", n_missing),
+        ("Parameters", n_p),
+        ("Residual df", dof),
+        ("Weighted SSR (chi-square)", deviance),
+        ("Reduced chi-square", reduced_chi2),
+        ("Uncertainty from", "declared measurement errors"),
+    ]
+    wb.write_anova(coefficients=coefficients, anova_rows=[], fit_summary=fit_summary)
+    converged = bool(getattr(est.solve_result, "success", True))
+    wb.log(
+        "fit",
+        {
+            "module_callable": wb.module_callable(),
+            "n_observations": n_obs,
+            "n_missing": n_missing,
+            "chi_square": deviance,
+            "converged": converged,
+        },
+    )
+    wb.save()
+
+    warnings_out: list[str] = []
+    if dof <= 0:
+        warnings_out.append(
+            f"{n_obs} measured value(s) for {n_p} parameter(s): no residual degrees of "
+            "freedom, so the confidence intervals rest entirely on the declared errors."
+        )
+    if not converged:
+        warnings_out.append(
+            "the least-squares solver did not report convergence: "
+            f"{getattr(est.solve_result, 'message', '')}"
+        )
+
+    sign, logdet = np.linalg.slogdet(fim)
+    return {
+        "workbook_path": str(wb.path),
+        "parameters": [
+            {
+                "name": n,
+                "estimate": estimates[n],
+                "std_error": std_errors[n],
+                "ci_lower_95": ci_map[n][0],
+                "ci_upper_95": ci_map[n][1],
+            }
+            for n in names
+        ],
+        "parameter_names": names,
+        "response_names": wb.response_names(),
+        "n_observations": n_obs,
+        "n_missing": n_missing,
+        "objective": deviance,
+        "reduced_chi_square": reduced_chi2,
+        "sigma": declared,
+        "sigma_source": "declared",
+        "degrees_of_freedom": max(0, dof),
+        "log_det_fim": float(logdet) if sign > 0 else float("-inf"),
+        "covariance": np.asarray(est.covariance, dtype=np.float64).tolist(),
+        "coefficients": coefficients,
+        "regression_anova": [],
+        "summary": dict(fit_summary),
+        "converged": converged,
+        "solver_message": str(getattr(est.solve_result, "message", "")),
+        "warnings": warnings_out,
         "next_command": f"discopt doe extend {wb.path} --n N",
     }
 
@@ -1866,14 +2148,27 @@ def _cmd_new(args) -> int:
             f"{output} already exists. Pass --force to overwrite.",
             workbook_path=str(output),
         )
-    if float(args.error) <= 0.0:
+    is_module = bool(getattr(args, "_is_module", False))
+    if is_module and (args.response is not None or args.error is not None):
+        return _fail(
+            args,
+            "a --module experiment takes its response names and measurement errors from "
+            "the ExperimentModel it returns; drop --response/--error and override a "
+            "response's error with --sigma NAME=VALUE.",
+            workbook_path=str(output),
+        )
+    error = 1.0 if args.error is None else float(args.error)
+    if error <= 0.0:
         return _fail(
             args,
             f"--error must be positive (got {args.error}); it is the "
             "measurement standard deviation and appears as 1/sigma^2 in the FIM.",
             workbook_path=str(output),
         )
-    is_module = bool(getattr(args, "_is_module", False))
+    sigma_overrides = dict(getattr(args, "sigma", None) or [])
+    bad_sigma = [k for k, v in sigma_overrides.items() if not v > 0.0]
+    if bad_sigma:
+        return _fail(args, f"--sigma must be positive (got {bad_sigma})", workbook_path=str(output))
     inputs: list[tuple[str, float, float]] = list(getattr(args, "input", None) or []) + list(
         getattr(args, "bounds", None) or []
     )
@@ -1891,8 +2186,8 @@ def _cmd_new(args) -> int:
         # that use them (see the subparser wiring); default the rest.
         n=int(getattr(args, "n", 1) or 1),
         inputs=inputs,
-        response_name=args.response,
-        measurement_error=float(args.error),
+        response_name=args.response or "y",
+        measurement_error=error,
         criterion=_normalize_criterion(getattr(args, "criterion", _DEFAULT_CRITERION)),
         seed=int(args.seed),
         n_starts=int(getattr(args, "n_starts", 10) or 10),
@@ -1925,6 +2220,7 @@ def _cmd_new(args) -> int:
             getattr(args, "optimize_acquisition", "expected_improvement") or "expected_improvement"
         ),
         force=bool(getattr(args, "force", False)),
+        sigma_overrides=sigma_overrides,
     )
     try:
         out = do_new(params)
@@ -1972,6 +2268,8 @@ def _print_new_human(out: dict[str, Any]) -> None:
 def do_status(params: dict[str, Any]) -> dict[str, Any]:
     wb = Workbook.open(Path(params["workbook"]))
     response = wb.response_name()
+    response_specs = wb.response_specs()
+    response_label = ", ".join(r.name for r in response_specs)
     all_runs = wb.all_runs()
     pending = wb.pending_runs()
     completed = wb.completed_runs()
@@ -1998,7 +2296,7 @@ def do_status(params: dict[str, Any]) -> dict[str, Any]:
             )
         else:
             next_command = (
-                f"# fill in '{response}' column for run_ids "
+                f"# fill in '{response_label}' for run_ids "
                 f"{', '.join(str(r['run_id']) for r in pending)}, save, then: "
                 f"discopt doe {analyze_verb} {wb.path}"
             )
@@ -2018,6 +2316,8 @@ def do_status(params: dict[str, Any]) -> dict[str, Any]:
         "template_args": wb.template_args(),
         "module_callable": wb.module_callable(),
         "response_name": response,
+        "response_names": [r.name for r in response_specs],
+        "responses": [r.to_dict() for r in response_specs],
         "seed": wb.seed(),
         "input_specs": [s.to_dict() for s in wb.input_specs()],
         "n_total": len(all_runs),
@@ -2054,7 +2354,13 @@ def _cmd_status(args) -> int:
                 parts.append(f"{s['name']} in [{s['lb']}, {s['ub']}]")
         inputs_str = ", ".join(parts)
         print(f"  inputs:      {inputs_str}")
-        print(f"  response:    {out['response_name']}")
+        if len(out["responses"]) > 1:
+            print(
+                "  responses:   "
+                + ", ".join(f"{r['name']} (sigma {r['sigma']:g})" for r in out["responses"])
+            )
+        else:
+            print(f"  response:    {out['response_name']}")
         print(
             f"  runs:        {out['n_completed']} completed / "
             f"{out['n_pending']} pending / {out['n_total']} total"
@@ -2088,9 +2394,9 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
     Matrix is ``Σᵢ FIM(dᵢ) = XᵀX / σ²`` and is written to the workbook
     for use as ``prior_fim`` by a subsequent ``extend``.
 
-    Fitting for ``--module`` experiments is not yet implemented; the
-    user should call :func:`discopt.estimate.estimate_parameters`
-    directly until that path is wired through.
+    A ``--module`` experiment is fitted by weighted nonlinear least squares
+    over every measured response of every completed run (see
+    :func:`_do_fit_module`).
     """
     wb = Workbook.open(Path(params["workbook"]))
     response = wb.response_name()
@@ -2100,10 +2406,7 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
 
     template = wb.template_name()
     if not template:
-        raise DoEError(
-            "`discopt doe fit` for --module experiments is not yet implemented; "
-            "use `discopt.estimate.estimate_parameters` directly in Python."
-        )
+        return _do_fit_module(wb, completed)
 
     if template == "symbolic":
         return _do_fit_symbolic(wb, completed)
@@ -2391,12 +2694,18 @@ def _cmd_fit(args) -> int:
         out = do_fit({"workbook": args.workbook})
     except (DoEError, FileNotFoundError, OSError, ValueError, TypeError, RuntimeError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
+    for _w in out.get("warnings", []):
+        print(f"warning: {_w}", file=sys.stderr)
     if args.json:
         print(_dump_json(out, indent=2))
     else:
         print(f"fit complete: {out['workbook_path']}")
         print(f"  observations: {out['n_observations']}")
+        if out.get("n_missing"):
+            print(f"  missing:      {out['n_missing']} blank response cell(s), not fitted")
         print(f"  objective:    {out['objective']:.6g}")
+        if out.get("reduced_chi_square") is not None and math.isfinite(out["reduced_chi_square"]):
+            print(f"  reduced chi2: {out['reduced_chi_square']:.4g}")
         print(f"  log-det FIM:  {out['log_det_fim']:.6g}")
         print("  parameters:")
         for p in out["parameters"]:
@@ -2580,7 +2889,20 @@ def _cmd_anova(args) -> int:
 def do_extend(params: ExtendParams) -> dict[str, Any]:
     from discopt.doe.templates import CLASSICAL_TEMPLATES
 
+    strategy = str(params.batch_strategy or "greedy")
+    if strategy not in _BATCH_STRATEGIES:
+        raise DoEError(
+            f"unknown batch strategy {strategy!r}; choose from {list(_BATCH_STRATEGIES)}"
+        )
     wb = Workbook.open(params.workbook)
+    if strategy != "greedy" and (
+        wb.template_name() == "symbolic" or wb.template_name() in CLASSICAL_TEMPLATES
+    ):
+        raise DoEError(
+            f"batch strategy {strategy!r} is only available for models designed through an "
+            f"Experiment (the built-in parametric templates and --module); template "
+            f"{wb.template_name()!r} designs its batches greedily."
+        )
     if wb.template_name() == "symbolic":
         return _do_extend_symbolic(wb, params)
     if wb.template_name() in CLASSICAL_TEMPLATES:
@@ -2616,15 +2938,27 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
 
     param_values = _param_values_for_design(parameter_names, wb)
 
+    template = wb.template_name()
+    _check_prediction_criterion(wb.criterion(), template)
+
     cached = wb.read_fim()
     if cached is not None and cached[1] == parameter_names:
+        # Written by `fit` at the estimates the design below is centred on.
         prior_fim = cached[0]
+    elif not template and completed and _any_blank_response(wb, completed):
+        # Not fitted yet and some responses are missing: count only what was
+        # measured (a per-run compute_fim would count every response).
+        runs, _ = _module_campaign_runs(wb, completed)
+        try:
+            info = _measured_fim(experiment, runs, param_values)
+        except (ValueError, RuntimeError) as e:
+            raise DoEError(f"could not evaluate the information in the completed runs: {e}") from e
+        prior_fim = info + _scaled_ridge(info, len(parameter_names))
     else:
         prior_fim = _cumulative_fim_from_completed(
             experiment, parameter_names, completed, input_names, param_values
         )
 
-    template = wb.template_name()
     template_args = wb.template_args()
     mixture_total = template_args.get("mixture_total")
     eq_cons, proj = _mixture_constraints(
@@ -2655,6 +2989,7 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
             bounds,
             n_experiments=params.n,
             criterion=wb.criterion(),
+            strategy=strategy,
             prior_fim=prior_fim,
             equality_constraints=eq_cons,
             feasible_projection=proj,
@@ -2665,7 +3000,7 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
         criterion_value = float(batch.criterion_value)
 
     new_ids = wb.append_runs(batch_idx, designs)
-    wb.log("extend", {"n": params.n, "batch": batch_idx})
+    wb.log("extend", {"n": params.n, "batch": batch_idx, "batch_strategy": strategy})
     wb.save()
 
     return {
@@ -2678,10 +3013,21 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
         ],
         "criterion": wb.criterion(),
         "criterion_value": criterion_value,
+        "batch_strategy": strategy,
         "parameter_names": parameter_names,
+        "design_parameters": param_values,
         "warnings": warnings_out,
         "next_command": f"discopt doe status {wb.path}",
     }
+
+
+def _any_blank_response(wb: Workbook, rows: list[dict[str, Any]]) -> bool:
+    names = wb.response_names()
+    return len(names) > 1 and any(
+        r.get(n) is None or (isinstance(r.get(n), str) and not r.get(n).strip())
+        for r in rows
+        for n in names
+    )
 
 
 def _do_extend_classical(wb: Workbook, params: ExtendParams) -> dict[str, Any]:
@@ -2708,7 +3054,7 @@ def _do_extend_classical(wb: Workbook, params: ExtendParams) -> dict[str, Any]:
     X = np.array([design_row(template, args, names, input_names, row) for row in rows], dtype=float)
     prior = (X.T @ X) / sigma**2 if len(rows) else None
     criterion = wb.criterion()
-    if criterion not in ("determinant", "trace", "min_eigenvalue", "condition_number"):
+    if criterion not in _CRITERION_CHOICES:
         # Classical workbooks record no optimality criterion of their own.
         criterion = "determinant"
 
@@ -2876,6 +3222,7 @@ def _cmd_extend(args) -> int:
                 workbook=Path(args.workbook),
                 n=int(args.n),
                 n_starts=int(args.n_starts),
+                batch_strategy=str(getattr(args, "batch_strategy", "greedy") or "greedy"),
             )
         )
     except (DoEError, FileNotFoundError, OSError, ValueError, TypeError, RuntimeError) as e:
@@ -2889,6 +3236,8 @@ def _cmd_extend(args) -> int:
         new_ids = out["new_run_ids"]
         print(f"  batch:        {out['batch']}  (run_ids {min(new_ids)}-{max(new_ids)})")
         print(f"  criterion:    {out['criterion']} = {out['criterion_value']:.6g}")
+        if out.get("batch_strategy") and out["batch_strategy"] != "greedy":
+            print(f"  strategy:     {out['batch_strategy']}")
         if out.get("precision_gain"):
             shrink = (1 - 1 / out["precision_gain"]) * 100
             print(f"  precision:    confidence intervals ~{shrink:.0f}% narrower on average")
@@ -3288,10 +3637,26 @@ def add_subparser(subparsers) -> None:
         required=True,
         help="Prior parameter value as NAME=VALUE (repeatable).",
     )
+    p_module.add_argument(
+        "--sigma",
+        action="append",
+        type=_parse_kv_float,
+        default=None,
+        metavar="RESPONSE=VALUE",
+        help=(
+            "Override one response's measurement standard deviation (repeatable). "
+            "Response names and their default errors come from the model; the "
+            "runs sheet gets one column per response."
+        ),
+    )
     _add_common_new_options(p_module)
     _add_run_count_option(p_module)
     _add_design_search_options(p_module)
-    p_module.set_defaults(doe_func=_cmd_new, _is_module=True, input=None, degree=None)
+    # Responses come from the model: --response/--error are rejected for a
+    # module, which needs to tell "not given" from the template defaults.
+    p_module.set_defaults(
+        doe_func=_cmd_new, _is_module=True, input=None, degree=None, response=None, error=None
+    )
 
     # --- status ---
     p_status = doe_sub.add_parser("status", help="Show campaign state and suggested next step.")
@@ -3413,6 +3778,17 @@ def add_subparser(subparsers) -> None:
         default=10,
         help="Multi-start budget for each single-design search (default 10).",
     )
+    p_ext.add_argument(
+        "--batch-strategy",
+        choices=_BATCH_STRATEGIES,
+        default="greedy",
+        help=(
+            "How a batch of --n > 1 runs is searched: 'greedy' adds one run at a time "
+            "(then exchange passes), 'joint' optimizes all runs together, 'penalized' "
+            "is greedy with a minimum spacing. Parametric templates and --module only "
+            "(default greedy)."
+        ),
+    )
     _add_json(p_ext)
     p_ext.set_defaults(doe_func=_cmd_extend)
 
@@ -3501,7 +3877,10 @@ def _add_design_search_options(sp) -> None:
         "--criterion",
         default=_DEFAULT_CRITERION,
         choices=(*_CRITERION_CHOICES, *_CRITERION_ALIASES.keys()),
-        help="Optimality criterion (default determinant aka D).",
+        help=(
+            "Optimality criterion (default determinant aka D). average_variance (I) and "
+            "max_variance (G) target prediction variance over the factor box."
+        ),
     )
     sp.add_argument(
         "--n-starts",

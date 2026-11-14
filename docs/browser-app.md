@@ -106,6 +106,19 @@ discopt doe extend campaign.xlsx --n 4
 which re-fits the parameters and centres the next batch on the new estimates.
 See {doc}`the CLI workflow <notebooks/doe_cli>`.
 
+You do not need a Python setup for that. With [uv](https://docs.astral.sh/uv/)
+installed, one command downloads everything into uv's cache, jax included,
+and opens the full workbook GUI, where `extend`, `optimize` and `--module` all
+work:
+
+```bash
+uvx --from discopt --with "discopt-doe[gui]" discopt doe gui
+```
+
+The first run is a large download (well over a gigabyte), and later ones start
+from the cache. Prefix any CLI verb the same way, e.g. `uvx --from discopt --with
+discopt-doe discopt doe extend campaign.xlsx --n 4`.
+
 ## How it works, and why the limits are where they are
 
 The app is [Pyodide](https://pyodide.org) — CPython compiled to WebAssembly —

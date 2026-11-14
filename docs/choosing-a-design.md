@@ -289,11 +289,16 @@ The optimal-design templates take a **criterion** — a single number summarisin
 | `trace` (A) | minimize $\operatorname{tr}\mathrm{FIM}^{-1}$ | You care about the average of the individual parameter variances rather than their joint volume. |
 | `min_eigenvalue` (E) | maximize $\lambda_{\min}$ | One combination of parameters is much worse determined than the rest and you want to fix the worst case. |
 | `condition_number` (ME) | minimize $\lambda_{\max}/\lambda_{\min}$ | The parameters are badly correlated and you want a *balanced* design more than a maximally informative one. |
+| `average_variance` (I) | minimize the average of $f(x)^\top\mathrm{FIM}^{-1}f(x)$ over the factor box | You will use the model to **predict** across the region, and you care about the typical prediction error more than any one parameter. |
+| `max_variance` (G) | minimize the largest of $f(x)^\top\mathrm{FIM}^{-1}f(x)$ over the factor box | As for I, but you need the *worst* prediction anywhere in the region to be good. |
 
 Start with `determinant`. Switch to `min_eigenvalue` or `condition_number` when
 a fit comes back with one enormous standard error, or with two parameters whose
 errors are nearly perfectly correlated — that is the geometry those criteria
-are for.
+are for. Use I or G when the goal is a model that predicts well, not
+parameters you will report. Both measure prediction variance over the
+factor bounds. On the command line they are refused for the Scheffé mixture
+templates, because there the factor box is mostly blends that cannot be made.
 
 ## How many runs?
 

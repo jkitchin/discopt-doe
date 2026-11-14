@@ -49,6 +49,14 @@ Or with uv:
 uv pip install "discopt-doe[gui]"
 ```
 
+Or skip the install and launch the workbook GUI directly. uv fetches Python,
+jax and the rest into its cache on the first run (well over a gigabyte), and
+later runs start from there:
+
+```bash
+uvx --from discopt --with "discopt-doe[gui]" discopt doe gui
+```
+
 To work on the package itself, install from source:
 
 ```bash

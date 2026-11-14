@@ -10,16 +10,21 @@ all live inside the file.
 Sheets
 ------
 ``runs``
-    Columns: ``run_id``, ``batch``, ``<input_1>``, …, ``<response>``,
-    ``measured_at``. One row per recommended experiment. The CLI
-    treats a row as "completed" when its response column is non-empty.
+    Columns: ``run_id``, ``batch``, ``<input_1>``, …, ``<response_1>``, …,
+    ``measured_at``. One row per recommended experiment. Most campaigns have
+    one response column; a ``--module`` experiment gets one per response of its
+    model. The CLI treats a row as "completed" when *any* response column is
+    non-empty; blank responses in a completed row are missing values, dropped
+    from the likelihood rather than imputed.
 
 ``metadata``
     Key/value sheet. Includes ``discopt_version``, ``template``,
     ``template_args`` (JSON), ``input_specs`` (JSON list of
     ``{name, lb, ub}``), ``criterion``, ``measurement_error``, ``seed``,
-    ``response_name``, ``module_callable`` (escape-hatch only), and
-    ``param_initial_guess`` (JSON, escape-hatch only). Sufficient to
+    ``response_name``, ``responses`` (JSON list of ``{name, sigma}``, one
+    per response column; ``response_name``/``measurement_error`` mirror the
+    first entry for older readers), ``module_callable`` (escape-hatch only),
+    and ``param_initial_guess`` (JSON, escape-hatch only). Sufficient to
     re-build the :class:`~discopt.estimate.Experiment` in
     :meth:`Workbook.rebuild_experiment`.
 
@@ -160,6 +165,21 @@ class InputSpec:
         return cls(name=d["name"], lb=float(d["lb"]), ub=float(d["ub"]))
 
 
+@dataclass
+class ResponseSpec:
+    """One measured response: its column name and measurement standard deviation."""
+
+    name: str
+    sigma: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "sigma": self.sigma}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "ResponseSpec":
+        return cls(name=str(d["name"]), sigma=float(d["sigma"]))
+
+
 def _require_openpyxl():
     try:
         import openpyxl  # noqa: F401
@@ -209,22 +229,42 @@ class Workbook:
         module_callable: str | None = None,
         param_initial_guess: dict[str, float] | None = None,
         extra_columns: Sequence[str] = (),
+        responses: Sequence[ResponseSpec] | None = None,
     ) -> "Workbook":
+        """Write a new campaign workbook.
+
+        ``responses`` lists every measured response (one runs-sheet column
+        each). When omitted the campaign has the single response
+        ``response_name`` with standard deviation ``measurement_error``; when
+        given, those two arguments are ignored and the first entry fills the
+        legacy ``response_name``/``measurement_error`` metadata.
+        """
         _require_openpyxl()
         from openpyxl import Workbook as _OpenpyxlWorkbook
+
+        specs = (
+            [ResponseSpec(str(r.name), float(r.sigma)) for r in responses]
+            if responses
+            else [ResponseSpec(str(response_name), float(measurement_error))]
+        )
+        response_names = [r.name for r in specs]
+        if len(set(response_names)) != len(response_names):
+            raise ValueError(f"duplicate response names in {response_names}")
+        response_name = specs[0].name
+        measurement_error = specs[0].sigma
 
         # Validate column names up front: duplicates or collisions with the
         # reserved/bookkeeping columns silently corrupt the runs sheet
         # (dict(zip(headers, row)) keeps only the last duplicate, so reads pick
         # the wrong column).
-        reserved = {"run_id", "batch", "measured_at", response_name}
+        reserved = {"run_id", "batch", "measured_at", *response_names}
         input_names = [s.name for s in input_specs]
         seen: set[str] = set()
         for name in [*input_names, *extra_columns]:
             if name in reserved:
                 raise ValueError(
-                    f"column name {name!r} is reserved (response is "
-                    f"{response_name!r}); rename the input/factor."
+                    f"column name {name!r} is reserved (responses are "
+                    f"{response_names}); rename the input/factor."
                 )
             if name in seen:
                 raise ValueError(f"duplicate column name {name!r}; names must be unique.")
@@ -268,6 +308,7 @@ class Workbook:
             ("measurement_error", float(measurement_error)),
             ("seed", int(seed)),
             ("response_name", response_name),
+            ("responses", json.dumps([r.to_dict() for r in specs])),
             ("module_callable", module_callable or ""),
             (
                 "param_initial_guess",
@@ -298,7 +339,8 @@ class Workbook:
             ["run_id", "batch"]
             + [s.name for s in input_specs]
             + list(extra_columns)
-            + [response_name, "measured_at", "run_order"]
+            + response_names
+            + ["measured_at", "run_order"]
         )
         runs_sheet.append(header)
 
@@ -396,7 +438,33 @@ class Workbook:
         return [InputSpec.from_dict(d) for d in json.loads(raw)]
 
     def response_name(self) -> str:
-        return str(self.metadata().get("response_name") or "y")
+        """The first (for most campaigns, the only) response column."""
+        return self.response_names()[0]
+
+    def response_specs(self) -> list[ResponseSpec]:
+        """Every measured response, in column order.
+
+        Workbooks written before multi-response support carry only the scalar
+        ``response_name``/``measurement_error`` keys; they read back as one
+        response.
+        """
+        meta = self.metadata()
+        raw = meta.get("responses")
+        if raw:
+            specs = [ResponseSpec.from_dict(d) for d in json.loads(raw)]
+            if specs:
+                return specs
+        return [ResponseSpec(str(meta.get("response_name") or "y"), self.measurement_error())]
+
+    def response_names(self) -> list[str]:
+        return [r.name for r in self.response_specs()]
+
+    def response_sigmas(self) -> dict[str, float]:
+        return {r.name: r.sigma for r in self.response_specs()}
+
+    def _has_response(self, row: Mapping[str, Any], names: Sequence[str] | None = None) -> bool:
+        names = self.response_names() if names is None else names
+        return any(_coerce_float(row.get(n)) is not None for n in names)
 
     def template_name(self) -> str | None:
         v = self.metadata().get("template")
@@ -453,7 +521,7 @@ class Workbook:
         # layout has grown a column before (run_order) and slicing is how that
         # kind of change turns into a silently misplaced value.
         headers = self._runs_headers()
-        automatic = {"run_id", "batch", self.response_name(), "measured_at", "run_order"}
+        automatic = {"run_id", "batch", *self.response_names(), "measured_at", "run_order"}
         middle = [h for h in headers[2:] if h not in automatic] or self._input_column_names()
         # Determine next run_id
         existing_ids = []
@@ -552,8 +620,7 @@ class Workbook:
         """
         sheet = self._wb[SHEET_RUNS]
         headers = self._runs_headers()
-        response = self.response_name()
-        resp_idx = headers.index(response) if response in headers else None
+        resp_idx = {headers.index(r) for r in self.response_names() if r in headers}
         cached_rows: list[list[Any]] | None = None
         out: list[dict[str, Any]] = []
         for r_i, row in enumerate(sheet.iter_rows(min_row=2, values_only=True)):
@@ -566,7 +633,7 @@ class Workbook:
                 if cached_rows is None:
                     cached_rows = self._cached_runs_rows()
                 cached = cached_rows[r_i][c_i] if r_i < len(cached_rows) else None
-                if cached is None and c_i == resp_idx:
+                if cached is None and c_i in resp_idx:
                     raise ValueError(
                         f"run {row[0]}: response cell {headers[c_i]!r} contains "
                         f"the formula {val!r} but no computed value is stored. "
@@ -580,7 +647,7 @@ class Workbook:
 
     def record_responses(
         self,
-        responses: Mapping[int, float | None] | Sequence[tuple[int, float | None]],
+        responses: Mapping[int, Any] | Sequence[tuple[int, Any]],
         *,
         extra: Mapping[int, Mapping[str, Any]] | None = None,
         timestamp: bool = True,
@@ -590,8 +657,10 @@ class Workbook:
         Parameters
         ----------
         responses : mapping run_id -> value, or sequence of (run_id, value)
-            The response for each run. ``None`` clears a cell, returning the
-            run to pending.
+            The response for each run. A number fills the first response
+            column; a mapping ``{response_name: value}`` fills several (any
+            response it leaves out is untouched). ``None`` clears a cell; a run
+            with every response cleared is pending again.
         extra : mapping run_id -> {column: value}, optional
             Other columns to fill for the same runs, e.g. a feasibility flag
             created with ``extra_columns``. Only existing columns may be set.
@@ -606,7 +675,7 @@ class Workbook:
         pairs = list(responses.items()) if isinstance(responses, Mapping) else list(responses)
         sheet = self._wb[SHEET_RUNS]
         headers = self._runs_headers()
-        response = self.response_name()
+        response_names = self.response_names()
         col = {h: i + 1 for i, h in enumerate(headers)}
         rows_by_id: dict[int, int] = {}
         for r_i, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
@@ -621,7 +690,7 @@ class Workbook:
         ]
         if unknown:
             raise ValueError(f"no run(s) with run_id {sorted(set(unknown))} in {self.path}")
-        protected = {"run_id", "batch", response, "measured_at"}
+        protected = {"run_id", "batch", *response_names, "measured_at"}
         for fields in extra.values():
             bad = [c for c in fields if c not in col or c in protected]
             if bad:
@@ -630,28 +699,49 @@ class Workbook:
                     f"{[h for h in headers if h not in protected]}"
                 )
         stamp = datetime.now().isoformat(timespec="seconds")
+        # Validate everything before writing anything, so a bad value cannot
+        # leave the sheet half-updated.
+        planned: list[tuple[int, dict[str, float | None]]] = []
         for rid, value in pairs:
-            r_i = rows_by_id[int(rid)]
-            if value is None:
-                sheet.cell(row=r_i, column=col[response]).value = None
-                continue
-            v = float(value)
-            if not np.isfinite(v):
-                raise ValueError(f"run {rid}: response must be finite, got {value!r}")
-            sheet.cell(row=r_i, column=col[response]).value = v
-            if timestamp and "measured_at" in col:
+            per = dict(value) if isinstance(value, Mapping) else {response_names[0]: value}
+            unknown_resp = [k for k in per if k not in response_names]
+            if unknown_resp:
+                raise ValueError(
+                    f"run {rid}: {unknown_resp} are not response columns ({response_names})"
+                )
+            clean: dict[str, float | None] = {}
+            for name, v in per.items():
+                if v is None:
+                    clean[name] = None
+                    continue
+                f = float(v)
+                if not np.isfinite(f):
+                    raise ValueError(f"run {rid}: response {name!r} must be finite, got {v!r}")
+                clean[name] = f
+            planned.append((rows_by_id[int(rid)], clean))
+        for r_i, clean in planned:
+            for name, f in clean.items():
+                sheet.cell(row=r_i, column=col[name]).value = f
+            if timestamp and "measured_at" in col and any(f is not None for f in clean.values()):
                 sheet.cell(row=r_i, column=col["measured_at"]).value = stamp
         for rid, fields in extra.items():
             for c, v in fields.items():
                 sheet.cell(row=rows_by_id[int(rid)], column=col[c]).value = v
 
     def pending_runs(self) -> list[dict[str, Any]]:
-        response = self.response_name()
-        return [r for r in self.all_runs() if _coerce_float(r.get(response)) is None]
+        """Runs with every response blank."""
+        names = self.response_names()
+        return [r for r in self.all_runs() if not self._has_response(r, names)]
 
     def completed_runs(self) -> list[dict[str, Any]]:
-        response = self.response_name()
-        return [r for r in self.all_runs() if _coerce_float(r.get(response)) is not None]
+        """Runs with at least one response filled in.
+
+        With several responses a completed run may still have blank cells (a
+        phase not assayed, say). Those are missing values: the fit drops them
+        from the likelihood and the prior FIM counts only what was measured.
+        """
+        names = self.response_names()
+        return [r for r in self.all_runs() if self._has_response(r, names)]
 
     def next_batch_index(self) -> int:
         batches = [r.get("batch") for r in self.all_runs()]
@@ -1015,9 +1105,72 @@ class Workbook:
                     "workbook has no template and no module_callable; cannot rebuild experiment"
                 )
             exp = _load_module_callable(mod_call)
+            # Workbooks written before multi-response support recorded only the
+            # CLI's --response/--error, which never reached a module model (it
+            # always used its own measurement errors). Only a stored
+            # ``responses`` list is authoritative.
+            if self.metadata().get("responses"):
+                exp = module_experiment_with_sigmas(
+                    exp, self.response_sigmas(), self.param_initial_guess()
+                )
 
         em = exp.create_model(**self.param_initial_guess())
         return exp, em.parameter_names
+
+
+def module_experiment_with_sigmas(
+    experiment: Experiment,
+    sigmas: Mapping[str, float],
+    param_guess: Mapping[str, float] | None = None,
+) -> Experiment:
+    """Return ``experiment`` with its responses' measurement errors replaced.
+
+    ``sigmas`` must name exactly the model's responses (the workbook's response
+    columns are the model's responses, so a mismatch means the module changed
+    under the campaign). When every sigma already matches the model's own, the
+    experiment is returned unchanged.
+    """
+    em = experiment.create_model(**dict(param_guess or {}))
+    model_names = list(em.response_names)
+    if set(model_names) != set(sigmas):
+        raise ValueError(
+            f"the workbook's responses {sorted(sigmas)} do not match the model's "
+            f"responses {sorted(model_names)}; was the module changed after the "
+            "campaign was created?"
+        )
+    bad = [n for n, s in sigmas.items() if not (float(s) > 0 and np.isfinite(float(s)))]
+    if bad:
+        raise ValueError(f"measurement error must be positive and finite for {bad}")
+    if all(float(em.measurement_error[n]) == float(sigmas[n]) for n in model_names):
+        return experiment
+    return _sigma_override(experiment, {n: float(sigmas[n]) for n in model_names})
+
+
+def _sigma_override(inner: Any, sigmas: dict[str, float]) -> Experiment:
+    """Wrap ``inner`` so its ExperimentModel reports ``sigmas`` as measurement errors.
+
+    The class is built on first use: ``discopt.estimate`` needs the base
+    package, which this module otherwise avoids importing (see the top).
+    """
+    from discopt.estimate import Experiment as _Experiment
+    from discopt.estimate import ExperimentModel
+
+    class _SigmaOverrideExperiment(_Experiment):
+        def __init__(self, inner: Any, sigmas: dict[str, float]) -> None:
+            self.inner = inner
+            self.sigmas = dict(sigmas)
+
+        def create_model(self, **kwargs: Any):
+            em = self.inner.create_model(**kwargs)
+            return ExperimentModel(
+                model=em.model,
+                unknown_parameters=em.unknown_parameters,
+                design_inputs=em.design_inputs,
+                responses=em.responses,
+                measurement_error={n: self.sigmas[n] for n in em.responses},
+            )
+
+    return _SigmaOverrideExperiment(inner, sigmas)
 
 
 def _load_module_callable(spec: str) -> Experiment:
@@ -1052,6 +1205,7 @@ def _load_module_callable(spec: str) -> Experiment:
 
 __all__ = [
     "InputSpec",
+    "ResponseSpec",
     "Workbook",
     "SHEET_ANOVA",
     "SHEET_FIM",
