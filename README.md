@@ -56,9 +56,10 @@ doe status campaign.xlsx`.
 The first run downloads jax, jaxlib, scipy and Streamlit (well over a gigabyte
 of cache), and later runs start from the cache. To pin a version, write
 `"discopt-doe[gui]==X.Y.Z"`. To pick up a newer release, add `--refresh`. A
-`--module` model has to be importable: run the command from the folder that
-holds it, put that folder on `PYTHONPATH`, or add its package with another
-`--with` (e.g. `--with ./my-models`).
+`--module` model is found in the working directory or next to the workbook, so
+keeping `my_model.py` beside `campaign.xlsx` just works. A model that lives in
+an installable package can be added with another `--with` (e.g.
+`--with ./my-models`).
 
 ## Install
 

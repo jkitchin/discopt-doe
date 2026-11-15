@@ -45,6 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   intro, browser-app page). The README and the bundled Claude skill now cover
   multi-response `--module` campaigns, and the criterion guide covers I/G.
 
+### Fixed
+- **`--module` models resolve without `PYTHONPATH`** (#48). Loading a module
+  spec now puts the workbook's directory and the working directory at the front
+  of `sys.path` for the import (only for its duration), so a `my_model.py`
+  beside the workbook works for `new module`, `fit`, `extend`, `status` and the
+  GUI, whether run from that folder or from elsewhere with a path to the
+  workbook. `new` also searches the output file's directory.
+
 ## [0.6.0] - 2026-10-30
 
 ### Added

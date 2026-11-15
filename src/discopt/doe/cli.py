@@ -443,7 +443,10 @@ def _module_experiment_from_new(params: NewParams) -> tuple[Any, list[ResponseSp
     one per response of the model, with the model's own measurement error unless
     ``sigma_overrides`` names it.
     """
-    exp = _load_module_callable(params.module_callable)  # type: ignore[arg-type]
+    # The working directory (searched by default) plus the output's directory,
+    # which is where every later command will look for the model (issue #48).
+    out_dir = Path(params.output).resolve().parent
+    exp = _load_module_callable(params.module_callable, search_dirs=[out_dir])  # type: ignore[arg-type]
     em = exp.create_model(**params.param_initial_guess)
     names = list(em.response_names)
     overrides = dict(params.sigma_overrides or {})

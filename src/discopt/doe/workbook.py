@@ -55,11 +55,13 @@ Sheets
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Iterator, Mapping, Sequence
 
 import numpy as np
 
@@ -1104,7 +1106,9 @@ class Workbook:
                 raise ValueError(
                     "workbook has no template and no module_callable; cannot rebuild experiment"
                 )
-            exp = _load_module_callable(mod_call)
+            # Resolve the model next to the workbook first, so a campaign
+            # opened by path works from any directory (issue #48).
+            exp = _load_module_callable(mod_call, search_dirs=[self.path.resolve().parent])
             # Workbooks written before multi-response support recorded only the
             # CLI's --response/--error, which never reached a module model (it
             # always used its own measurement errors). Only a stored
@@ -1173,11 +1177,17 @@ def _sigma_override(inner: Any, sigmas: dict[str, float]) -> Experiment:
     return _SigmaOverrideExperiment(inner, sigmas)
 
 
-def _load_module_callable(spec: str) -> Experiment:
+def _load_module_callable(spec: str, search_dirs: Sequence[str | Path] = ()) -> Experiment:
     """Load ``"pkg.mod:callable"`` and return the callable's result.
 
     The callable must take no required arguments and return an
     :class:`Experiment` instance.
+
+    While importing and calling it, ``search_dirs`` and then the current
+    working directory are put at the front of ``sys.path``. A console script's
+    ``sys.path[0]`` is its bin directory, not the working directory, so without
+    this a ``my_model.py`` sitting next to the user (or next to the workbook)
+    would not be importable unless they set ``PYTHONPATH``.
     """
     import importlib
 
@@ -1190,17 +1200,41 @@ def _load_module_callable(spec: str) -> Experiment:
     mod_name, _, attr = spec.partition(":")
     if not mod_name or not attr:
         raise ValueError(f"invalid module spec {spec!r}")
-    mod = importlib.import_module(mod_name)
-    try:
-        target = getattr(mod, attr)
-    except AttributeError as e:
-        raise ValueError(f"{mod_name!r} has no attribute {attr!r}") from e
-    obj = target() if callable(target) else target
+    with _prepended_sys_path([*search_dirs, Path.cwd()]):
+        mod = importlib.import_module(mod_name)
+        try:
+            target = getattr(mod, attr)
+        except AttributeError as e:
+            raise ValueError(f"{mod_name!r} has no attribute {attr!r}") from e
+        obj = target() if callable(target) else target
     if not isinstance(obj, Experiment):
         raise TypeError(
             f"{spec!r} did not produce an Experiment instance (got {type(obj).__name__})"
         )
     return obj
+
+
+@contextlib.contextmanager
+def _prepended_sys_path(dirs: Sequence[str | Path]) -> Iterator[None]:
+    """Temporarily put ``dirs`` (in order, deduplicated) at the front of ``sys.path``.
+
+    Only the entries added here are removed afterwards, so path changes the
+    imported module makes for itself survive.
+    """
+    added: list[str] = []
+    for d in dirs:
+        entry = str(Path(d).resolve())
+        if entry not in added:
+            added.append(entry)
+    sys.path[0:0] = added
+    try:
+        yield
+    finally:
+        for entry in added:
+            try:
+                sys.path.remove(entry)
+            except ValueError:
+                pass
 
 
 __all__ = [
