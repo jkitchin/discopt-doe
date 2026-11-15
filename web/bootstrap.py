@@ -401,7 +401,7 @@ def design_spec_from_workbook(path: str = str(UPLOAD_PATH)) -> str:
     campaign this page cannot rebuild — a `--module` experiment, or a template
     only the CLI offers.
     """
-    from discopt.doe.linear_design import CRITERIA
+    from discopt.doe.linear_design import ALL_CRITERIA as CRITERIA
     from discopt.doe.workbook import Workbook
 
     wb = Workbook.open(Path(path))

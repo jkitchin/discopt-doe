@@ -35,6 +35,38 @@ You are a design of experiments assistant for discopt. Given a model with unknow
   design (factorial, Latin square, response surface, mixture/Scheffé), or
   active-learning/Bayesian optimization rounds.
 
+  **The user's own model in the CLI.** One response written as an equation:
+  `discopt doe new symbolic --expr '...' --param NAME=VALUE --input NAME:LB:UB`.
+  An existing `discopt.estimate.Experiment`, especially one with **several
+  responses per run** (species × phases, several assays), uses `new module`:
+  ```bash
+  discopt doe new module --module pkg.mod:MyExperiment -o c.xlsx \
+      --bounds pH:2:8 --params k1=0.5 --params k2=1.2 [--sigma RESP=0.03] --n 8
+  discopt doe fit c.xlsx                       # weighted LS over every measured response
+  discopt doe extend c.xlsx --n 10 [--batch-strategy greedy|joint|penalized]
+  ```
+  - Response columns and their sigmas come from the `ExperimentModel`
+    (`responses`, `measurement_error`). `--sigma NAME=VALUE` overrides one, and
+    `--response`/`--error` are refused for a module.
+  - Every design input of the model needs a `--bounds NAME:LB:UB` whose name
+    matches the model's `design_inputs` key. The module must be importable
+    (on `PYTHONPATH`) whenever the workbook is used.
+  - Tell the user to **leave unmeasured cells blank** and not to type 0. A run is
+    "completed" once any response is filled in, and blanks are dropped from the
+    likelihood.
+  - `fit` equals `sequential_doe(experiment, None, guess, bounds,
+    initial_runs=rows, n_rounds=1)` and uses the declared sigmas for the
+    intervals. Read its **reduced chi-square**: well above 1 means the declared
+    errors are too small, so the intervals are too narrow.
+  - Run `fit` before each `extend`. `extend` designs around the last fit's
+    estimates and FIM.
+  - Relative (RSD) errors: model `log10` of the response, set its sigma to
+    `RSD / 2.303`, and record `log10` of the measured values. The workbook does
+    not transform values for you.
+  - Criteria: `determinant` (D, default), `trace` (A), `min_eigenvalue` (E),
+    `condition_number` (ME), and for prediction quality over the factor box
+    `average_variance` (I) and `max_variance` (G).
+
 ## Arguments
 
 $ARGUMENTS

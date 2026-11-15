@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Multi-response `--module` campaigns, end to end** (#46). `discopt doe new
+  module` now takes its response columns from the `ExperimentModel` the
+  callable returns: one runs-sheet column per response, each with the model's
+  `measurement_error` as its sigma, overridable with `--sigma NAME=VALUE`
+  (`NewParams.sigma_overrides`). `--response`/`--error` are refused for a module,
+  since the model already names its responses. The workbook records them under a
+  new `responses` metadata key; `response_name`/`measurement_error` mirror the
+  first entry, and workbooks without the key read back as one response.
+- **`discopt doe fit` for `--module` experiments.** It used to refuse them. It now
+  fits by weighted least squares over every measured response of every completed
+  run, through `campaign_experiment`, starting from the stored parameter guesses.
+  This is the estimate `sequential_doe(..., initial_runs=...)` makes, and
+  estimates, standard errors, CIs and covariance match it. Uncertainty uses the
+  declared errors, as the Python API does, and the fit reports the reduced
+  chi-square so you can judge them. Estimates, CIs and the FIM are written back,
+  so the next `extend` re-centres on the data.
+- **Missing values.** A run counts as completed once *any* of its responses is
+  filled in. Blank cells in a completed run are dropped from the likelihood, and
+  an `extend` before any fit counts only the measured responses in its prior
+  FIM. `Workbook.record_responses` accepts a `{response: value}` mapping per run.
+- **`discopt doe extend --batch-strategy {greedy,joint,penalized}`**
+  (`ExtendParams.batch_strategy`) for the parametric templates and `--module`.
+  The basis-driven paths (symbolic, classical) stay greedy and refuse the option.
+- **I- and G-optimal criteria in the CLI, GUI and browser app**:
+  `--criterion average_variance` / `max_variance` (aliases `I`, `G`), with the
+  prediction region taken from the factor box. Refused for Scheffé templates on
+  the Experiment path, where the box is mostly off the mixture simplex.
+- GUI: the runs grid edits every response column, `--module` workbooks can be
+  fitted, and Extend offers the batch strategy.
+- Docs: the CLI notebook's escape-hatch section is now a worked two-species,
+  two-phase example (new → partial rows → fit → extend → fit), checked against
+  `sequential_doe`, with a note on fitting log10 values for RSD-type errors.
+- Docs: running the full workbook GUI, jax included, with no install:
+  `uvx --from discopt --with "discopt-doe[gui]" discopt doe gui` (README,
+  intro, browser-app page). The README and the bundled Claude skill now cover
+  multi-response `--module` campaigns, and the criterion guide covers I/G.
+
 ## [0.6.0] - 2026-10-30
 
 ### Added

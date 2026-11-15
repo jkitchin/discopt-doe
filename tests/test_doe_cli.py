@@ -304,7 +304,7 @@ def test_module_callable_escape_hatch(tmp_path, module_experiment):
     assert out["designs"][0]["x"] == pytest.approx(10.0, abs=1e-3)
 
 
-def test_module_fit_refused(tmp_path, module_experiment):
+def test_module_fit(tmp_path, module_experiment):
     out_path = tmp_path / "mod.xlsx"
     do_new(
         NewParams(
@@ -320,11 +320,13 @@ def test_module_fit_refused(tmp_path, module_experiment):
             param_initial_guess={"k": 1.5},
         )
     )
-    # Fill responses so fit reaches the template-check guard, not the
-    # no-data guard.
-    _fill_response(out_path, "y", lambda row: 1.5 * row["x"])
-    with pytest.raises(DoEError, match="not yet implemented"):
-        do_fit({"workbook": str(out_path)})
+    _fill_response(out_path, "y", lambda row: 2.5 * row["x"])
+    out = do_fit({"workbook": str(out_path)})
+    assert out["parameter_names"] == ["k"]
+    assert out["parameters"][0]["estimate"] == pytest.approx(2.5, rel=1e-6)
+    # The FIM written for `extend` is the fit's, at the estimate.
+    fim, names = Workbook.open(out_path).read_fim()
+    assert names == ["k"] and fim[0, 0] > 0
 
 
 # ──────────────────────────────────────────────────────────────────

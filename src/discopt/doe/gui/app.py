@@ -113,6 +113,10 @@ def _runs_df(path: str) -> pd.DataFrame:
 
 
 _RESERVED_COLUMN_NAMES = frozenset({"run_id", "batch", "measured_at"})
+# Templates whose `extend` augments a regression basis greedily (no strategy).
+_CLASSICAL_FOR_EXTEND = frozenset(
+    {"latin-hypercube", "central-composite", "box-behnken", "definitive-screening"}
+)
 
 
 def _rename_columns(
@@ -154,6 +158,12 @@ def _rename_columns(
             row[1].value = json.dumps(specs, sort_keys=True)
         elif key == "response_name" and response_rename and val == response_rename[0]:
             row[1].value = response_rename[1]
+        elif key == "responses" and val and response_rename:
+            specs = json.loads(val)
+            for s in specs:
+                if s.get("name") == response_rename[0]:
+                    s["name"] = response_rename[1]
+            row[1].value = json.dumps(specs)
         elif key == "template_args" and val:
             args = json.loads(val)
             levels = args.get("levels")
@@ -177,30 +187,44 @@ def _rename_columns(
     wb.save(path)
 
 
-def _save_responses(path: str, edited: pd.DataFrame, response: str) -> int:
-    """Write edited response values back. Returns count of cells updated."""
+def _save_responses(path: str, edited: pd.DataFrame, responses: str | list[str]) -> int:
+    """Write edited response values back. Returns count of cells updated.
+
+    ``responses`` is the response column, or every response column of a
+    multi-response campaign. A blank cell is saved as blank: a missing value,
+    not a zero.
+    """
+    names = [responses] if isinstance(responses, str) else list(responses)
     wb = openpyxl.load_workbook(path)
     sheet = wb[SHEET_RUNS]
     headers = [c.value for c in sheet[1]]
-    resp_idx = headers.index(response)
     id_idx = headers.index("run_id")
-    edits_by_id = {
-        int(row["run_id"]): row[response] for _, row in edited.iterrows() if pd.notna(row["run_id"])
-    }
     n_updates = 0
-    for row in sheet.iter_rows(min_row=2):
-        if row[id_idx].value is None:
-            continue
-        rid = int(row[id_idx].value)
-        new_val = edits_by_id.get(rid)
-        old_val = row[resp_idx].value
-        if pd.isna(new_val) if new_val is not None else True:
-            new_val = None
-        if new_val != old_val:
-            row[resp_idx].value = float(new_val) if new_val is not None else None
-            n_updates += 1
+    for response in names:
+        resp_idx = headers.index(response)
+        edits_by_id = {
+            int(row["run_id"]): row[response]
+            for _, row in edited.iterrows()
+            if pd.notna(row["run_id"])
+        }
+        for row in sheet.iter_rows(min_row=2):
+            if row[id_idx].value is None:
+                continue
+            rid = int(row[id_idx].value)
+            new_val = edits_by_id.get(rid)
+            old_val = row[resp_idx].value
+            if pd.isna(new_val) if new_val is not None else True:
+                new_val = None
+            if new_val != old_val:
+                row[resp_idx].value = float(new_val) if new_val is not None else None
+                n_updates += 1
     wb.save(path)
     return n_updates
+
+
+def _response_names(status: dict[str, Any]) -> list[str]:
+    """Every response column of the campaign (one for most workbooks)."""
+    return list(status.get("response_names") or [status["response_name"]])
 
 
 def _model_terms(
@@ -815,13 +839,22 @@ def _sidebar_new() -> None:
     )
     criterion = st.sidebar.selectbox(
         "Optimality criterion",
-        ["determinant", "trace", "min_eigenvalue", "condition_number"],
+        [
+            "determinant",
+            "trace",
+            "min_eigenvalue",
+            "condition_number",
+            "average_variance",
+            "max_variance",
+        ],
         help=(
             "**determinant** (D-optimal, default) maximizes the FIM's "
             "log-determinant — minimizes confidence-ellipsoid volume. "
             "**trace** (A) minimizes average parameter variance. "
             "**min_eigenvalue** (E) maximizes worst-case parameter info. "
-            "**condition_number** balances information across directions."
+            "**condition_number** balances information across directions. "
+            "**average_variance** (I) and **max_variance** (G) minimize the "
+            "average / worst prediction variance over the factor box."
         ),
     )
     seed = st.sidebar.number_input(
@@ -1506,7 +1539,10 @@ def _status_banner(status: dict[str, Any]) -> None:
         inputs_str = ", ".join(
             f"{s['name']} ∈ [{s['lb']}, {s['ub']}]" for s in status["input_specs"]
         )
-    st.caption(f"**Response**: `{status['response_name']}`  •  **Factors**: {inputs_str}")
+    responses = _response_names(status)
+    label = "Responses" if len(responses) > 1 else "Response"
+    resp_str = ", ".join(f"`{r}`" for r in responses)
+    st.caption(f"**{label}**: {resp_str}  •  **Factors**: {inputs_str}")
 
     input_names = [s["name"] for s in status["input_specs"]]
     parameter_names = [p["name"] for p in (status.get("parameters") or [])]
@@ -1529,6 +1565,10 @@ def _rename_panel(path: str, status: dict[str, Any]) -> None:
     already exists, but the fit artifacts (parameters / FIM / ANOVA) are
     cleared and the user must re-run ``fit``.
     """
+    if status.get("module_callable"):
+        # The columns are the module model's own design-input and response
+        # names; renaming them here would detach the workbook from its model.
+        return
     input_specs = status.get("input_specs") or []
     old_response = status["response_name"]
     old_inputs = [s["name"] for s in input_specs]
@@ -1618,9 +1658,9 @@ def _runs_editor(path: str, status: dict[str, Any]) -> None:
         st.info("No runs yet. Generate an initial design from the sidebar.")
         return
 
-    response = status["response_name"]
+    responses = _response_names(status)
     input_cols = [s["name"] for s in status["input_specs"]]
-    locked = [c for c in df.columns if c not in (response,)]
+    locked = [c for c in df.columns if c not in responses]
     input_col_configs: dict[str, Any] = {}
     for c in input_cols:
         col_dtype = df[c].dtype if c in df.columns else None
@@ -1635,16 +1675,29 @@ def _runs_editor(path: str, status: dict[str, Any]) -> None:
         width="stretch",
         key=f"runs_editor_{path}",
         column_config={
-            response: st.column_config.NumberColumn(
-                response, help=f"Measured value for '{response}' (blank = pending)"
-            ),
+            **{
+                r: st.column_config.NumberColumn(
+                    r,
+                    help=(
+                        f"Measured value for '{r}' (blank = not measured; a run with "
+                        "every response blank is pending)"
+                    ),
+                )
+                for r in responses
+            },
             **input_col_configs,
         },
     )
+    if len(responses) > 1:
+        st.caption(
+            "A run counts as done once any response is filled in. Blank cells in a "
+            "done run are missing values: the fit leaves them out rather than "
+            "treating them as zero."
+        )
 
     col_a, col_b = st.columns([1, 1])
     if col_a.button("Save responses", type="primary"):
-        n = _save_responses(path, edited, response)
+        n = _save_responses(path, edited, responses)
         if n == 0:
             st.info("No changes detected.")
         else:
@@ -2048,16 +2101,12 @@ def _plot_surrogate_2d(
 
 def _fit_panel(path: str, status: dict[str, Any]) -> None:
     st.markdown("### Fit")
-    can_fit = status["n_completed"] > 0 and status["template"] is not None
+    can_fit = status["n_completed"] > 0 and (
+        status["template"] is not None or bool(status["module_callable"])
+    )
 
     if not can_fit:
-        if status["module_callable"]:
-            st.info(
-                "Fitting for `--module` experiments is not yet supported from "
-                "the GUI. Use `discopt.estimate.estimate_parameters` in Python."
-            )
-        else:
-            st.info("No completed runs yet — fill in some response values first.")
+        st.info("No completed runs yet — fill in some response values first.")
         return
 
     if st.button(f"Fit ({status['n_completed']} observation(s))", type="primary", key="fit_btn"):
@@ -2266,10 +2315,31 @@ def _extend_panel(path: str, status: dict[str, Any]) -> None:
         return
     n = st.number_input("Number of new runs", min_value=1, value=4, key="extend_n")
     n_starts = st.number_input("Multi-start budget", min_value=1, value=10, key="extend_starts")
+    strategy = "greedy"
+    template = status.get("template") or ""
+    # Only the Experiment-driven paths can search a batch other than greedily.
+    if template != "symbolic" and template not in _CLASSICAL_FOR_EXTEND:
+        strategy = st.selectbox(
+            "Batch strategy",
+            ["greedy", "joint", "penalized"],
+            key="extend_strategy",
+            help=(
+                "**greedy** adds one run at a time given the others, then polishes "
+                "with exchange passes. **joint** optimizes every run of the batch "
+                "together. **penalized** is greedy with a minimum spacing between runs."
+            ),
+        )
     if st.button(f"Append {int(n)} run(s)", type="primary", key="extend_btn"):
         try:
             with st.spinner("Solving next-batch design..."):
-                do_extend(ExtendParams(workbook=Path(path), n=int(n), n_starts=int(n_starts)))
+                do_extend(
+                    ExtendParams(
+                        workbook=Path(path),
+                        n=int(n),
+                        n_starts=int(n_starts),
+                        batch_strategy=strategy,
+                    )
+                )
         except (DoEError, ValueError) as e:
             st.error(str(e))
             return

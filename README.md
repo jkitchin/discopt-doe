@@ -36,6 +36,30 @@ It is Pyodide running the real package, not a reimplementation, and the
 workbooks it produces are the same ones the CLI reads. Nothing leaves your
 machine. See [docs/browser-app.md](docs/browser-app.md).
 
+### The full app, with one command
+
+The browser page has no jax, so it cannot run `extend`, `optimize`, or a model
+of your own (`--module`). The local GUI can do all of these. If you have
+[uv](https://docs.astral.sh/uv/), one line downloads everything (Python
+included) into uv's cache and opens the app, with no environment to set up:
+
+```bash
+uvx --from discopt --with "discopt-doe[gui]" discopt doe gui
+```
+
+`discopt` comes first because it provides the `discopt` command, and
+`discopt-doe` adds the `doe` subcommand to it. Pass a workbook to open it
+(`... discopt doe gui campaign.xlsx`), or `--port N` / `--no-browser`. The same
+prefix runs every CLI verb, e.g. `uvx --from discopt --with discopt-doe discopt
+doe status campaign.xlsx`.
+
+The first run downloads jax, jaxlib, scipy and Streamlit (well over a gigabyte
+of cache), and later runs start from the cache. To pin a version, write
+`"discopt-doe[gui]==X.Y.Z"`. To pick up a newer release, add `--refresh`. A
+`--module` model has to be importable: run the command from the folder that
+holds it, put that folder on `PYTHONPATH`, or add its package with another
+`--with` (e.g. `--with ./my-models`).
+
 ## Install
 
 Both `discopt-doe` and its `discopt>=0.10` dependency are published on
@@ -53,6 +77,9 @@ Or with uv:
 ```bash
 uv pip install "discopt-doe[gui]"
 ```
+
+To just run the app without installing it, see
+[the one-command route](#the-full-app-with-one-command) above.
 
 From source, to work on the package itself:
 
@@ -189,11 +216,36 @@ finite difference. A nonlinear model's information depends on its parameter
 values, so `--param` gives the nominal point the design is built around; `fit`
 then `extend` re-centres it on what the data say.
 
+When one expression is not enough (several measured responses per run, or a
+model you already have as a `discopt.estimate.Experiment`), load it with
+`new module`. The runs sheet gets one column per response of the
+`ExperimentModel`, with the model's `measurement_error` as each response's
+sigma:
+
+```bash
+discopt doe new module --module mypkg.partition:Partition -o part.xlsx \
+    --bounds pH:2:8 --params aA=0.5 --params bA=0.8 --params cA=-0.1 \
+    --params aB=-0.3 --params bB=-0.6 --params cB=0.05 \
+    --sigma B_aq=0.03 --n 8                 # override one response's sigma
+discopt doe fit part.xlsx                   # weighted least squares over every response
+discopt doe extend part.xlsx --n 10 --batch-strategy joint
+```
+
+Leave a cell blank when something was not measured. A run counts as done once
+any response is filled in, and blanks are dropped from the fit, not read as
+zero. `fit` gives the same estimates and intervals as
+`sequential_doe(..., initial_runs=...)` on the same rows, and reports the reduced
+chi-square so you can check the declared errors. The
+[CLI notebook](docs/notebooks/doe_cli.ipynb) works through a two-species,
+two-phase example.
+
 ## GUI
 
 `discopt doe gui [workbook.xlsx]` launches a Streamlit app over a campaign
 workbook (install the `[gui]` extra, which also pulls scikit-learn for the
-active-learning round). It wraps the same `do_*` functions as the CLI:
+active-learning round, or run it without installing:
+`uvx --from discopt --with "discopt-doe[gui]" discopt doe gui`). It wraps the
+same `do_*` functions as the CLI:
 
 - **Create** a new campaign from a template, browsing to an output folder.
 - **Edit responses** in-app or in Excel, then Save; the **Rename** panel can
