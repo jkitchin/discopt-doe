@@ -45,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   intro, browser-app page). The README and the bundled Claude skill now cover
   multi-response `--module` campaigns, and the criterion guide covers I/G.
 
+### Changed
+- **Tested against discopt 0.12.0** (#45). The lockfile now resolves
+  `discopt` 0.12.0 (and `pounce-solver` 0.17.0), so CI runs against it. The
+  full suite, slow tests included, and every notebook pass unchanged. The
+  `discopt[jax]>=0.10` floor stays, since nothing here needs 0.11 or 0.12.
+
 ### Fixed
 - **`--module` models resolve without `PYTHONPATH`** (#48). Loading a module
   spec now puts the workbook's directory and the working directory at the front
