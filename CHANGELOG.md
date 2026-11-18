@@ -62,6 +62,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   factor gives 6 center runs, 3 at each level. `anova` and the effects table give
   them a curvature term and use them for pure error. Only an all-categorical design
   still rejects center points. Blocked factorials keep the old restriction.
+- **Center points in a blocked factorial.** `anova_report` coded the numeric block
+  index of center runs as 0, as if they ran between blocks, so the block shift
+  stayed in the residual: with `center_points_per_block` the residual MS came out
+  ~40x the noise variance and real effects looked insignificant. Without the
+  `is_center` flag the same design failed as "aliased". A factor whose center runs
+  sit at one of its levels (a block, a categorical factor) now keeps its -1/+1
+  coding.
+- **`anova --include-replicate`**: the effects table now removes the replicate
+  block from its error term too (`effects_estimates(..., blocks=[...])`), so its
+  p-values match the ANOVA table.
+- **`foldover` keeps each run's replicate index.** The mirrored runs had a blank
+  `replicate`, so `anova --include-replicate` refused the workbook afterwards.
+- **`alias_structure` with categorical center runs** reported no resolution (and
+  `foldover` printed none), because those runs are not all-zero rows. They are
+  now recognized as center runs, and no `^2` column is listed for a categorical
+  factor.
 - **Center points no longer inflate the screening effects table.** `effects_estimates`
   (the "Effects" table of `discopt doe anova` on a factorial, fractional-factorial or
   Plackett-Burman workbook) left center runs without a term of their own, so any

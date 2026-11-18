@@ -10,6 +10,7 @@ spreadsheet workflow must catch a center row replicated by copy-and-paste.
 from __future__ import annotations
 
 import warnings
+from pathlib import Path
 
 import numpy as np
 import openpyxl
@@ -427,3 +428,173 @@ def test_cli_two_level_workbooks_accept_a_categorical_factor_with_centers(tmp_pa
     p_anova = {r["source"]: r["p"] for r in res["rows"]}
     for e in res["effects"]:
         assert e["p"] == pytest.approx(p_anova[e["factor"]], rel=1e-8)
+
+
+# ── blocks, replicates, fold-over and aliasing around center runs ─────────
+
+
+def _blocked_rows(seed: int = 0) -> list[dict]:
+    import discopt.doe as d
+
+    b = d.blocked_factorial_design(
+        {"A": (80, 120), "B": (1, 5), "C": (0, 1)}, n_blocks=2, center_points_per_block=2, seed=0
+    )
+    rng = np.random.default_rng(seed)
+    rows = []
+    for r in b.rows:
+        a, bb = (r["A"] - 100) / 20, (r["B"] - 3) / 2
+        y = 10 + 2 * a + bb + 3 * (r["block"] == 1) + rng.normal(0, 0.2)
+        rows.append(
+            {**{k: r[k] for k in ("A", "B", "C", "block")}, "y": y, "is_center": r["is_center"]}
+        )
+    return rows
+
+
+@pytest.mark.parametrize("flagged", [True, False])
+def test_block_is_not_coded_as_a_centred_factor(flagged) -> None:
+    # The block index is numeric, so center runs had it coded 0 -- as if they ran
+    # "between" blocks -- leaving the block shift in the residual (MS 1.6 for a
+    # noise variance of 0.04). Unflagged, the design failed as "aliased".
+    rows = _blocked_rows()
+    if not flagged:
+        rows = [{k: v for k, v in r.items() if k != "is_center"} for r in rows]
+    t = anova_report(rows, response="y", factors=["A", "B", "C", "block"])
+    got = {r.source: r for r in t.rows}
+    # independent OLS: coded A, B, C (0 at centers), block dummy, center indicator
+    is_c = np.array([r["A"] == 100 for r in rows], dtype=float)
+    cols = [np.ones(len(rows))]
+    for f, (lo, hi) in {"A": (80, 120), "B": (1, 5), "C": (0, 1)}.items():
+        cols.append(np.array([(2 * r[f] - lo - hi) / (hi - lo) for r in rows]))
+    cols += [np.array([float(r["block"] == 1) for r in rows]), is_c]
+    X = np.column_stack(cols)
+    y = np.array([r["y"] for r in rows])
+    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+    rss = float(np.sum((y - X @ beta) ** 2))
+    assert got["Residual"].ss == pytest.approx(rss, rel=1e-9)
+    assert got["Residual"].df == len(rows) - X.shape[1]
+    assert got["block"].p < 1e-4
+
+
+def test_effects_blocks_match_anova_with_a_block_term() -> None:
+    rows = _blocked_rows()
+    t = anova_report(rows, response="y", factors=["A", "B", "C", "block"])
+    p_anova = {r.source: r.p for r in t.rows}
+    eff = effects_estimates(
+        rows,
+        "y",
+        factors=["A", "B", "C"],
+        levels={"A": (80, 120), "B": (1, 5), "C": (0, 1)},
+        blocks=["block"],
+    )
+    for e in eff:
+        assert e["p"] == pytest.approx(p_anova[e["factor"]], rel=1e-8)
+    with pytest.raises(ValueError, match="both as a factor and as a block"):
+        effects_estimates(rows, "y", factors=["A", "block"], blocks=["block"])
+
+
+def _two_level_workbook(tmp_path, template, factor_pairs, **kw):
+    out = do_new(
+        NewParams(
+            output=tmp_path / "w.xlsx",
+            n=0,
+            inputs=[],
+            response_name="y",
+            measurement_error=1.0,
+            criterion="anova",
+            seed=0,
+            n_starts=1,
+            template=template,
+            factor_pairs=factor_pairs,
+            **kw,
+        )
+    )
+    return out["workbook_path"]
+
+
+def _fill_pending(path, seed=1):
+    rng = np.random.default_rng(seed)
+    book = openpyxl.load_workbook(path)
+    sheet = book["runs"]
+    headers = [c.value for c in sheet[1]]
+    for row in sheet.iter_rows(min_row=2):
+        v = dict(zip(headers, [c.value for c in row]))
+        if v["y"] is not None:
+            continue
+        y = v["A"] + 2 * v["B"] + (3 if v.get("cat") == "Y" else 0) + rng.normal(0, 0.3)
+        y += 0.5 * (v.get("replicate") or 0)
+        row[headers.index("y")].value = float(y)
+    book.save(path)
+
+
+def test_include_replicate_effects_agree_with_anova(tmp_path) -> None:
+    path = _two_level_workbook(
+        tmp_path,
+        "factorial-2level",
+        {"A": (0.0, 10.0), "B": (0.0, 10.0), "cat": ("X", "Y")},
+        center_points=2,
+        replicates=2,
+    )
+    _fill_pending(path)
+    out = do_anova({"workbook": path, "include_replicate": True})
+    p_anova = {r["source"]: r["p"] for r in out["rows"]}
+    assert "replicate" in p_anova
+    for e in out["effects"]:
+        assert e["p"] == pytest.approx(p_anova[e["factor"]], rel=1e-8)
+
+
+def test_foldover_keeps_the_replicate_index(tmp_path) -> None:
+    # The mirrored runs had a blank replicate, so `anova --include-replicate`
+    # refused the workbook ("column(s) ['replicate'] missing from some rows").
+    from discopt.doe.cli import FoldoverParams, do_foldover
+
+    path = _two_level_workbook(
+        tmp_path,
+        "fractional-factorial",
+        {"A": (0.0, 10.0), "B": (0.0, 10.0), "C": (0.0, 10.0)},
+        generators=["C=AB"],
+        replicates=2,
+    )
+    _fill_pending(path)
+    do_foldover(FoldoverParams(workbook=Path(path)))
+    runs = Workbook.open(path).all_runs()
+    assert all(r["replicate"] is not None for r in runs)
+    _fill_pending(path)
+    out = do_anova({"workbook": path, "include_replicate": True})
+    assert out["n_observations"] == 16
+
+
+def test_alias_structure_with_categorical_center_runs() -> None:
+    from discopt.doe.aliasing import alias_structure
+    from discopt.doe.fractional import fractional_factorial_design
+
+    factors = {"A": (0, 10), "B": (0, 10), "C": (0, 10), "cat": ("X", "Y")}
+    plain = fractional_factorial_design(factors, generators=["cat=A*B*C"], seed=0)
+    with_c = fractional_factorial_design(factors, generators=["cat=A*B*C"], center_points=3, seed=0)
+    a0 = alias_structure([dict(r) for r in plain.rows], list(plain.factors))
+    a1 = alias_structure([dict(r) for r in with_c.rows], list(with_c.factors))
+    assert a1.resolution == a0.resolution == 4
+    assert a1.words == a0.words and a1.regular
+    # numeric factors get a curvature column; the categorical one has no center
+    assert "A^2" in a1.labels and "cat^2" not in a1.labels
+
+
+def test_one_numeric_factor_and_a_categorical_one_via_the_workbook(tmp_path) -> None:
+    # Unflagged, A in {0, 5, 10} x cat in {X, Y} is indistinguishable from a
+    # 3 x 2 factorial, so anova_report alone treats it as one; the workbook knows
+    # it is a 2-level design and flags its center runs.
+    path = _two_level_workbook(
+        tmp_path, "factorial-2level", {"A": (0.0, 10.0), "cat": ("X", "Y")}, center_points=3
+    )
+    book = openpyxl.load_workbook(path)
+    sheet = book["runs"]
+    headers = [c.value for c in sheet[1]]
+    rng = np.random.default_rng(0)
+    for row in sheet.iter_rows(min_row=2):
+        v = dict(zip(headers, [c.value for c in row]))
+        y = v["A"] + (3 if v["cat"] == "Y" else 0) + 2 * (v["A"] == 5) + rng.normal(0, 0.3)
+        row[headers.index("y")].value = float(y)
+    book.save(path)
+    out = do_anova({"workbook": path})
+    rows = {r["source"]: r for r in out["rows"]}
+    assert rows["A"]["df"] == 1 and rows["curvature"]["df"] == 1
+    assert rows["curvature"]["p"] < 1e-3

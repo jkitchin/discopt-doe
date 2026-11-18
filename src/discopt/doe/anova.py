@@ -410,47 +410,63 @@ def _center_rows(rows: Sequence[Mapping[str, object]], factors: Sequence[str]) -
 
     A row is a centre point when it is flagged ``is_center`` (as
     :func:`factorial_2level_design` does), or -- for data without the flag --
-    when every numeric design factor sits at the midpoint of its only two other
-    values. Categorical factors have no midpoint: their centre runs are made at
-    one of the factor's two levels (at each combination of them, by
-    :func:`~discopt.doe.screening.center_point_rows`). Only designs whose
-    non-centre runs are 2-level in every factor, with at least one numeric
-    factor, qualify; anything else is analyzed with ordinary levels.
+    when every *centred* factor sits at the midpoint of its two other values
+    (unflagged data with a level factor needs at least two centred factors).
+    Not every factor has a centre: a categorical factor, or a block, keeps one
+    of its two levels in a centre run (centre points are made at each
+    categorical level, and in each block). So a factor qualifies either as
+    centred (numeric, centre runs at the midpoint of its two levels) or as a
+    level factor (centre runs at one of its two levels). At least one factor
+    must be centred and every non-centre run must be 2-level in every factor;
+    anything else is analyzed with ordinary levels.
     """
     design = [f for f in factors if f != "replicate"]
     if not design:
-        return set()
-    numeric = [f for f in design if all(_is_number(r[f]) for r in rows)]
-    if not numeric:
         return set()
     flagged = {i for i, r in enumerate(rows) if bool(r.get("is_center"))}
     if flagged:
         candidates = flagged
     else:
         mids: dict[str, float] = {}
-        for f in numeric:
-            values = sorted({float(cast(float, r[f])) for r in rows})
-            if len(values) != 3 or abs(values[1] - (values[0] + values[2]) / 2) > 1e-9 * max(
-                1.0, abs(values[2] - values[0])
-            ):
+        for f in design:
+            values = {r[f] for r in rows}
+            if len(values) == 2:
+                continue  # a level factor (block, categorical): no centre value
+            if len(values) != 3 or not all(_is_number(v) for v in values):
                 return set()
-            mids[f] = values[1]
+            lo, mid, hi = sorted(float(cast(float, v)) for v in values)
+            if abs(mid - (lo + hi) / 2) > 1e-9 * max(1.0, abs(hi - lo)):
+                return set()
+            mids[f] = mid
+        # With a level factor present, one centred factor is not enough to tell
+        # centre runs from a genuine 3-level factor (a 2 x 3 factorial looks just
+        # like one numeric factor with centre runs at each level of the other):
+        # require two, so the 2-level check below can tell them apart, or the flag.
+        if not mids or (len(mids) < 2 and len(mids) < len(design)):
+            return set()
         candidates = {
             i
             for i, r in enumerate(rows)
-            if all(abs(float(cast(float, r[f])) - mids[f]) <= 1e-12 for f in numeric)
+            if all(abs(float(cast(float, r[f])) - m) <= 1e-12 for f, m in mids.items())
         }
     rest = [r for i, r in enumerate(rows) if i not in candidates]
     if not candidates or not rest:
         return set()
+    n_centred = 0
     for f in design:
         levels = {r[f] for r in rest}
         if len(levels) != 2:
             return set()
-        # A categorical factor's centre runs must sit at one of its two levels.
-        if f not in numeric and any(rows[i][f] not in levels for i in candidates):
+        at_center = [rows[i][f] for i in candidates]
+        if all(v in levels for v in at_center):
+            continue  # level factor
+        if not all(_is_number(v) for v in [*levels, *at_center]):
             return set()
-    return candidates
+        lo, hi = sorted(float(cast(float, v)) for v in levels)
+        if any(abs(float(cast(float, v)) - (lo + hi) / 2) > 1e-9 * (hi - lo) for v in at_center):
+            return set()
+        n_centred += 1
+    return candidates if n_centred else set()
 
 
 def _coded_columns(
@@ -458,29 +474,28 @@ def _coded_columns(
 ) -> dict[str, np.ndarray]:
     """-1/+1 coding of each 2-level factor.
 
-    Numeric factors put the centre runs at 0. A categorical factor has no
-    centre, so its centre runs keep the -1/+1 of the level they were run at.
+    A centred factor puts the centre runs at 0. A level factor (categorical, or
+    a block) has no centre, so its centre runs keep the -1/+1 of the level
+    they were run at.
     """
     out: dict[str, np.ndarray] = {}
     for f in factors:
         if f == "replicate":
             continue
-        if all(_is_number(r[f]) for r in rows):
-            lo, hi = sorted(
-                {float(cast(float, r[f])) for i, r in enumerate(rows) if i not in center}
-            )
+        seen: list[object] = []
+        for i, r in enumerate(rows):
+            if i not in center and r[f] not in seen:
+                seen.append(r[f])
+        if all(rows[i][f] in seen for i in center):
+            out[f] = np.array([-1.0 if r[f] == seen[0] else 1.0 for r in rows])
+        else:
+            lo, hi = sorted(float(cast(float, v)) for v in seen)
             out[f] = np.array(
                 [
                     0.0 if i in center else (-1.0 if float(cast(float, r[f])) == lo else 1.0)
                     for i, r in enumerate(rows)
                 ]
             )
-        else:
-            seen: list[object] = []
-            for i, r in enumerate(rows):
-                if i not in center and r[f] not in seen:
-                    seen.append(r[f])
-            out[f] = np.array([-1.0 if r[f] == seen[0] else 1.0 for r in rows])
     return out
 
 

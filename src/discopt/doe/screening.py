@@ -296,6 +296,7 @@ def effects_estimates(
     levels: Mapping[str, tuple[object, object]] | None = None,
     *,
     interactions: Sequence[tuple[str, ...]] | None = None,
+    blocks: Sequence[str] | None = None,
 ) -> list[dict[str, object]]:
     """Signed effect estimates for a 2-level design.
 
@@ -313,6 +314,14 @@ def effects_estimates(
     error and a curved response does not inflate the standard errors.
     Effects left out of the model end up in the residual: if a real
     interaction is omitted, every standard error is inflated.
+
+    ``blocks`` names nuisance columns (e.g. ``["block"]`` of a blocked
+    factorial, or ``["replicate"]`` run on different days) to remove from the
+    residual, one df per extra level, as :func:`discopt.doe.anova_report` does
+    when they are among its factors. Without it a real block-to-block shift
+    lands in the residual and inflates every standard error. The contrasts are
+    unchanged, which is exact when the blocks are orthogonal to the effects --
+    as they are in a replicated or blocked 2-level design.
 
     When the model leaves **no residual degrees of freedom** (an unreplicated
     design with every effect estimated) there is nothing to estimate sigma
@@ -355,10 +364,16 @@ def effects_estimates(
             k
             for k in rows[0].keys()
             if k != response
-            and k not in {"replicate", "run_order", "is_center"}
+            and k not in {"replicate", "run_order", "is_center", *(blocks or ())}
             and not k.startswith("_")
         ]
     factors = list(factors)
+    blocks = list(blocks or ())
+    for b in blocks:
+        if b in factors:
+            raise ValueError(f"{b!r} is listed both as a factor and as a block")
+        if any(b not in r for r in rows):
+            raise ValueError(f"block column {b!r} missing from some rows")
 
     y = []
     for r in rows:
@@ -439,6 +454,13 @@ def effects_estimates(
     center = _center_indicator(rows, coded)
     if center is not None:
         columns.append(center)
+    for b in blocks:
+        block_levels: list[object] = []
+        for r in rows:
+            if r[b] not in block_levels:
+                block_levels.append(r[b])
+        for lvl in block_levels[1:]:
+            columns.append(np.array([1.0 if r[b] == lvl else 0.0 for r in rows]))
     X = np.column_stack(columns)
     coef, *_ = np.linalg.lstsq(X, y_arr, rcond=None)
     resid_ss = float(np.sum((y_arr - X @ coef) ** 2))

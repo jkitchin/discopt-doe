@@ -2908,12 +2908,21 @@ def do_anova(params: dict[str, Any]) -> dict[str, Any]:
                 "--replicates > 1."
             )
     interactions = params.get("interactions") or None
+    # A two-level template knows its centre runs: flag them, since unflagged
+    # data with one numeric factor and a categorical one cannot be told apart
+    # from a 2 x 3 factorial.
+    two_level_levels: dict[str, tuple[Any, Any]] | None = None
+    if template in _TWO_LEVEL_TEMPLATE_NAMES:
+        lv = template_args.get("levels") or {}
+        two_level_levels = {f: (lv[f][0], lv[f][1]) for f in factors if f in lv}
     rows: list[dict[str, Any]] = []
     for r in completed:
         d = {f: r[f] for f in factors if f in r}
         d[response] = r[response]
         if "replicate" in r and r["replicate"] is not None:
             d["replicate"] = r["replicate"]
+        if two_level_levels:
+            d["is_center"] = bool(r.get("is_center")) or _is_center_row(d, two_level_levels)
         rows.append(d)
 
     # Two-level screening designs also get signed effect estimates. A saturated
@@ -2936,7 +2945,12 @@ def do_anova(params: dict[str, Any]) -> dict[str, Any]:
                 for k, v in e.items()
             }
             for e in effects_estimates(
-                fx_rows, response, factors=factors, levels=levels, interactions=interactions
+                fx_rows,
+                response,
+                factors=factors,
+                levels=levels,
+                interactions=interactions,
+                blocks=["replicate"] if include_replicate else None,
             )
         ]
     try:
@@ -3514,6 +3528,10 @@ def do_foldover(params: FoldoverParams) -> dict[str, Any]:
         for name in flipped:
             lo, hi = levels[name]  # type: ignore[misc]
             point[name] = hi if point[name] == lo else lo
+        # Each mirrored run keeps its source's replicate index; a blank one
+        # made `anova --include-replicate` refuse the whole workbook.
+        if r.get("replicate") is not None:
+            point["replicate"] = r["replicate"]
         new.append(point)
     if not new:
         raise DoEError("no two-level corner runs to mirror in this workbook")
