@@ -32,7 +32,11 @@ from typing import Mapping, Sequence, cast
 
 import numpy as np
 
-from discopt.doe.screening import FactorialDesign
+from discopt.doe.screening import (
+    FactorialDesign,
+    _check_center_points_possible,
+    center_point_rows,
+)
 
 # First rows of the cyclic Plackett-Burman designs (Plackett & Burman 1946).
 # The design is the N - 1 cyclic shifts of the row plus a row of minus signs.
@@ -87,7 +91,8 @@ def plackett_burman_design(
         12, 20 and 24 use the cyclic Plackett-Burman generators, which are
         nonregular.
     center_points : int, default 0
-        Centre runs added per replicate (numeric factors only).
+        Centre runs added per replicate; with categorical factors, at each
+        combination of their levels (see :func:`factorial_2level_design`).
     replicates : int, default 1
         Number of replications of the whole design.
     seed : int, optional
@@ -355,11 +360,7 @@ def _two_level_factors(
         lows.append(lo)
         highs.append(hi)
         numeric.append(_is_numeric(lo) and _is_numeric(hi))
-    if center_points > 0 and not all(numeric):
-        bad = [n for n, ok in zip(names, numeric) if not ok]
-        raise ValueError(
-            f"center_points > 0 requires all factors to be numeric; non-numeric factors: {bad}"
-        )
+    _check_center_points_possible(names, numeric, center_points)
     return names, lows, highs, numeric
 
 
@@ -391,10 +392,8 @@ def _two_level_from_matrix(
             row["replicate"] = r
             row["is_center"] = bool(three_level and np.all(code == 0))
             rows.append(row)
-        for _ in range(center_points):
-            cp: dict[str, object] = {names[i]: mid(i) for i in range(k)}
+        for cp in center_point_rows(names, lows, highs, center_points):
             cp["replicate"] = r
-            cp["is_center"] = True
             rows.append(cp)
     _randomize(rows, seed)
     return FactorialDesign(factors=names, low=tuple(lows), high=tuple(highs), rows=rows)

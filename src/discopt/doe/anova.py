@@ -395,28 +395,41 @@ def anova_report(
     )
 
 
+def _is_number(v: object) -> bool:
+    if isinstance(v, bool):
+        return False
+    try:
+        float(cast(float, v))
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def _center_rows(rows: Sequence[Mapping[str, object]], factors: Sequence[str]) -> set[int]:
     """Indices of centre-point runs of a 2-level design, or an empty set.
 
     A row is a centre point when it is flagged ``is_center`` (as
     :func:`factorial_2level_design` does), or -- for data without the flag --
     when every numeric design factor sits at the midpoint of its only two other
-    values. Only designs whose non-centre runs are 2-level in every numeric
-    factor qualify; anything else is analyzed with ordinary levels.
+    values. Categorical factors have no midpoint: their centre runs are made at
+    one of the factor's two levels (at each combination of them, by
+    :func:`~discopt.doe.screening.center_point_rows`). Only designs whose
+    non-centre runs are 2-level in every factor, with at least one numeric
+    factor, qualify; anything else is analyzed with ordinary levels.
     """
     design = [f for f in factors if f != "replicate"]
     if not design:
+        return set()
+    numeric = [f for f in design if all(_is_number(r[f]) for r in rows)]
+    if not numeric:
         return set()
     flagged = {i for i, r in enumerate(rows) if bool(r.get("is_center"))}
     if flagged:
         candidates = flagged
     else:
         mids: dict[str, float] = {}
-        for f in design:
-            try:
-                values = sorted({float(cast(float, r[f])) for r in rows})
-            except (TypeError, ValueError):
-                return set()
+        for f in numeric:
+            values = sorted({float(cast(float, r[f])) for r in rows})
             if len(values) != 3 or abs(values[1] - (values[0] + values[2]) / 2) > 1e-9 * max(
                 1.0, abs(values[2] - values[0])
             ):
@@ -425,17 +438,17 @@ def _center_rows(rows: Sequence[Mapping[str, object]], factors: Sequence[str]) -
         candidates = {
             i
             for i, r in enumerate(rows)
-            if all(abs(float(cast(float, r[f])) - mids[f]) <= 1e-12 for f in design)
+            if all(abs(float(cast(float, r[f])) - mids[f]) <= 1e-12 for f in numeric)
         }
     rest = [r for i, r in enumerate(rows) if i not in candidates]
     if not candidates or not rest:
         return set()
     for f in design:
-        if len({r[f] for r in rest}) != 2:
+        levels = {r[f] for r in rest}
+        if len(levels) != 2:
             return set()
-        try:
-            [float(cast(float, r[f])) for r in rows]
-        except (TypeError, ValueError):
+        # A categorical factor's centre runs must sit at one of its two levels.
+        if f not in numeric and any(rows[i][f] not in levels for i in candidates):
             return set()
     return candidates
 
@@ -443,18 +456,31 @@ def _center_rows(rows: Sequence[Mapping[str, object]], factors: Sequence[str]) -
 def _coded_columns(
     rows: Sequence[Mapping[str, object]], factors: Sequence[str], center: set[int]
 ) -> dict[str, np.ndarray]:
-    """-1/+1 coding of each 2-level numeric factor, with centre runs at 0."""
+    """-1/+1 coding of each 2-level factor.
+
+    Numeric factors put the centre runs at 0. A categorical factor has no
+    centre, so its centre runs keep the -1/+1 of the level they were run at.
+    """
     out: dict[str, np.ndarray] = {}
     for f in factors:
         if f == "replicate":
             continue
-        lo, hi = sorted({float(cast(float, r[f])) for i, r in enumerate(rows) if i not in center})
-        out[f] = np.array(
-            [
-                0.0 if i in center else (-1.0 if float(cast(float, r[f])) == lo else 1.0)
-                for i, r in enumerate(rows)
-            ]
-        )
+        if all(_is_number(r[f]) for r in rows):
+            lo, hi = sorted(
+                {float(cast(float, r[f])) for i, r in enumerate(rows) if i not in center}
+            )
+            out[f] = np.array(
+                [
+                    0.0 if i in center else (-1.0 if float(cast(float, r[f])) == lo else 1.0)
+                    for i, r in enumerate(rows)
+                ]
+            )
+        else:
+            seen: list[object] = []
+            for i, r in enumerate(rows):
+                if i not in center and r[f] not in seen:
+                    seen.append(r[f])
+            out[f] = np.array([-1.0 if r[f] == seen[0] else 1.0 for r in rows])
     return out
 
 

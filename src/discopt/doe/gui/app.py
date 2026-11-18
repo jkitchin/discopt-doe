@@ -1095,8 +1095,10 @@ def _sidebar_new_factorial() -> None:
             max_value=20,
             value=0,
             help=(
-                "Number of center-point runs added per replicate. "
-                "Requires all factors to be numeric. Useful to detect "
+                "Number of center-point runs added per replicate. Numeric "
+                "factors go to their midpoint; a text factor (e.g. catalyst "
+                "A/B) has no midpoint, so the center points are repeated at "
+                "each of its levels. Needs at least one numeric factor. Useful to detect "
                 "curvature and estimate σ without assuming the linear "
                 "model is correct."
             ),
@@ -1151,22 +1153,21 @@ def _sidebar_new_factorial() -> None:
         if len(pairs) < 2 or len(pairs) > 8:
             st.sidebar.error(f"Need 2 - 8 factors, got {len(pairs)}.")
             return
-        if center_points > 0:
-            non_numeric = [
-                n
-                for n, (lo, hi) in pairs.items()
-                if not (
-                    isinstance(lo, (int, float))
-                    and isinstance(hi, (int, float))
-                    and not isinstance(lo, bool)
-                )
-            ]
-            if non_numeric:
-                st.sidebar.error(
-                    f"Center points require numeric factors only; non-numeric: "
-                    f"{', '.join(non_numeric)}."
-                )
-                return
+        non_numeric = [
+            n
+            for n, (lo, hi) in pairs.items()
+            if not (
+                isinstance(lo, (int, float))
+                and isinstance(hi, (int, float))
+                and not isinstance(lo, bool)
+            )
+        ]
+        if center_points > 0 and len(non_numeric) == len(pairs):
+            st.sidebar.error(
+                "Center points need at least one numeric factor: a text factor has "
+                "no midpoint. Use Replicates to estimate pure error instead."
+            )
+            return
 
         out_path = Path(output_path).expanduser().resolve()
         if out_path.exists():
@@ -1174,7 +1175,7 @@ def _sidebar_new_factorial() -> None:
             return
         params = NewParams(
             output=out_path,
-            n=2 ** len(pairs) * replicates + center_points * replicates,
+            n=(2 ** len(pairs) + center_points * 2 ** len(non_numeric)) * replicates,
             inputs=[],
             response_name=response_name,
             measurement_error=1.0,

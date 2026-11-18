@@ -191,6 +191,33 @@ def _require_openpyxl():
         ) from e
 
 
+def _reject_duplicate_run_ids(runs: Sequence[Mapping[str, Any]], path: Path) -> None:
+    """Raise when two rows of the runs sheet share a ``run_id``.
+
+    The usual cause is replicating a run (often a center point) by copying its
+    row in a spreadsheet, which copies the id too. Responses are recorded and
+    run order is resolved by ``run_id``, so a shared id would silently write to,
+    or order, the wrong row.
+    """
+    seen: dict[Any, int] = {}
+    for r in runs:
+        rid = r.get("run_id")
+        try:
+            key: Any = int(rid)
+        except (TypeError, ValueError):
+            key = rid
+        seen[key] = seen.get(key, 0) + 1
+    dups = {k: c for k, c in seen.items() if c > 1}
+    if dups:
+        listed = ", ".join(f"{k} ({c} rows)" for k, c in sorted(dups.items(), key=str))
+        nxt = max((k for k in seen if isinstance(k, int)), default=0) + 1
+        raise ValueError(
+            f"duplicate run_id in the 'runs' sheet of {path}: {listed}. Every row "
+            "needs its own run_id -- if you copied a row to replicate a run (e.g. "
+            f"an extra center point), give each copy a new id (next free: {nxt})."
+        )
+
+
 def _now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat()
 
@@ -645,6 +672,7 @@ class Workbook:
                     )
                 row[c_i] = cached
             out.append(dict(zip(headers, row)))
+        _reject_duplicate_run_ids(out, self.path)
         return out
 
     def record_responses(
