@@ -159,10 +159,19 @@ def alias_structure(
     """
     if max_order < 1:
         raise ValueError(f"max_order must be >= 1, got {max_order}")
-    X, names = _coded_matrix(design, factors)
-    n, k = X.shape
+    X_raw, names = _coded_matrix(design, factors)
+    n, k = X_raw.shape
     if n < 2:
         raise ValueError("need at least 2 runs")
+    # Centre runs of a 2-level design hold every numeric factor at 0 but keep a
+    # categorical factor at one of its levels (they are made at each level), so
+    # they are not all-zero rows. They add curvature and pure error, not
+    # aliasing: zero them so the words and correlations are those of the
+    # factorial runs, as with an all-numeric design's centre points.
+    X = X_raw.copy()
+    center = _center_mask(X_raw)
+    if center is not None:
+        X[center] = 0.0
 
     # Effect columns: mains, interactions, quadratics (three-level factors).
     labels: list[str] = list(names)
@@ -172,7 +181,8 @@ def alias_structure(
             labels.append(":".join(names[s] for s in S))
             cols.append(np.prod(X[:, list(S)], axis=1))
     for i in range(k):
-        if np.any(np.abs(X[:, i]) < 1 - _TOL) and np.any(np.abs(X[:, i]) > _TOL):
+        col = X_raw[:, i]
+        if np.any(np.abs(col) < 1 - _TOL) and np.any(np.abs(col) > _TOL):
             labels.append(f"{names[i]}^2")
             cols.append(X[:, i] ** 2)
     C = np.column_stack(cols) - np.column_stack(cols).mean(axis=0)
@@ -215,6 +225,27 @@ def alias_structure(
         n_runs=n,
         words_complete=complete,
     )
+
+
+def _center_mask(X: np.ndarray) -> np.ndarray | None:
+    """Rows that are centre runs of an otherwise 2-level design, or ``None``.
+
+    A centre run is 0 on some factors and +-1 on the rest, with the same set of
+    zero columns in every centre run (the numeric factors), while every other
+    run is +-1 throughout. A three-level design such as a definitive screening
+    design, whose middle-level runs differ in which factor is at 0, does not
+    qualify.
+    """
+    zeros = np.abs(X) < _TOL
+    unit = np.abs(np.abs(X) - 1.0) < _TOL
+    if not np.all(zeros | unit):
+        return None
+    mask = zeros.any(axis=1)
+    if not mask.any() or mask.all():
+        return None
+    if len(np.unique(zeros[mask], axis=0)) != 1:
+        return None
+    return mask
 
 
 def _roman(r: int | None) -> str:
