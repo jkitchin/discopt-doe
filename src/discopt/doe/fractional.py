@@ -92,7 +92,11 @@ from typing import Mapping, Sequence, cast
 
 import numpy as np
 
-from discopt.doe.screening import FactorialDesign
+from discopt.doe.screening import (
+    FactorialDesign,
+    _check_center_points_possible,
+    center_point_rows,
+)
 
 
 def fractional_factorial_design(
@@ -130,7 +134,8 @@ def fractional_factorial_design(
         knows a particular 2FI matters and wants it estimable
         separately from the mains.
     center_points : int, default 0
-        Center-point runs added per replicate (numeric factors only).
+        Center-point runs added per replicate; with categorical factors, at
+        each combination of their levels (see :func:`factorial_2level_design`).
     replicates : int, default 1
         Number of times to replicate the selected fraction.
     seed : int, optional
@@ -175,12 +180,7 @@ def fractional_factorial_design(
         highs.append(hi)
         numeric_flags.append(_is_numeric(lo) and _is_numeric(hi))
 
-    if center_points > 0 and not all(numeric_flags):
-        non_numeric = [n for n, ok in zip(names, numeric_flags) if not ok]
-        raise ValueError(
-            f"center_points > 0 requires all factors to be numeric; "
-            f"non-numeric factors: {non_numeric}"
-        )
+    _check_center_points_possible(names, numeric_flags, center_points)
 
     k = len(names)
     if k < 2:
@@ -309,13 +309,8 @@ def _rows_from_codes(
             row["replicate"] = r
             row["is_center"] = False
             rep_rows.append(row)
-        for _ in range(center_points):
-            cp_row: dict[str, object] = {
-                names[i]: (float(cast(float, lows[i])) + float(cast(float, highs[i]))) / 2.0
-                for i in range(k)
-            }
+        for cp_row in center_point_rows(names, lows, highs, center_points):
             cp_row["replicate"] = r
-            cp_row["is_center"] = True
             rep_rows.append(cp_row)
         rows.extend(rep_rows)
 

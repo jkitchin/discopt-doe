@@ -44,7 +44,7 @@ Use it *first*, before fitting any response surface. A quadratic model in five
 factors costs 21 coefficients; a screening run that shows three of the five do
 nothing turns that into a 10-coefficient model over a smaller box.
 
-- **Centre points** (numeric factors only) buy you two things for a handful of
+- **Centre points** (run at each level of any categorical factor) buy you two things for a handful of
   extra runs: a pure-error estimate that does not assume the model is right,
   and a curvature check — if the centre response sits well off the plane
   through the corners, a 2-level design cannot describe your system and you

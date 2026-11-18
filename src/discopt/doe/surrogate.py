@@ -80,7 +80,8 @@ and its 95% intervals cover the truth only ~79% of the time. The preset
 therefore
 
 * estimates the noise from **replicated runs** when the design has them
-  (pure error, the classical answer), and otherwise fits it, never below
+  (pure error, the classical answer; replicates that agree exactly carry
+  no noise estimate and are treated as absent), and otherwise fits it, never below
   10% of the response standard deviation; ``noise=0`` interpolates for
   deterministic simulators, and a float fixes the noise SD;
 * fits the hyperparameters by **maximum a posteriori** with weak log-normal
@@ -506,6 +507,19 @@ class GPSurrogate:
         fixed_noise: float | None
         if isinstance(self.noise, str):  # "auto"
             pe = _pure_error_variance(X, y)
+            if pe is not None and pe[0] <= 1e-12 * y_var:
+                # Replicates that agree exactly (a deterministic simulator, or
+                # measurements rounded to the instrument's resolution) say only
+                # that the noise is below what they can resolve. Taking that as
+                # zero noise would make the GP interpolate every run with ~0
+                # error bars, so fit the noise instead, with its usual floor.
+                warnings.warn(
+                    "replicated runs have identical responses, so they give no "
+                    "estimate of the noise; fitting it instead (pass noise=0 for "
+                    "a deterministic simulator)",
+                    stacklevel=2,
+                )
+                pe = None
             if pe is not None:
                 fixed_noise, self.noise_source_ = pe[0], "replicates"
             else:

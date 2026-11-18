@@ -52,6 +52,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `discopt[jax]>=0.10` floor stays, since nothing here needs 0.11 or 0.12.
 
 ### Fixed
+- **Center points with a categorical factor.** A 2-level full factorial,
+  fractional factorial or Plackett-Burman design with any string-valued factor
+  (e.g. `catalyst:A:B`) refused center points ("center_points > 0 requires all
+  factors to be numeric"). That included the GUI's default factor table as soon as
+  center points were added. A categorical factor has no midpoint, so the center
+  points are now run at each combination of its levels, with the numeric factors at
+  their midpoints (Montgomery §6.8): `--center-points 3` with one categorical
+  factor gives 6 center runs, 3 at each level. `anova` and the effects table give
+  them a curvature term and use them for pure error. Only an all-categorical design
+  still rejects center points. Blocked factorials keep the old restriction.
+- **Center points no longer inflate the screening effects table.** `effects_estimates`
+  (the "Effects" table of `discopt doe anova` on a factorial, fractional-factorial or
+  Plackett-Burman workbook) left center runs without a term of their own, so any
+  curvature fell into its error term. Its p-values then contradicted the ANOVA table
+  printed above them, and adding center points made it worse: with 8 center runs a
+  factor at p = 1e-6 in the ANOVA showed p = 0.15 in the effects table. The joint
+  model now carries a one-df curvature term, as `anova_report` does.
+- **`discopt doe anova` on central-composite, Box-Behnken, definitive-screening and
+  other regression workbooks** now reports the regression ANOVA of the model: one row
+  per term (adjusted SS), Model, Error, Total. Before, it compared factor-level means.
+  That always failed on a central-composite design ("term 'x2' is aliased"), and on
+  the others the replicated center points set off the "unbalanced"/"not orthogonal"
+  warnings. A basis these runs cannot estimate now gives a clear error, not NaN rows.
+- **`fit` of a model the runs cannot estimate** (e.g. a full quadratic from a
+  3-factor definitive screening design, whose 9 distinct settings determine only 8
+  of its 10 terms) reported SE = 0 for every coefficient, a false certainty, with
+  degrees of freedom counted from the parameter count. It now reports no standard
+  errors, warns that the model is not estimable, takes the degrees of freedom from
+  the design's rank, and suggests `extend`.
+- **Lack of fit vs. pure error.** When input settings are replicated (e.g. center
+  points), the regression ANOVA from `fit` and `anova` (and the workbook's `anova`
+  sheet) splits the residual into lack of fit and pure error, with the F-test. `fit`
+  prints the result.
+- **Duplicate `run_id`s are rejected** with a message that names the next free id.
+  Copying a row in the spreadsheet to replicate a run also copies its id, and runs
+  are recorded and ordered by id.
+- **GP surrogate with replicates that agree exactly.** When replicate responses are
+  identical (a deterministic simulator, or rounded readings), the pure-error noise
+  estimate was zero, so the GP interpolated every run with ~0 error bars. Such
+  replicates are now ignored, with a warning, and the noise is fitted.
 - **`--module` models resolve without `PYTHONPATH`** (#48). Loading a module
   spec now puts the workbook's directory and the working directory at the front
   of `sys.path` for the import (only for its duration), so a `my_model.py`

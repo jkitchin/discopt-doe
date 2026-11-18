@@ -188,10 +188,18 @@ def test_center_points_added_per_replicate():
             assert c[name] == 0.0
 
 
-def test_center_points_rejected_for_categorical():
+def test_center_points_with_categorical_run_at_each_level():
+    # A categorical factor has no midpoint: its center runs are made at each of
+    # its levels, with the numeric factors at their midpoints.
     factors = {"catalyst": ("A", "B"), "temp": (80.0, 120.0), "x": (0.0, 1.0), "y": (0.0, 1.0)}
-    with pytest.raises(ValueError, match="non-numeric"):
-        fractional_factorial_design(factors, n_runs=8, resolution=3, center_points=1)
+    d = fractional_factorial_design(factors, n_runs=8, resolution=3, center_points=1)
+    centers = [r for r in d.rows if r["is_center"]]
+    assert sorted(r["catalyst"] for r in centers) == ["A", "B"]
+    assert all(r["temp"] == 100.0 and r["x"] == 0.5 for r in centers)
+    with pytest.raises(ValueError, match="at least one numeric factor"):
+        fractional_factorial_design(
+            {f: ("lo", "hi") for f in "ABCD"}, n_runs=8, resolution=3, center_points=1
+        )
 
 
 def test_n_runs_must_be_power_of_2():

@@ -50,9 +50,12 @@ every continuous factor. Center points serve two purposes:
 2. **Pure-error estimate**: replicated center points give an unbiased
    estimate of σ that doesn't assume the linear model is correct.
 
-Center points require **all factors to be numeric**. If any factor is
-categorical (e.g. ``catalyst: [A, B]``), the midpoint is undefined and
-the design rejects ``center_points > 0``.
+A numeric factor's center is the midpoint of its two levels. A categorical
+factor (e.g. ``catalyst: [A, B]``) has no midpoint, so the center points
+are run at **each combination of the categorical levels**, with the numeric
+factors at their midpoints: ``center_points=3`` with one categorical factor
+gives 6 center runs, 3 with catalyst A and 3 with catalyst B. At least one
+factor must be numeric.
 
 Replication
 -----------
@@ -119,6 +122,52 @@ class FactorialDesign:
         return len(self.rows)
 
 
+def _check_center_points_possible(
+    names: Sequence[str], numeric_flags: Sequence[bool], center_points: int
+) -> None:
+    """Raise when center points are requested but no factor has a midpoint."""
+    if center_points > 0 and not any(numeric_flags):
+        raise ValueError(
+            "center points need at least one numeric factor: every factor here is "
+            f"categorical ({list(names)}), and a categorical factor has no midpoint. "
+            "Replicate the design (replicates > 1) to estimate pure error instead."
+        )
+
+
+def center_point_rows(
+    names: Sequence[str],
+    lows: Sequence[object],
+    highs: Sequence[object],
+    center_points: int,
+) -> list[dict[str, object]]:
+    """Center-point runs of a 2-level design, flagged ``is_center``.
+
+    Numeric factors sit at the midpoint of (low, high). Categorical factors
+    have no midpoint, so ``center_points`` runs are made at each combination
+    of their levels -- ``center_points * 2**c`` runs for ``c`` categorical
+    factors -- which keeps every categorical level balanced and lets the
+    curvature test run within each one.
+    """
+    if center_points <= 0:
+        return []
+    numeric = [_is_numeric(lo) and _is_numeric(hi) for lo, hi in zip(lows, highs)]
+    _check_center_points_possible(names, numeric, center_points)
+    cat = [i for i, ok in enumerate(numeric) if not ok]
+    out: list[dict[str, object]] = []
+    for combo in itertools.product(*[(lows[i], highs[i]) for i in cat]):
+        fixed = dict(zip(cat, combo))
+        for _ in range(center_points):
+            row: dict[str, object] = {
+                n: fixed[i]
+                if i in fixed
+                else (float(cast(float, lows[i])) + float(cast(float, highs[i]))) / 2.0
+                for i, n in enumerate(names)
+            }
+            row["is_center"] = True
+            out.append(row)
+    return out
+
+
 def factorial_2level_design(
     factors: Mapping[str, tuple[object, object]],
     *,
@@ -135,9 +184,14 @@ def factorial_2level_design(
         ``("temp", (80.0, 120.0))``) or categorical (e.g.
         ``("catalyst", ("A", "B"))``).
     center_points : int, default 0
-        Number of center-point runs added **per replicate**. Requires
-        all factors to be numeric. The center value is the midpoint of
-        the (low, high) pair.
+        Number of center-point runs added **per replicate**. A numeric
+        factor's center value is the midpoint of its (low, high) pair. A
+        categorical factor has no midpoint, so with categorical factors
+        the center points are run at **each combination of their levels**
+        (``center_points * 2**c`` center runs for ``c`` categorical
+        factors), with the numeric factors at their midpoints -- the usual
+        practice (Montgomery, *Design and Analysis of Experiments*, §6.8).
+        At least one factor must be numeric.
     replicates : int, default 1
         Number of independent replications of the whole 2**k + cp set.
     seed : int, optional
@@ -168,12 +222,7 @@ def factorial_2level_design(
         highs.append(hi)
         numeric_flags.append(_is_numeric(lo) and _is_numeric(hi))
 
-    if center_points > 0 and not all(numeric_flags):
-        non_numeric = [n for n, ok in zip(names, numeric_flags) if not ok]
-        raise ValueError(
-            f"center_points > 0 requires all factors to be numeric; "
-            f"non-numeric factors: {non_numeric}"
-        )
+    _check_center_points_possible(names, numeric_flags, center_points)
 
     k = len(names)
     if k > 8:
@@ -190,13 +239,8 @@ def factorial_2level_design(
             row["replicate"] = r
             row["is_center"] = False
             rep_rows.append(row)
-        for _ in range(center_points):
-            cp_row: dict[str, object] = {
-                names[i]: (float(cast(float, lows[i])) + float(cast(float, highs[i]))) / 2.0
-                for i in range(k)
-            }
+        for cp_row in center_point_rows(names, lows, highs, center_points):
             cp_row["replicate"] = r
-            cp_row["is_center"] = True
             rep_rows.append(cp_row)
         rows.extend(rep_rows)
 
@@ -212,6 +256,37 @@ def factorial_2level_design(
         high=tuple(highs),
         rows=rows,
     )
+
+
+def _center_indicator(
+    rows: Sequence[Mapping[str, object]], coded: Mapping[str, np.ndarray]
+) -> np.ndarray | None:
+    """0/1 column marking the center runs of a 2-level design, or ``None``.
+
+    A center run is coded 0 on every numeric factor. A categorical factor has
+    no center, so center runs keep its -1/+1 (they are made at each of its
+    levels), which shows up as the same set of zero columns in every center
+    run. The column is returned only when the design is otherwise 2-level
+    (every other run at -1/+1 on every factor), so a three-level design such
+    as a definitive screening design, whose middle level is part of the
+    design rather than a curvature check, is left alone. Rows flagged
+    ``is_center`` must be among the center runs.
+    """
+    if not coded:
+        return None
+    cols = np.column_stack(list(coded.values()))
+    zeros = cols == 0.0
+    at_center = zeros.any(axis=1)
+    if not at_center.any() or at_center.all():
+        return None
+    if not np.all(np.abs(cols[~at_center]) == 1.0):
+        return None
+    if len(np.unique(zeros[at_center], axis=0)) != 1:
+        return None
+    flagged = np.array([bool(r.get("is_center")) for r in rows])
+    if np.any(flagged & ~at_center):
+        return None
+    return at_center.astype(float)
 
 
 def effects_estimates(
@@ -232,7 +307,10 @@ def effects_estimates(
     The standard error is derived from the residual of the *joint* model (all
     requested effects fitted simultaneously by least squares; the columns of a
     2-level design are orthogonal), so one effect's real size does not inflate
-    another's standard error. Center-point runs contribute to that residual.
+    another's standard error. In a 2-level design with center points the model
+    also carries a one-df curvature term (center vs. corners), as
+    :func:`discopt.doe.anova_report` does, so the center runs contribute pure
+    error and a curved response does not inflate the standard errors.
     Effects left out of the model end up in the residual: if a real
     interaction is omitted, every standard error is inflated.
 
@@ -352,8 +430,16 @@ def effects_estimates(
         y_lo = y_arr[col < 0]
         contrasts.append((label, float(y_hi.mean() - y_lo.mean()), y_lo.size, y_hi.size, lo, hi))
 
-    # Residual of the joint least-squares model on the same columns.
-    X = np.column_stack([np.ones(n)] + [col for _, col, _, _ in terms])
+    # Residual of the joint least-squares model on the same columns. Centre
+    # points of a 2-level design sit at 0 on every column, so without a term of
+    # their own any curvature lands in the residual and inflates every standard
+    # error -- the more centre runs, the worse. Give them a one-df curvature
+    # indicator, as anova_report does, so they contribute pure error only.
+    columns = [np.ones(n)] + [col for _, col, _, _ in terms]
+    center = _center_indicator(rows, coded)
+    if center is not None:
+        columns.append(center)
+    X = np.column_stack(columns)
     coef, *_ = np.linalg.lstsq(X, y_arr, rcond=None)
     resid_ss = float(np.sum((y_arr - X @ coef) ** 2))
     df_resid = n - int(np.linalg.matrix_rank(X))

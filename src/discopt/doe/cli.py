@@ -31,7 +31,7 @@ import math
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence, cast
+from typing import Any, Mapping, Sequence, cast
 
 import numpy as np
 
@@ -691,8 +691,8 @@ _TEMPLATE_DESCRIPTIONS = {
     "factorial-2level": (
         "2-level full factorial for screening. Inputs: --factor "
         "NAME:LOW:HIGH (repeatable, 2-8 factors; LOW/HIGH may be "
-        "numeric or string). Optional: --center-points N (numeric "
-        "factors only), --replicates R. Use this to answer 'does each "
+        "numeric or string). Optional: --center-points N (repeated at each "
+        "level of any string factor), --replicates R. Use this to answer 'does each "
         "factor matter?' before fitting a response surface."
     ),
     "fractional-factorial": (
@@ -1204,6 +1204,7 @@ def _do_fit_symbolic(wb: Workbook, completed: list[dict[str, Any]]) -> dict[str,
         n_obs=int(out["n_observations"]),
         n_p=len(names),
         sigma=float(model.measurement_error),
+        inputs=_input_matrix(wb, completed),
     )
     wb.write_anova(coefficients=coefficients, anova_rows=anova_rows, fit_summary=fit_summary)
     wb.log(
@@ -2388,32 +2389,14 @@ def _cmd_status(args) -> int:
 # ──────────────────────────────────────────────────────────────────
 
 
-def do_fit(params: dict[str, Any]) -> dict[str, Any]:
-    """Estimate parameters from the completed runs in a workbook.
+def _linear_ols(wb: Workbook, completed: list[dict[str, Any]], template: str) -> dict[str, Any]:
+    """Ordinary least squares of a built-in (linear-in-parameters) template.
 
-    For the four built-in templates the model is linear in the
-    parameters, so this is ordinary least squares: ``β̂ = (XᵀX)⁻¹ Xᵀy``
-    with ``cov(β̂) = σ̂² (XᵀX)⁻¹``. The cumulative Fisher Information
-    Matrix is ``Σᵢ FIM(dᵢ) = XᵀX / σ²`` and is written to the workbook
-    for use as ``prior_fim`` by a subsequent ``extend``.
-
-    A ``--module`` experiment is fitted by weighted nonlinear least squares
-    over every measured response of every completed run (see
-    :func:`_do_fit_module`).
+    Shared by ``fit`` and the regression form of ``anova``. Returns the design
+    matrix, response, estimates, residual SS, standard errors, CIs,
+    ``(XᵀX)⁻¹`` and the matrix of input settings (for the pure-error split).
     """
-    wb = Workbook.open(Path(params["workbook"]))
     response = wb.response_name()
-    completed = wb.completed_runs()
-    if not completed:
-        raise DoEError(f"no completed runs in {wb.path}; fill in the '{response}' column first")
-
-    template = wb.template_name()
-    if not template:
-        return _do_fit_module(wb, completed)
-
-    if template == "symbolic":
-        return _do_fit_symbolic(wb, completed)
-
     input_names = [s.name for s in wb.input_specs()]
     # Derived from metadata rather than rebuild_experiment(): the fit below is
     # plain OLS over _design_row, so it needs the name ordering but not a built
@@ -2444,12 +2427,18 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
     )
     y = np.array([float(row[response]) for row in completed], dtype=np.float64)
 
-    if n_obs < n_p:
+    rank = int(np.linalg.matrix_rank(X)) if n_obs else 0
+    if rank < n_p:
         beta, *_ = np.linalg.lstsq(X, y, rcond=None)
-        # Undetermined fit — covariance / SE are not meaningful, but we
-        # still return what we can so the user sees progress.
+        # Undetermined fit — too few runs, or runs whose settings cannot
+        # separate every term (a full quadratic from a 3-factor definitive
+        # screening design's 9 distinct points). The estimates are then one of
+        # infinitely many equally good solutions and covariance / SE are not
+        # meaningful (inverting the singular XᵀX gave SE = 0, i.e. false
+        # certainty), but we still return what we can so the user sees progress.
         residual_ss = float(np.sum((y - X @ beta) ** 2))
-        cov = np.full((n_p, n_p), np.nan)
+        sigma_hat_sq = residual_ss / (n_obs - rank) if n_obs > rank else sigma**2
+        xtx_inv = np.full((n_p, n_p), np.nan)
         std_errs = np.full(n_p, np.nan)
         cis_arr = np.full((n_p, 2), np.nan)
     else:
@@ -2467,6 +2456,72 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
 
         t_val = float(t_dist.ppf(0.975, df=dof)) if n_obs > n_p else float("nan")
         cis_arr = np.column_stack([beta - t_val * std_errs, beta + t_val * std_errs])
+    inputs = np.array(
+        [[float(row[nm]) for nm in input_names] for row in completed], dtype=np.float64
+    )
+    return {
+        "input_names": input_names,
+        "parameter_names": parameter_names,
+        "sigma": sigma,
+        "n_p": n_p,
+        "n_obs": n_obs,
+        "X": X,
+        "y": y,
+        "inputs": inputs,
+        "beta": beta,
+        "residual_ss": residual_ss,
+        "std_errs": std_errs,
+        "cis_arr": cis_arr,
+        "xtx_inv": xtx_inv,
+        "sigma_hat_sq": sigma_hat_sq,
+        "rank": rank,
+    }
+
+
+def do_fit(params: dict[str, Any]) -> dict[str, Any]:
+    """Estimate parameters from the completed runs in a workbook.
+
+    For the four built-in templates the model is linear in the
+    parameters, so this is ordinary least squares: ``β̂ = (XᵀX)⁻¹ Xᵀy``
+    with ``cov(β̂) = σ̂² (XᵀX)⁻¹``. The cumulative Fisher Information
+    Matrix is ``Σᵢ FIM(dᵢ) = XᵀX / σ²`` and is written to the workbook
+    for use as ``prior_fim`` by a subsequent ``extend``.
+
+    A ``--module`` experiment is fitted by weighted nonlinear least squares
+    over every measured response of every completed run (see
+    :func:`_do_fit_module`).
+    """
+    wb = Workbook.open(Path(params["workbook"]))
+    response = wb.response_name()
+    completed = wb.completed_runs()
+    if not completed:
+        raise DoEError(f"no completed runs in {wb.path}; fill in the '{response}' column first")
+
+    template = wb.template_name()
+    if not template:
+        return _do_fit_module(wb, completed)
+
+    if template == "symbolic":
+        return _do_fit_symbolic(wb, completed)
+
+    ols = _linear_ols(wb, completed, template)
+    parameter_names = ols["parameter_names"]
+    sigma = ols["sigma"]
+    n_p, n_obs = ols["n_p"], ols["n_obs"]
+    X, y, beta = ols["X"], ols["y"], ols["beta"]
+    residual_ss, std_errs, cis_arr = ols["residual_ss"], ols["std_errs"], ols["cis_arr"]
+    sigma_hat_sq = ols["sigma_hat_sq"]
+    rank = ols["rank"]
+    estimable = rank == n_p
+    warnings_out: list[str] = []
+    if not estimable and n_obs >= n_p:
+        n_settings = len(np.unique(np.round(ols["inputs"], 12), axis=0))
+        warnings_out.append(
+            f"the {n_p}-parameter model is not estimable from these runs: "
+            f"{n_settings} distinct settings support only {rank} independent terms, so "
+            "the estimates are one of many equally good solutions and have no "
+            "standard errors. Use a smaller basis, or add runs (`discopt doe extend`)."
+        )
 
     estimates = {name: float(beta[i]) for i, name in enumerate(parameter_names)}
     std_errors = {name: float(std_errs[i]) for i, name in enumerate(parameter_names)}
@@ -2485,7 +2540,7 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
     # The sigma behind the standard errors above: the residual estimate when
     # there were degrees of freedom to spare, else the declared value. Stored so
     # the declared-scale FIM can be turned back into this covariance later.
-    if n_obs > n_p:
+    if estimable and n_obs > n_p:
         sigma_hat, sigma_source = float(np.sqrt(sigma_hat_sq)), "residual"
     else:
         sigma_hat, sigma_source = float(sigma), "declared"
@@ -2502,6 +2557,8 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
         n_obs=n_obs,
         n_p=n_p,
         sigma=sigma,
+        inputs=ols["inputs"],
+        rank=rank,
     )
     wb.write_anova(
         coefficients=coefficients,
@@ -2531,7 +2588,9 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
         "objective": residual_ss,
         "sigma": sigma_hat,
         "sigma_source": sigma_source,
-        "degrees_of_freedom": max(0, n_obs - n_p),
+        "degrees_of_freedom": max(0, n_obs - rank),
+        "estimable": estimable,
+        "warnings": warnings_out,
         "log_det_fim": log_det_fim,
         # The regression statistics that already go into the workbook's ANOVA
         # sheet, returned as well: whether a coefficient is distinguishable
@@ -2547,7 +2606,7 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
         # rejected for it; point at the verb that does apply.
         "next_command": (
             f"discopt doe anova {wb.path}"
-            if template in _CLASSICAL_TEMPLATE_NAMES
+            if template in _CLASSICAL_TEMPLATE_NAMES and estimable
             else f"discopt doe extend {wb.path} --n N"
         ),
     }
@@ -2563,8 +2622,18 @@ def _compute_anova(
     n_obs: int,
     n_p: int,
     sigma: float,
+    inputs: np.ndarray | None = None,
+    rank: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[tuple[str, Any]]]:
     """Compute coefficient table, ANOVA decomposition, and fit summary.
+
+    ``inputs`` (one row of input values per observation) enables the classical
+    split of the residual into **lack of fit** and **pure error** whenever some
+    input settings were run more than once -- the reason replicated center
+    points are in a central composite or Box-Behnken design. Pure error is the
+    scatter among runs at identical settings and does not depend on the model;
+    lack of fit is the rest of the residual, and its F-test against pure error
+    asks whether the model's form is adequate.
 
     Assumes the model includes an intercept (true for every built-in
     template), so ``df_regression = n_p - 1``. Returns NaN-filled entries
@@ -2580,7 +2649,11 @@ def _compute_anova(
     from scipy.stats import f as f_dist
     from scipy.stats import t as t_dist
 
-    dof_resid = n_obs - n_p
+    # ``rank`` (of the design matrix) is the number of terms the runs actually
+    # determine; below ``n_p`` the regression and residual degrees of freedom
+    # follow it, and the coefficient tests are undefined (their SEs are NaN).
+    n_eff = n_p if rank is None else int(rank)
+    dof_resid = n_obs - n_eff
     has_dof = dof_resid > 0
     nan = float("nan")
 
@@ -2619,7 +2692,7 @@ def _compute_anova(
     ss_total = float(np.sum((y - y_bar) ** 2))
     ss_residual = float(residual_ss)
     ss_regression = max(ss_total - ss_residual, 0.0)
-    df_regression = max(n_p - 1, 0)
+    df_regression = max(n_eff - 1, 0)
     df_total = n_obs - 1
 
     if has_dof and df_regression > 0:
@@ -2660,6 +2733,10 @@ def _compute_anova(
         },
     ]
 
+    lof = _lack_of_fit(inputs, y, ss_residual, dof_resid) if has_dof else None
+    if lof is not None:
+        anova_rows[2:2] = lof["rows"]
+
     if ss_total > 0:
         r2 = 1.0 - ss_residual / ss_total
         if has_dof:
@@ -2683,7 +2760,76 @@ def _compute_anova(
         ("F_statistic", float(f_stat)),
         ("F_p_value", float(p_f)),
     ]
+    if lof is not None:
+        fit_summary += [
+            ("lack_of_fit_F", float(lof["f"])),
+            ("lack_of_fit_p_value", float(lof["p"])),
+            ("pure_error_df", int(lof["df_pe"])),
+        ]
     return coefficients, anova_rows, fit_summary
+
+
+def _input_matrix(wb: Workbook, completed: list[dict[str, Any]]) -> np.ndarray | None:
+    """Input settings of the completed runs, one row each, or ``None``."""
+    names = [s.name for s in wb.input_specs()]
+    try:
+        return np.array([[float(r[n]) for n in names] for r in completed], dtype=np.float64)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _lack_of_fit(
+    inputs: np.ndarray | None, y: np.ndarray, ss_residual: float, dof_resid: int
+) -> dict[str, Any] | None:
+    """Split a residual into lack of fit and pure error, or ``None``.
+
+    Pure error pools the scatter within groups of runs at identical input
+    settings. ``None`` when there are no replicated settings (no pure error) or
+    when every residual degree of freedom is pure error (nothing left to test).
+    """
+    from scipy.stats import f as f_dist
+
+    if inputs is None:
+        return None
+    X = np.asarray(inputs, dtype=np.float64)
+    if X.ndim != 2 or X.shape[0] != len(y) or not np.all(np.isfinite(X)):
+        return None
+    keys = np.round(X, 12)
+    _, inverse, counts = np.unique(keys, axis=0, return_inverse=True, return_counts=True)
+    inverse = np.asarray(inverse).ravel()
+    df_pe = int(np.sum(counts - 1))
+    df_lof = int(dof_resid) - df_pe
+    if df_pe <= 0 or df_lof <= 0:
+        return None
+    means = np.bincount(inverse, weights=y) / counts
+    ss_pe = float(np.sum((y - means[inverse]) ** 2))
+    ss_lof = max(float(ss_residual) - ss_pe, 0.0)
+    ms_pe = ss_pe / df_pe
+    ms_lof = ss_lof / df_lof
+    if ms_pe > 0:
+        f_lof = ms_lof / ms_pe
+        p_lof = float(f_dist.sf(f_lof, df_lof, df_pe))
+    else:
+        f_lof, p_lof = float("nan"), float("nan")
+    rows = [
+        {
+            "source": "  Lack of fit",
+            "ss": ss_lof,
+            "df": df_lof,
+            "ms": ms_lof,
+            "f_statistic": f_lof,
+            "p_value": p_lof,
+        },
+        {
+            "source": "  Pure error",
+            "ss": ss_pe,
+            "df": df_pe,
+            "ms": ms_pe,
+            "f_statistic": None,
+            "p_value": None,
+        },
+    ]
+    return {"rows": rows, "f": f_lof, "p": p_lof, "df_pe": df_pe, "df_lof": df_lof}
 
 
 # The basis-row expansion moved to discopt.doe.linear_design, where it does
@@ -2710,13 +2856,20 @@ def _cmd_fit(args) -> int:
         if out.get("reduced_chi_square") is not None and math.isfinite(out["reduced_chi_square"]):
             print(f"  reduced chi2: {out['reduced_chi_square']:.4g}")
         print(f"  log-det FIM:  {out['log_det_fim']:.6g}")
+        fs = out.get("summary") or {}
+        p_lof = fs.get("lack_of_fit_p_value")
+        if p_lof is not None and math.isfinite(p_lof):
+            print(
+                f"  lack of fit:  F = {fs['lack_of_fit_F']:.4g}, p = {p_lof:.4g} "
+                f"(pure error from {fs['pure_error_df']} replicate df)"
+            )
         print("  parameters:")
         for p in out["parameters"]:
             est = p["estimate"]
             se = p["std_error"]
             if est is None:
                 continue
-            se_s = f"{se:.4g}" if se is not None else "n/a"
+            se_s = f"{se:.4g}" if se is not None and math.isfinite(se) else "n/a"
             print(f"    {p['name']:>8s} = {est:>12.6g}  ± {se_s}")
         print(f"  next:         {out['next_command']}")
     return 0
@@ -2739,6 +2892,8 @@ def do_anova(params: dict[str, Any]) -> dict[str, Any]:
 
     template = wb.template_name()
     template_args = wb.template_args()
+    if _uses_regression_anova(wb, template):
+        return _regression_anova(wb, completed, template or "", params)
     if template and template in {"latin-square", "graeco-latin", "hyper-graeco-latin"}:
         factors = list(template_args.get("levels", {}).keys())
     else:
@@ -2829,11 +2984,22 @@ def do_anova(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _is_center_row(row: dict[str, Any], levels: dict[str, tuple[Any, Any]]) -> bool:
-    """True when every factor sits at the midpoint of its two numeric levels."""
+    """True when every numeric factor sits at the midpoint of its two levels.
+
+    Categorical factors have no midpoint; center runs are made at one of their
+    levels, so they are not checked. At least one factor must be numeric.
+    """
+
+    def _num(v: Any) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    numeric = {f: lh for f, lh in levels.items() if _num(lh[0]) and _num(lh[1])}
+    if not numeric:
+        return False
     try:
-        return bool(levels) and all(
+        return all(
             abs(float(row[f]) - (float(lo) + float(hi)) / 2.0) < 1e-12
-            for f, (lo, hi) in levels.items()
+            for f, (lo, hi) in numeric.items()
         )
     except (TypeError, ValueError):
         return False
@@ -2856,6 +3022,193 @@ def _effects_summary(effects: list[dict[str, Any]], *, saturated: bool) -> str:
             f"{e['se']:9.4f} {e['t']:8.3f} {p_str}"
         )
     return "\n".join(lines)
+
+
+def _uses_regression_anova(wb: Workbook, template: str | None) -> bool:
+    """True for a continuous-factor template with an intercept model.
+
+    Comparing factor-level means (the Latin/factorial analysis) is the wrong
+    question for a central composite, Box-Behnken, definitive screening or
+    other regression design: its factors are continuous, its levels are
+    unequally replicated (center points), and in a CCD the axial levels are
+    confounded with each other, so that analysis is unbalanced at best and
+    fails outright at worst. These get the regression ANOVA of their model.
+    """
+    from discopt.doe.templates import COMBINATORIAL_TEMPLATES, SYMBOLIC_TEMPLATE
+
+    if not template or template in COMBINATORIAL_TEMPLATES:
+        return False
+    if template in (SYMBOLIC_TEMPLATE, "optimize"):
+        return False
+    try:
+        return "b0" in wb.parameter_names()
+    except ValueError:
+        return False
+
+
+def _term_label(powers: Mapping[str, int]) -> str:
+    """``{"T": 1, "P": 1}`` -> ``"T*P"``; ``{"T": 2}`` -> ``"T^2"``."""
+    return "*".join(f"{n}^{p}" if p > 1 else n for n, p in powers.items()) or "1"
+
+
+def _regression_anova(
+    wb: Workbook, completed: list[dict[str, Any]], template: str, params: dict[str, Any]
+) -> dict[str, Any]:
+    """ANOVA of a regression template's model: one row per model term.
+
+    Each term's SS is its *adjusted* (partial, Type III) sum of squares,
+    ``b_j^2 / [(XᵀX)⁻¹]_jj`` -- the increase in residual SS from dropping that
+    term alone -- so the rows do not depend on term order (they need not sum to
+    the model SS when terms are correlated). The residual is split into lack of
+    fit and pure error when settings were replicated (e.g. center points).
+    """
+    from scipy.stats import f as f_dist
+
+    from discopt.doe.anova import AnovaEffect, AnovaTable
+    from discopt.doe.linear_design import basis_terms
+
+    if params.get("interactions"):
+        raise DoEError(
+            f"--interaction does not apply to a '{template}' workbook: its model terms "
+            "(including interactions) come from the template's regression basis"
+        )
+    if params.get("include_replicate"):
+        raise DoEError(f"--include-replicate does not apply to a '{template}' workbook")
+
+    response = wb.response_name()
+    ols = _linear_ols(wb, completed, template)
+    names, beta, y = ols["parameter_names"], ols["beta"], ols["y"]
+    n_obs, n_p = ols["n_obs"], ols["n_p"]
+    if n_obs <= n_p:
+        raise DoEError(
+            f"{n_obs} completed run(s) for {n_p} model parameters leaves no residual "
+            "degrees of freedom for an ANOVA; complete more runs"
+        )
+    rank = int(np.linalg.matrix_rank(ols["X"]))
+    if rank < n_p:
+        n_settings = len(np.unique(np.round(ols["inputs"], 12), axis=0))
+        raise DoEError(
+            f"the {n_p}-parameter '{wb.template_args().get('basis', 'model')}' basis is not "
+            f"estimable from these runs ({n_settings} distinct settings support only "
+            f"{rank} independent terms); use a smaller basis or add runs "
+            "(e.g. `discopt doe extend`)"
+        )
+    coefficients, anova_rows, fit_summary = _compute_anova(
+        y=y,
+        beta=beta,
+        residual_ss=ols["residual_ss"],
+        std_errs=ols["std_errs"],
+        parameter_names=names,
+        n_obs=n_obs,
+        n_p=n_p,
+        sigma=ols["sigma"],
+        inputs=ols["inputs"],
+    )
+    dof_resid = n_obs - n_p
+    ms_resid = ols["residual_ss"] / dof_resid
+    try:
+        labels = [
+            _term_label(t)
+            for t in basis_terms(template, wb.template_args(), names, ols["input_names"])
+        ]
+    except (ValueError, KeyError):
+        labels = list(names)
+
+    rows: list[dict[str, Any]] = []
+    model = anova_rows[0]
+    rows.append(
+        {
+            "source": "Model",
+            "ss": model["ss"],
+            "df": model["df"],
+            "ms": model["ms"],
+            "f": model["f_statistic"],
+            "p": model["p_value"],
+        }
+    )
+    xtx_inv = ols["xtx_inv"]
+    for j, name in enumerate(names):
+        if name == "b0":
+            continue
+        d = float(xtx_inv[j, j])
+        ss = float(beta[j] ** 2 / d) if d > 0 and np.isfinite(d) else float("nan")
+        f = ss / ms_resid if ms_resid > 0 and np.isfinite(ss) else float("nan")
+        p = float(f_dist.sf(f, 1, dof_resid)) if np.isfinite(f) else float("nan")
+        rows.append(
+            {"source": f"  {labels[j]}", "term": name, "ss": ss, "df": 1, "ms": ss, "f": f, "p": p}
+        )
+    for r in anova_rows[1:]:
+        rows.append(
+            {
+                "source": "Error" if r["source"] == "Residual" else r["source"],
+                "ss": r["ss"],
+                "df": r["df"],
+                "ms": r["ms"],
+                "f": r["f_statistic"],
+                "p": r["p_value"],
+            }
+        )
+
+    def _opt(v: Any) -> float | None:
+        return None if v is None or not np.isfinite(v) else float(v)
+
+    table = AnovaTable(
+        rows=[
+            AnovaEffect(
+                r["source"].replace("Total (corrected)", "Total"),
+                float(r["ss"]),
+                int(r["df"]),
+                float(r["ms"]) if r["ms"] is not None and np.isfinite(r["ms"]) else 0.0,
+                _opt(r["f"]),
+                _opt(r["p"]),
+            )
+            for r in rows
+        ],
+        response=response,
+        n_obs=n_obs,
+        grand_mean=float(np.mean(y)),
+        balanced=True,
+    )
+    summary = dict(fit_summary)
+    notes = [
+        "",
+        f"Regression ANOVA of the '{template}' model (adjusted SS per term).",
+        f"R^2 = {summary['R_squared']:.4f}, adjusted R^2 = "
+        f"{summary['adjusted_R_squared']:.4f}, RMSE = {summary['RMSE (sigma_hat)']:.4g}",
+    ]
+    if "lack_of_fit_p_value" in summary:
+        p_lof = summary["lack_of_fit_p_value"]
+        if np.isfinite(p_lof):
+            verdict = (
+                "significant lack of fit at the 5% level -- the model form may be "
+                "inadequate (consider more terms or a transform)"
+                if p_lof < 0.05
+                else "no significant lack of fit at the 5% level"
+            )
+            notes.append(f"Lack of fit p = {p_lof:.4g}: {verdict}.")
+    elif len(np.unique(np.round(ols["inputs"], 12), axis=0)) < n_obs:
+        notes.append(
+            "No lack-of-fit test: every residual degree of freedom is pure error "
+            "(the model has as many terms as there are distinct settings)."
+        )
+    else:
+        notes.append(
+            "No lack-of-fit test: no input settings were replicated (add replicated "
+            "center points to get a pure-error estimate)."
+        )
+    return {
+        "workbook_path": str(wb.path),
+        "response": response,
+        "analysis": "regression",
+        "effects": None,
+        "n_observations": n_obs,
+        "grand_mean": float(np.mean(y)),
+        "balanced": True,
+        "rows": rows,
+        "coefficients": coefficients,
+        "fit_summary": summary,
+        "summary": table.summary() + "\n" + "\n".join(notes),
+    }
 
 
 def _cmd_anova(args) -> int:
@@ -3422,7 +3775,10 @@ def add_subparser(subparsers) -> None:
                 "--center-points",
                 type=int,
                 default=0,
-                help="Center-point runs per replicate (numeric factors only; default 0).",
+                help=(
+                    "Center-point runs per replicate (default 0); with categorical "
+                    "factors, made at each combination of their levels."
+                ),
             )
             sp.add_argument(
                 "--replicates",

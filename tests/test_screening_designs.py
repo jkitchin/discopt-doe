@@ -71,8 +71,10 @@ def test_plackett_burman_center_points_and_errors():
         plackett_burman_design({f: (0, 1) for f in "ABCD"}, n_runs=4)
     with pytest.raises(ValueError, match="one of"):
         plackett_burman_design({f: (0, 1) for f in "AB"}, n_runs=28)
-    with pytest.raises(ValueError, match="numeric"):
-        plackett_burman_design({"A": ("a", "b"), "B": (0, 1)}, center_points=1)
+    mixed = plackett_burman_design({"A": ("a", "b"), "B": (0, 1)}, center_points=1)
+    assert sorted(r["A"] for r in mixed.rows if r["is_center"]) == ["a", "b"]
+    with pytest.raises(ValueError, match="at least one numeric factor"):
+        plackett_burman_design({"A": ("a", "b"), "B": ("c", "d")}, center_points=1)
 
 
 # --------------------------------------------------------------------------
