@@ -23,6 +23,7 @@ from discopt.doe.design import (
     batch_optimal_experiment,
     optimal_experiment,
 )
+from discopt.doe.targets import Target, TargetPrecision
 from discopt.doe._estimation import estimate_parameters
 from discopt.estimate import (
     EstimationResult,
@@ -49,6 +50,13 @@ class DoERound:
     runs : list of dict or None
         With ``initial_runs``: every run (conditions and responses) that this
         round's estimate was fitted to.
+    target_precision : TargetPrecision or None
+        With ``target``: the targets' precision under this round's estimate
+        (the data so far), before the recommended experiment(s) are run.
+    stopped : bool
+        The loop stopped after this round because every toleranced target was
+        already precise enough (``stop_at_tolerance=True``); its recommendation
+        was not run.
     """
 
     round: int
@@ -56,6 +64,49 @@ class DoERound:
     design: DesignResult | BatchDesignResult
     data_collected: dict[str, Union[float, np.ndarray]] | None = None
     runs: list[dict[str, Any]] | None = None
+    target_precision: TargetPrecision | None = None
+    stopped: bool = False
+
+
+def _round_design(
+    experiment: Any,
+    est: EstimationResult,
+    design_bounds: dict[str, tuple[float, float]],
+    *,
+    criterion: str,
+    experiments_per_round: int,
+    batch_strategy: str,
+    target: Target | None,
+) -> tuple[DesignResult | BatchDesignResult, list[dict[str, float]], TargetPrecision | None]:
+    """One round's recommendation, with the target re-resolved at the new estimate."""
+    resolved = None if target is None else target.resolve(experiment, est.parameters)
+    precision = None if resolved is None else resolved.precision(est.fim)
+    design: DesignResult | BatchDesignResult
+    if experiments_per_round == 1:
+        design = optimal_experiment(
+            experiment,
+            est.parameters,
+            design_bounds,
+            criterion=criterion,
+            prior_fim=est.fim,
+            target=resolved,
+        )
+        return design, [design.design], precision
+    design = batch_optimal_experiment(
+        experiment,
+        est.parameters,
+        design_bounds,
+        n_experiments=experiments_per_round,
+        criterion=criterion,
+        strategy=batch_strategy,
+        prior_fim=est.fim,
+        target=resolved,
+    )
+    return design, list(design.designs), precision
+
+
+def _should_stop(precision: TargetPrecision | None, stop_at_tolerance: bool) -> bool:
+    return bool(stop_at_tolerance and precision is not None and precision.met)
 
 
 def sequential_doe(
@@ -71,6 +122,8 @@ def sequential_doe(
     batch_strategy: str = BatchStrategy.GREEDY,
     run_experiment: Callable[[dict[str, float]], dict[str, float]] | None = None,
     callback: Callable[[DoERound], None] | None = None,
+    target: Target | None = None,
+    stop_at_tolerance: bool = False,
 ) -> list[DoERound]:
     """Run the full sequential MBDoE loop.
 
@@ -136,6 +189,16 @@ def sequential_doe(
            occurring.
     callback : callable, optional
         Called with each ``DoERound`` after it completes.
+    target : Target, optional
+        Design every round for the precision of these targets (see
+        :class:`~discopt.doe.Target`). It is re-resolved at each round's
+        estimate, since output and function targets move with the parameters,
+        and each round records ``target_precision``.
+    stop_at_tolerance : bool, default False
+        With a target that has tolerances: stop as soon as every target's
+        standard error is within its tolerance, without running that round's
+        recommendation (the round is marked ``stopped``). The budget
+        ``n_rounds`` still caps the loop.
 
     Returns
     -------
@@ -148,6 +211,8 @@ def sequential_doe(
     """
     if experiments_per_round < 1:
         raise ValueError(f"experiments_per_round must be >= 1, got {experiments_per_round}")
+    if stop_at_tolerance and target is None:
+        raise ValueError("stop_at_tolerance needs a target with tolerances")
     if initial_runs is not None:
         if initial_data:
             raise ValueError("pass either initial_data or initial_runs, not both")
@@ -162,6 +227,8 @@ def sequential_doe(
             batch_strategy=batch_strategy,
             run_experiment=run_experiment,
             callback=callback,
+            target=target,
+            stop_at_tolerance=stop_at_tolerance,
         )
     if initial_data is None:
         raise ValueError("initial_data is required unless initial_runs is given")
@@ -178,34 +245,20 @@ def sequential_doe(
             initial_guess=current_guess,
         )
 
-        # Information already collected: est.fim is fit on *all* accumulated
-        # data, so it is the cumulative prior for designing the next point.
+        # Step 2: Design next experiment(s). est.fim is fit on *all*
+        # accumulated data, so it is the cumulative prior for the next point.
         # (Summing est.fim across rounds would double-count earlier data,
         # since each round's est.fim already includes it.)
-        prior_fim = est.fim
-
-        # Step 2: Design next experiment(s)
-        design: DesignResult | BatchDesignResult
-        if experiments_per_round == 1:
-            design = optimal_experiment(
-                experiment,
-                est.parameters,
-                design_bounds,
-                criterion=criterion,
-                prior_fim=prior_fim,
-            )
-            round_designs = [design.design]
-        else:
-            design = batch_optimal_experiment(
-                experiment,
-                est.parameters,
-                design_bounds,
-                n_experiments=experiments_per_round,
-                criterion=criterion,
-                strategy=batch_strategy,
-                prior_fim=prior_fim,
-            )
-            round_designs = list(design.designs)
+        design, round_designs, precision = _round_design(
+            experiment,
+            est,
+            design_bounds,
+            criterion=criterion,
+            experiments_per_round=experiments_per_round,
+            batch_strategy=batch_strategy,
+            target=target,
+        )
+        stop = _should_stop(precision, stop_at_tolerance)
 
         # Step 3: Record round
         round_result = DoERound(
@@ -213,10 +266,12 @@ def sequential_doe(
             estimation=est,
             design=design,
             data_collected=None,
+            target_precision=precision,
+            stopped=stop,
         )
 
         # Step 4: Run experiment(s) if callback provided
-        if run_experiment is not None:
+        if run_experiment is not None and not stop:
             collected: dict[str, np.ndarray] = {}
             for d in round_designs:
                 new_data = run_experiment(d)
@@ -256,7 +311,7 @@ def sequential_doe(
             callback(round_result)
 
         # If no experiment runner, stop after first recommendation
-        if run_experiment is None:
+        if run_experiment is None or stop:
             break
 
     return history
@@ -274,6 +329,8 @@ def _sequential_runs(
     batch_strategy: str,
     run_experiment: Callable[[dict[str, float]], dict[str, float]] | None,
     callback: Callable[[DoERound], None] | None,
+    target: Target | None = None,
+    stop_at_tolerance: bool = False,
 ) -> list[DoERound]:
     """The loop on runs-with-conditions: refit the campaign, design, run, repeat."""
     from discopt.doe.runs import campaign_experiment, symbolic_experiment
@@ -294,29 +351,16 @@ def _sequential_runs(
         campaign = campaign_experiment(model, all_runs)
         data = campaign.data_from_runs(all_runs)
         est = campaign.estimate(data, initial_guess=current_guess)
-        prior_fim = est.fim
-
-        design: DesignResult | BatchDesignResult
-        if experiments_per_round == 1:
-            design = optimal_experiment(
-                design_model,
-                est.parameters,
-                design_bounds,
-                criterion=criterion,
-                prior_fim=prior_fim,
-            )
-            round_designs = [design.design]
-        else:
-            design = batch_optimal_experiment(
-                design_model,
-                est.parameters,
-                design_bounds,
-                n_experiments=experiments_per_round,
-                criterion=criterion,
-                strategy=batch_strategy,
-                prior_fim=prior_fim,
-            )
-            round_designs = list(design.designs)
+        design, round_designs, precision = _round_design(
+            design_model,
+            est,
+            design_bounds,
+            criterion=criterion,
+            experiments_per_round=experiments_per_round,
+            batch_strategy=batch_strategy,
+            target=target,
+        )
+        stop = _should_stop(precision, stop_at_tolerance)
 
         round_result = DoERound(
             round=round_idx,
@@ -324,8 +368,10 @@ def _sequential_runs(
             design=design,
             data_collected=None,
             runs=[dict(r) for r in all_runs],
+            target_precision=precision,
+            stopped=stop,
         )
-        if run_experiment is not None:
+        if run_experiment is not None and not stop:
             collected: dict[str, np.ndarray] = {}
             for d in round_designs:
                 measured = dict(run_experiment(dict(d)))
@@ -340,6 +386,6 @@ def _sequential_runs(
         history.append(round_result)
         if callback is not None:
             callback(round_result)
-        if run_experiment is None:
+        if run_experiment is None or stop:
             break
     return history

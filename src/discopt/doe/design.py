@@ -35,12 +35,23 @@ from discopt.doe.simplex import (
     sample_simplex,  # noqa: F401 - re-exported for backwards compatibility
     sum_constraint,  # noqa: F401 - re-exported for backwards compatibility
 )
+from discopt.doe.targets import (
+    ResolvedTarget,
+    Target,
+    TargetPrecision,
+    _check_target_criterion,
+)
 from discopt.estimate import Experiment
 
 if TYPE_CHECKING:  # DesignRegion is imported lazily where it is built
     from discopt.doe.linear_design import DesignRegion
 
 _SINGULAR_SENTINEL = 1e12
+
+
+def _is_target(region: Any) -> bool:
+    """``region`` is a :class:`~discopt.doe.targets.ResolvedTarget`, not a DesignRegion."""
+    return bool(getattr(region, "is_target", False))
 
 
 class DesignCriterion:
@@ -81,11 +92,18 @@ class DesignResult:
         FIM at the optimal design.
     criterion_value : float
         Value of the optimized design criterion.
+    target : ResolvedTarget or None
+        The target the criterion was evaluated on, when one was given.
     """
 
     design: dict[str, float]
     fim_result: FIMResult
     criterion_value: float
+    target: ResolvedTarget | None = None
+
+    def target_precision(self) -> TargetPrecision | None:
+        """Predicted precision of the targets if this experiment is run."""
+        return None if self.target is None else self.target.precision(self.fim)
 
     @property
     def fim(self) -> np.ndarray:
@@ -125,6 +143,8 @@ class DesignResult:
         se = self.predicted_standard_errors
         for i, name in enumerate(self.fim_result.parameter_names):
             lines.append(f"  SE({name}) = {se[i]:.4g}")
+        if self.target is not None:
+            lines += ["", self.target.precision(self.fim).summary()]
         return "\n".join(lines)
 
 
@@ -150,6 +170,8 @@ class BatchDesignResult:
     per_round_criterion : list[float] or None
         For greedy / penalized strategies, the criterion value after
         each successive pick. ``None`` for joint strategy.
+    target : ResolvedTarget or None
+        The target the criterion was evaluated on, when one was given.
     """
 
     designs: list[dict[str, float]]
@@ -158,6 +180,11 @@ class BatchDesignResult:
     criterion_value: float
     strategy: str
     per_round_criterion: list[float] | None = None
+    target: ResolvedTarget | None = None
+
+    def target_precision(self) -> TargetPrecision | None:
+        """Predicted precision of the targets after running the full batch."""
+        return None if self.target is None else self.target.precision(self.joint_fim)
 
     @property
     def n_experiments(self) -> int:
@@ -195,6 +222,7 @@ class BatchDesignResult:
             design=self.designs[0],
             fim_result=self.fim_results[0],
             criterion_value=self.criterion_value,
+            target=self.target,
         )
 
     def summary(self) -> str:
@@ -217,6 +245,8 @@ class BatchDesignResult:
         se = self.predicted_standard_errors
         for i, name in enumerate(self.parameter_names):
             lines.append(f"  SE({name}) = {se[i]:.4g}")
+        if self.target is not None:
+            lines += ["", self.target.precision(self.joint_fim).summary()]
         return "\n".join(lines)
 
 
@@ -250,7 +280,12 @@ def _criterion_from_fim(
     others. ``smooth=True`` asks G for its soft maximum, a differentiable
     stand-in the local optimizer can follow; the exact maximum is piecewise and
     a gradient search stalls on its kinks. Report the exact one.
+
+    ``region`` may instead be a resolved target (see :mod:`discopt.doe.targets`),
+    in which case the criterion is evaluated on the targets' covariance.
     """
+    if _is_target(region):
+        return region.criterion(fim, criterion, smooth=smooth)
     if criterion in PREDICTION_CRITERIA:
         if region is None:
             raise ValueError(
@@ -331,6 +366,49 @@ def experiment_region(
     return DesignRegion(flat, weights, flat, repeated, repeated, "sensitivity")
 
 
+def _resolve_target(
+    target: Target | ResolvedTarget | None,
+    experiment: Experiment,
+    param_values: Mapping[str, float],
+    criterion: str,
+    prediction_region: Any,
+    prediction_points: Any,
+) -> ResolvedTarget | None:
+    """Turn ``target=`` into the matrix the searches evaluate, and check it fits."""
+    if target is None:
+        return None
+    if prediction_region is not None or prediction_points is not None:
+        raise ValueError(
+            "a target replaces the prediction region; to target predictions over a region "
+            "use Target.region(bounds=..., points=...) (combinable with other targets)"
+        )
+    if isinstance(target, Target):
+        resolved = target.resolve(experiment, param_values)
+        if isinstance(experiment, ParameterScaledExperiment):
+            # The FIM is taken w.r.t. φ = θ / s, so ∂ψ/∂φ = S ∂ψ/∂θ. (A
+            # ResolvedTarget is taken as already in the FIM's coordinates.)
+            resolved = dataclasses.replace(resolved, K=experiment.scale[:, None] * resolved.K)
+    elif isinstance(target, ResolvedTarget):
+        resolved = target
+    else:
+        raise TypeError(f"target must be a Target or ResolvedTarget, got {type(target).__name__}")
+    _check_target_criterion(resolved, criterion)
+    return resolved
+
+
+def _warn_if_target_not_estimable(fim: np.ndarray, target: ResolvedTarget) -> None:
+    import warnings
+
+    prec = target.precision(fim)
+    if not prec.estimable:
+        warnings.warn(
+            f"the FIM at the optimal design does not identify the targets {target.names}: "
+            "no candidate design makes them estimable. Add a prior_fim from other "
+            "experiments, design a batch (batch_optimal_experiment), or reduce the targets.",
+            stacklevel=3,
+        )
+
+
 def optimal_experiment(
     experiment: Experiment,
     param_values: dict[str, float],
@@ -350,6 +428,7 @@ def optimal_experiment(
     initial_designs: Sequence[Mapping[str, float]] | None = None,
     response_bounds: Mapping[str, tuple[float | None, float | None]] | None = None,
     scale_parameters: bool = False,
+    target: Target | ResolvedTarget | None = None,
     seed: int = 42,
 ) -> DesignResult:
     """Find optimal experimental conditions by maximizing information gain.
@@ -422,6 +501,16 @@ def optimal_experiment(
         ``prior_fim`` stays in unscaled units (it is scaled with the FIM), the
         returned ``fim_result`` is unscaled, and ``criterion_value`` is the
         scaled criterion that was optimized.
+    target : Target or ResolvedTarget, optional
+        Evaluate ``criterion`` on the precision of chosen targets instead of
+        all parameters: a parameter subset (the rest are nuisance), weighted
+        parameters, linear combinations, or model outputs at operating points
+        (see :class:`~discopt.doe.Target`). ``"trace"`` becomes the weighted
+        variance sum ``Σ w_j Var(ψ_j)``, ``"determinant"`` ``-log det Σ_ψ``,
+        ``"min_eigenvalue"`` the smallest eigenvalue of ``Σ_ψ⁻¹``, and
+        ``"max_variance"`` the largest weighted variance. The targets'
+        precision is in ``result.target_precision()``. Targeted criteria do
+        not depend on parameter units, so ``scale_parameters`` is ignored.
     n_refine : int, default 4
         Number of the best-scoring multi-start candidates the local solver is
         started from (unconstrained problems); the best refined design wins.
@@ -440,6 +529,11 @@ def optimal_experiment(
         inequality_constraints = list(inequality_constraints or []) + _response_bound_constraints(
             experiment, param_values, response_bounds
         )
+    resolved = _resolve_target(
+        target, experiment, param_values, criterion, prediction_region, prediction_points
+    )
+    if resolved is not None:
+        scale_parameters = False  # targeted criteria are invariant to parameter scaling
     if scale_parameters and not isinstance(experiment, ParameterScaledExperiment):
         wrapped = ParameterScaledExperiment(experiment, parameter_scale(experiment, param_values))
         res = optimal_experiment(
@@ -495,6 +589,7 @@ def optimal_experiment(
                     local_refine=local_refine,
                     n_refine=n_refine,
                     initial_designs=initial_designs,
+                    target=resolved,
                     seed=seed,
                 )
             initial_designs.append(d_seed.design)
@@ -522,7 +617,7 @@ def optimal_experiment(
     # SLSQP refinement seed. The scan ranks purely by the criterion, so when
     # constraints are present this incumbent is typically infeasible and must
     # not be returned as-is.
-    region = prediction_region
+    region = prediction_region if resolved is None else resolved
     if criterion in PREDICTION_CRITERIA and region is None:
         # The sensitivity rows depend on the nominals and the region only, so
         # they are computed once here and reused by every candidate evaluation.
@@ -549,6 +644,12 @@ def optimal_experiment(
                 "No feasible design point found; the FIM could not be evaluated "
                 "at any candidate (see the chained error for the cause)."
             ) from e
+        if resolved is not None:
+            raise RuntimeError(
+                f"No candidate design makes the targets {resolved.names} estimable on its "
+                "own. Pass a prior_fim from earlier experiments, or design a batch with "
+                "batch_optimal_experiment, so that the information can accumulate."
+            )
         raise RuntimeError("No feasible design point found")
 
     if not constrained:
@@ -644,12 +745,16 @@ def optimal_experiment(
             "seed the multi-start with constraint-satisfying candidates."
         )
 
-    _warn_if_singular(best_fim_result.fim, best_fim_result.parameter_names)
+    if resolved is not None:
+        _warn_if_target_not_estimable(best_fim_result.fim, resolved)
+    else:
+        _warn_if_singular(best_fim_result.fim, best_fim_result.parameter_names)
 
     return DesignResult(
         design=best_design,
         fim_result=best_fim_result,
         criterion_value=best_criterion,
+        target=resolved,
     )
 
 
@@ -951,6 +1056,20 @@ _LOG_SCALED_CRITERIA = (
 )
 
 
+def _log_scaled(criterion: str, region: Any) -> bool:
+    """Refine on a log scale? Targeted variances span decades like A does."""
+    if _is_target(region):
+        return criterion != DesignCriterion.D_OPTIMAL
+    return criterion in _LOG_SCALED_CRITERIA
+
+
+def _eigen_matrix(fim: np.ndarray, region: Any) -> np.ndarray | None:
+    """The matrix whose eigenvalues E / ME judge: the FIM, or the target information."""
+    if _is_target(region):
+        return region.information(fim)
+    return fim
+
+
 def _nelder_mead_polish(objective: Callable, res: Any, bounds: list) -> Any:
     """Derivative-free polish of a bounded refinement; keeps the better point.
 
@@ -1067,7 +1186,7 @@ def _refine_single_design(
     def to_design(x: np.ndarray) -> dict[str, float]:
         return {n: float(v) for n, v in zip(design_names, x)}
 
-    log_scale = criterion in _LOG_SCALED_CRITERIA
+    log_scale = _log_scaled(criterion, region)
     eigen = criterion in (DesignCriterion.E_OPTIMAL, DesignCriterion.ME_OPTIMAL)
     # E and ME are refined on a smooth stand-in (soft-min / soft-max of the
     # log-eigenvalues at a temperature tau), tightened in stages, then reported
@@ -1081,7 +1200,10 @@ def _refine_single_design(
         try:
             fim_result = eval_fim(design)
             if eigen:
-                return _smooth_eigen_objective(fim_result.fim, criterion, temperature[0])
+                mat = _eigen_matrix(fim_result.fim, region)
+                if mat is None:
+                    return _SINGULAR_SENTINEL
+                return _smooth_eigen_objective(mat, criterion, temperature[0])
             crit = _evaluate_criterion(fim_result, criterion, region, smooth=True)
         except Exception:
             return _SINGULAR_SENTINEL
@@ -1181,6 +1303,8 @@ def _evaluate_criterion(
     smooth: bool = False,
 ) -> float:
     """Evaluate a design criterion from a FIM result."""
+    if _is_target(region):
+        return region.criterion(np.asarray(fim_result.fim), criterion, smooth=smooth)
     if criterion in PREDICTION_CRITERIA:
         return _criterion_from_fim(np.asarray(fim_result.fim), criterion, region, smooth=smooth)
     if criterion == DesignCriterion.D_OPTIMAL:
@@ -1249,6 +1373,7 @@ def batch_optimal_experiment(
     exchange_passes: int = 2,
     response_bounds: Mapping[str, tuple[float | None, float | None]] | None = None,
     scale_parameters: bool = False,
+    target: Target | ResolvedTarget | None = None,
 ) -> BatchDesignResult:
     """Design a batch of ``N`` experiments to run in parallel.
 
@@ -1297,6 +1422,10 @@ def batch_optimal_experiment(
         Criterion on the relative-parameter FIM ``S F S``; see
         :func:`optimal_experiment`. ``fim_results`` and ``joint_fim`` are
         returned unscaled.
+    target : Target or ResolvedTarget, optional
+        Evaluate ``criterion`` on the joint precision of chosen targets; see
+        :func:`optimal_experiment`. A batch can make targets estimable that no
+        single run can.
 
     Returns
     -------
@@ -1310,6 +1439,11 @@ def batch_optimal_experiment(
         inequality_constraints = list(inequality_constraints or []) + _response_bound_constraints(
             experiment, param_values, response_bounds
         )
+    resolved = _resolve_target(
+        target, experiment, param_values, criterion, prediction_region, prediction_points
+    )
+    if resolved is not None:
+        scale_parameters = False  # targeted criteria are invariant to parameter scaling
     if scale_parameters and not isinstance(experiment, ParameterScaledExperiment):
         wrapped = ParameterScaledExperiment(experiment, parameter_scale(experiment, param_values))
         res = batch_optimal_experiment(
@@ -1341,7 +1475,7 @@ def batch_optimal_experiment(
     eq = list(equality_constraints) if equality_constraints else []
     ineq = list(inequality_constraints) if inequality_constraints else []
 
-    region = prediction_region
+    region = prediction_region if resolved is None else resolved
     if criterion in PREDICTION_CRITERIA and region is None:
         region = experiment_region(
             experiment,
@@ -1431,6 +1565,9 @@ def batch_optimal_experiment(
         raise ValueError(f"Unknown batch strategy: {strategy!r}")
     # Judged on the whole batch: the runs picked on the way there are
     # singular by construction until there are as many as parameters.
+    if resolved is not None:
+        _warn_if_target_not_estimable(res.joint_fim, resolved)
+        return dataclasses.replace(res, target=resolved)
     _warn_if_singular(res.joint_fim, res.fim_results[0].parameter_names)
     return res
 
@@ -1516,6 +1653,7 @@ def _greedy_batch(
                 feasible_projection=feasible_projection,
                 n_starts=n_starts,
                 local_refine=local_refine,
+                target=region if _is_target(region) else None,
                 seed=seed + i,
             )
         per_fim = compute_fim(experiment, param_values, picked.design, prior_fim=None)
@@ -1547,6 +1685,7 @@ def _greedy_batch(
                         feasible_projection=feasible_projection,
                         n_starts=n_starts,
                         local_refine=local_refine,
+                        target=region if _is_target(region) else None,
                         seed=seed + n_experiments + sweep * n_experiments + i,
                     )
             except Exception:  # noqa: BLE001 - a failed re-search keeps the greedy pick
@@ -1637,7 +1776,7 @@ def _joint_batch(
             total = total + prior_fim
         return total, pieces
 
-    log_scale = criterion in _LOG_SCALED_CRITERIA
+    log_scale = _log_scaled(criterion, region)
 
     def objective(z: np.ndarray) -> float:
         designs = unpack(z)

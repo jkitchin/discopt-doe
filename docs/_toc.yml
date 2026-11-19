@@ -16,6 +16,7 @@ parts:
   - caption: Model-Based & Sequential DoE
     chapters:
       - file: notebooks/model_based_doe
+      - file: targeted-design
       - file: notebooks/identifiability-estimability
       - file: notebooks/model-based-active-learning
       - file: notebooks/model-discrimination

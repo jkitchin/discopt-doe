@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Targeted (goal-oriented) design: `Target` and `target=`.** Weighted precision
+  on what you care about instead of on every parameter. `Target.parameters` covers
+  a subset with the rest as nuisance (D_s / A_s), per-parameter weights,
+  `relative=True` and `tolerances`. `Target.linear` handles combinations (c,
+  D_A), `Target.function` any JAX-differentiable g(θ), `Target.responses`
+  model outputs at operating points (including an unmeasured quantity-of-interest
+  model), and `Target.region` the I/G region. All of them reduce to one matrix
+  K = ∂ψ/∂θ with Σ_ψ = KᵀM⁺K. `optimal_experiment`, `batch_optimal_experiment`
+  and `sequential_doe` take `target=`. The existing criteria apply to the targets
+  (`"trace"` → weighted variance sum, `"determinant"` → D_s, `"min_eigenvalue"`,
+  and `"max_variance"` → minimax). Targets can be estimable while the full FIM is
+  singular. Results carry `target` and `target_precision()`. `sequential_doe(...,
+  stop_at_tolerance=True)` stops once every target meets its tolerance.
+  `target_precision()` reports the same check for any FIM. New docs page
+  *Targeted design*.
 - **Multi-response `--module` campaigns, end to end** (#46). `discopt doe new
   module` now takes its response columns from the `ExperimentModel` the
   callable returns: one runs-sheet column per response, each with the model's

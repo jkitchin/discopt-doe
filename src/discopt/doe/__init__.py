@@ -306,6 +306,7 @@ _SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
     ),
     "tradeoff": ("TradeoffPoint", "TradeoffResult", "design_tradeoff"),
     "surrogate": ("GPSurrogate", "Surrogate", "coerce_surrogate", "gp_surrogate"),
+    "targets": ("ResolvedTarget", "Target", "TargetPrecision", "target_precision"),
     "templates": (
         "TEMPLATE_NAMES",
         "build_template",
@@ -329,6 +330,10 @@ _EXPORTS: dict[str, str] = {
 _ALIASES: dict[str, tuple[str, str]] = {"SURROGATE_PRESETS": ("surrogate", "PRESETS")}
 
 __all__ = [
+    "ResolvedTarget",
+    "Target",
+    "TargetPrecision",
+    "target_precision",
     "estimate_parameters",
     "MSESubsetResult",
     "mse_subset_selection",
