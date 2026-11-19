@@ -183,6 +183,51 @@ Exact designs come from the weights by efficient rounding
 candidate grid. The default grid is fine in one or two inputs and Sobol in
 more, and the runs being certified are always added to it.
 
+**Minimax criteria.** `"max_variance"` and `"min_eigenvalue"` are convex but not
+differentiable, so they have no sensitivity function of their own. With
+$\tilde\Sigma = W^{1/2}\Sigma_\psi W^{1/2}$, each is a maximum of trace
+criteria:
+
+$$\max_j \tilde\Sigma_{jj} = \max_{\pi \in \Delta} \sum_j \pi_j \tilde\Sigma_{jj},
+\qquad
+\lambda_{\max}(\tilde\Sigma) = \max_{Z \succeq 0,\ \operatorname{tr} Z = 1} \operatorname{tr}(Z\tilde\Sigma).$$
+
+For any fixed dual weight $Z$, the smooth criterion $\operatorname{tr}(Z\tilde\Sigma)$
+lies below the minimax one, so its own certified bound is a valid bound on the
+minimax optimum. `approximate_targeted_design` improves $Z$ by exponentiated-gradient
+ascent until the duality gap closes, and reports the final $Z$ as `.dual`. Its
+diagonal shows which targets bind: a weight of zero means that target is
+already precise enough relative to the others.
+
+## Is the linearized precision honest? Profile likelihood
+
+Everything above, including tolerance checks and stopping rules, uses the
+linearized covariance $K^\top M^{-1}K$ at the current estimate. With few data,
+or with a target that is strongly nonlinear in the parameters (a ratio, a
+time of maximum, a prediction far from the data), that can be optimistic or
+lopsided. `profile_target` checks it. For each target it minimizes the
+deviance over every parameter subject to $\psi(\theta) = c$ (`Target.values`
+evaluates $\psi$ itself, not its linearization), then compares the profile
+interval with $\hat\psi \pm z\,\mathrm{SE}$:
+
+```python
+from discopt.doe import profile_target
+from discopt.doe.runs import campaign_experiment, symbolic_experiment
+
+camp = campaign_experiment(model, runs)            # the fit
+check = profile_target(camp, camp.data_from_runs(runs), target,
+                       model=symbolic_experiment(model))   # what the target is written on
+print(check.summary())   # per target: linear vs profile interval, ok / CHECK
+```
+
+A target is `adequate` when both profile half-widths are within 25 % of the
+linear ones (`tolerance=`). Otherwise the note says which way the
+linearization errs. For example, a decay rate measured from three early
+samples is fine, but the half-life $\ln 2 / k$ computed from the same data has
+a profile 2.7 times wider above the estimate than its SE suggests, and a
+prediction far beyond the data 6.8 times wider. On the command line, use
+`discopt doe status --profile`.
+
 ## When the parameters are uncertain: robust targeted design
 
 Targeted designs for nonlinear models are *local*: $K$ and $M$ are evaluated at
@@ -204,7 +249,20 @@ uses) takes targets too. Pass `target=` to `linear_batch_design` or
 On the command line this is how
 `discopt doe extend --target b12` augments a central composite or Box-Behnken
 design for one interaction coefficient, and how `new ... --use-linear-design`
-handles targets.
+handles targets. A `symbolic` campaign with a target uses jax where it is
+installed and falls back to this path where it is not (the browser).
+
+## In the GUI and the browser app
+
+Both apps take a design target as text, in the same notation as the command
+line, with items separated by `;`. For example, `k1; ratio=k1/k2;
+y@T=365,t=4` names a parameter, a formula and a prediction. Next to it are a
+tolerances field (`k1=0.05, y=0.01`) and a relative-precision switch. The
+Streamlit GUI (`discopt doe gui`) offers them when you create a design and when
+you extend one, where you can keep, replace or clear the stored target. After a
+fit it shows each target's SE against its tolerance. The browser app offers
+them for the model-based templates and `symbolic`, and shows the same table
+after a fit.
 
 ## Edge cases worth knowing
 
@@ -219,8 +277,8 @@ handles targets.
   replicate that point. The model pays off once there are data: then it can
   combine runs elsewhere into a better prediction than replication gives.
 - **First-order precision.** $\Sigma_\psi = K^\top M^{-1}K$ is a linearization at
-  the current estimate. With few data and a strongly nonlinear target, check the
-  result with a profile likelihood.
+  the current estimate. With few data and a strongly nonlinear target, check it
+  with `profile_target` (above).
 
 ## From the command line
 
@@ -249,6 +307,9 @@ The target is stored in the workbook. After you record the responses and run
 its ratio to the tolerance. It uses the fitted FIM at the *declared* measurement
 error, the same scale the design predictions use. When every target is within its
 tolerance, `status` says so.
+
+`discopt doe status --profile` also refits the campaign and checks each target's
+linear interval against its profile likelihood (see above).
 
 `discopt doe extend` reuses the stored target. `--target ...` on `extend` replaces
 it, and `--clear-target` goes back to designing for all parameters. Both `new` and

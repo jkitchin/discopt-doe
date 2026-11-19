@@ -86,10 +86,11 @@ from discopt.doe import (
     batch_optimal_experiment,
     certify_design,
     compute_fim,
+    profile_target,
     robust_optimal_experiment,
     sequential_doe,
 )
-from discopt.doe.runs import symbolic_experiment
+from discopt.doe.runs import campaign_experiment, symbolic_experiment
 
 T_REF, R = 350.0, 8.314e-3  # K, kJ/(mol K)
 
@@ -297,6 +298,14 @@ res = batch_optimal_experiment(
 )
 print([(round(d["T"]), round(d["t"], 2)) for d in res.designs])
 print(res.target_precision().summary())
+
+cert = certify_design(
+    experiment, guess, res.designs, goal, criterion="max_variance",
+    design_bounds=bounds, prior_fim=prior, n_candidates=441,
+)
+print(cert.summary())
+weights = np.diag(cert.approximate.dual)
+print("dual weight on each goal:", {n: round(float(w), 3) for n, w in zip(cert.approximate.target.names, weights)})
 """
 )
 
@@ -306,6 +315,11 @@ Four runs leave both goals at the same ratio to their tolerance. That is the
 minimax criterion at work: it trades one goal against the other until neither
 is the bottleneck. They are still above 1, so this budget is not enough for
 both goals. The summary shows by how much, before any run is made.
+
+The minimax criterion is not differentiable, but it is still certified. It is
+the largest of a family of smooth criteria, so its dual gives a lower bound,
+and the dual weights show which goal is actually binding (see
+{doc}`../targeted-design`).
 
 ## A precision goal and a stopping rule
 
@@ -369,6 +383,47 @@ The targeted campaign reaches the goal in about half the runs. D-optimal runs
 also improve the plant prediction, but they spend most of their information on
 parameter combinations the plant prediction does not depend on. (`None` means
 the goal was not reached within 18 runs.)
+"""
+)
+
+md(
+    r"""
+## Is the linearized precision honest? A profile-likelihood check
+
+Every number so far, including the stopping rule, comes from the linearized
+covariance $K^\top M^{-1} K$ at the current estimate. With few data, or with a
+target strongly nonlinear in the parameters, that can understate the real
+uncertainty. `profile_target` checks it. For each target it minimizes the
+deviance over all parameters subject to $\psi(\theta) = c$, then compares the
+resulting interval with $\hat\psi \pm z\,\mathrm{SE}$. Here it is run on the
+three screening runs plus the two targeted runs from above, with simulated
+data. In the CLI the same check is `discopt doe status --profile`.
+"""
+)
+
+code(
+    r"""
+rng = np.random.default_rng(0)
+five = initial + designs["for plant yield"]
+runs = [dict(d, B=model.predict(truth, d) + rng.normal(0.0, 0.01)) for d in five]
+camp = campaign_experiment(model, runs)
+data = camp.data_from_runs(runs)
+estimate = camp.estimate(data, initial_guess=guess)
+
+for target in (
+    Target.responses(experiment, at=[plant], responses=["B"]),
+    Target.function(t_max, ["t_max"]),
+):
+    print(profile_target(camp, data, target, model=experiment, initial_estimate=estimate).summary())
+"""
+)
+
+md(
+    r"""
+With these five runs the linear intervals match the profiles, so the stopping
+rule's precision can be trusted. When a target is flagged `CHECK`, the profile
+interval is the one to believe, and the design will need more runs than it
+predicted.
 """
 )
 
@@ -504,14 +559,14 @@ md(
 | some parameters, the rest nuisance | `Target.parameters([...])`, `"determinant"` ($D_s$) or `"trace"` |
 | several goals in different units | tolerances, then `"trace"` (sum of $(\sigma/\tau)^2$) or `"max_variance"` (worst one) |
 | to stop when precise enough | `sequential_doe(..., stop_at_tolerance=True)`, or `discopt doe status` |
-| to know how good a design is | `certify_design` (a certified efficiency bound) |
+| to know how good a design is | `certify_design` (a certified efficiency bound; all four criteria) |
+| to check the SE is honest | `profile_target`, or `discopt doe status --profile` |
 | protection against a wrong guess | `robust_optimal_experiment(..., target=...)` |
 
 Caveats:
 
 - **Precision is first-order.** It comes from the linearization at the current
-  estimate ($\Sigma_\psi = K^\top M^{-1} K$). For strongly nonlinear targets
-  with few data, check it with a profile likelihood.
+  estimate ($\Sigma_\psi = K^\top M^{-1} K$). `profile_target` checks it.
 - **Certificates are relative to the candidate grid.** Use a fine grid, or add
   the conditions you care about.
 - **Tolerances are judged at the declared measurement error.** That is the

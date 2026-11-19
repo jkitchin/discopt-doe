@@ -160,8 +160,10 @@ print(certify_design(experiment, theta, batch.designs, target,
 ```
 
 `sequential_doe(..., target=target, stop_at_tolerance=True)` stops a campaign
-as soon as the goal is met, and `robust_optimal_experiment(..., target=target)`
-keeps the design good over parameter uncertainty. See
+as soon as the goal is met, `robust_optimal_experiment(..., target=target)`
+keeps the design good over parameter uncertainty, and `profile_target` checks
+the promised precision against the profile likelihood once data are in. The
+GUI and the browser app take targets too. See
 [Targeted design](docs/targeted-design.md) and the
 [worked example](docs/notebooks/targeted-design-example.ipynb).
 

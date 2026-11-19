@@ -378,3 +378,23 @@ def test_linear_design_path_takes_a_target(tmp_path):
     )
     assert sorted(d["x"] for d in out["designs"]) == pytest.approx([-1.0, 1.0], abs=1e-3)
     assert out["target_precision"]["std_errors"]["b1"] == pytest.approx(0.1 / np.sqrt(2), rel=1e-3)
+
+
+def test_symbolic_target_without_jax_matches(tmp_path):
+    """The browser has no jax: the basis fallback gives the same design quality."""
+    from discopt.doe.cli import _symbolic_target_design
+    from discopt.doe.symbolic import SymbolicModel
+
+    model = SymbolicModel(
+        source="A*exp(-k*t)",
+        parameter_names=("A", "k"),
+        input_names=("t",),
+        measurement_error=0.05,
+    )
+    spec = {"parameters": {"k": 1.0}, "relative": False}
+    ridge = 1e-8 * np.eye(2)
+    kw = dict(criterion="trace", prior_fim=ridge, ridge=ridge, n_starts=4, seed=0)
+    bounds = {"t": (0.05, 10.0)}
+    jx = _symbolic_target_design(model, THETA, bounds, 3, spec, use_jax=True, **kw)
+    nj = _symbolic_target_design(model, THETA, bounds, 3, spec, use_jax=False, **kw)
+    assert nj[2].std["k"] == pytest.approx(jx[2].std["k"], rel=0.02)

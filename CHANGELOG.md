@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Certificates for the minimax target criteria.** `approximate_targeted_design`
+  and `certify_design` now cover `"max_variance"` and `"min_eigenvalue"` as well
+  as `"trace"` and `"determinant"`. Each is a maximum of trace criteria, so
+  every dual weight gives a smooth criterion whose own certified bound bounds
+  the minimax optimum. Exponentiated-gradient ascent on the dual closes the
+  duality gap, and `.dual` reports which targets bind.
+- **Profile-likelihood check of a target's precision.** `profile_target(experiment,
+  data, target, model=...)` compares each target's linearized interval with
+  its profile likelihood, and flags targets whose uncertainty the SE
+  understates or skews. `Target.values` evaluates ψ(θ) itself; response
+  targets use a θ-generic compiled predictor, about 30× faster than
+  per-θ `predict_responses` inside a profile. In the CLI: `discopt doe status
+  --profile`.
+- **Design targets in the GUI and the browser app.** Both take a target as
+  text (`k1; ratio=k1/k2; y@T=365,t=4`), tolerances and relative precision.
+  `cli.target_spec_from_text` parses them. The GUI's extend panel keeps,
+  replaces or clears the stored target, and both apps show each target's SE
+  against its tolerance after a fit. In the browser, where there is no jax, a
+  targeted `symbolic` design falls back to the basis search.
 - **Certified efficiency for targeted designs** (`discopt.doe.certificate`).
   `approximate_targeted_design` solves the convex approximate design problem
   for a target (`"trace"`/`"determinant"`, with a prior and a run budget) by

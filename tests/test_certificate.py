@@ -130,9 +130,13 @@ def test_with_a_prior_and_a_rounded_design():
 
 
 def test_refusals():
-    with pytest.raises(ValueError, match="not differentiable"):
+    with pytest.raises(ValueError, match="certificates are available"):
         approximate_targeted_design(
-            Quadratic(), Q, Target.parameters(["b1"]), design_bounds=QB, criterion="max_variance"
+            Quadratic(),
+            Q,
+            Target.parameters(["b1"]),
+            design_bounds=QB,
+            criterion="condition_number",
         )
     with pytest.raises(ValueError, match="candidates or design_bounds"):
         approximate_targeted_design(Quadratic(), Q, Target.parameters(["b1"]))
@@ -161,3 +165,58 @@ def test_a_target_estimable_on_a_singular_prior_is_found():
         Quadratic(), Q, QB, 3, criterion="trace", target=target, n_starts=4
     )
     assert batch.criterion_value == pytest.approx(SIGMA**2 / 3, rel=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Minimax criteria (certified through their dual)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("criterion", ["max_variance", "min_eigenvalue"])
+def test_minimax_bound_is_below_every_exact_design(criterion):
+    import itertools
+
+    target = Target.parameters({"b0": 1.0, "b1": 4.0, "b2": 1.0})
+    grid = np.linspace(-1.0, 1.0, 21)
+    cands = [{"x": float(x)} for x in grid]
+    a = approximate_targeted_design(
+        Quadratic(), Q, target, candidates=cands, criterion=criterion, n_runs=3
+    )
+    assert a.gap <= 1e-3 * a.value
+    infos = {x: compute_fim(Quadratic(), Q, {"x": float(x)}).fim for x in grid}
+    exact = min(
+        a.phi(sum(infos[x] for x in runs))
+        for runs in itertools.combinations_with_replacement(grid, 3)
+    )
+    # Approximate optimum <= every exact design; the certificate is below it.
+    assert a.lower_bound <= a.value <= exact * (1 + 1e-9)
+    assert a.dual is not None and a.dual.shape == (3, 3)
+    assert np.trace(a.dual) == pytest.approx(1.0)
+
+
+def test_minimax_analytic_optimum():
+    """max(Var b1, Var b2): the curvature binds; the optimum is the D_s(b2) design
+    (1/4, 1/2, 1/4), where Var b2 = 4 sigma^2 / n and Var b1 = 2 sigma^2 / n."""
+    a = approximate_targeted_design(
+        Quadratic(),
+        Q,
+        Target.parameters(["b1", "b2"]),
+        candidates=[{"x": float(x)} for x in np.linspace(-1, 1, 21)],
+        criterion="max_variance",
+        n_runs=3,
+    )
+    assert a.value == pytest.approx(4 * SIGMA**2 / 3, rel=1e-4)
+    assert np.diag(a.dual) == pytest.approx([0.0, 1.0], abs=1e-3)  # only b2 binds
+    assert _points(a) == [-1.0, 0.0, 1.0]
+
+
+def test_certify_a_minimax_design():
+    target = Target.parameters({"b1": 1.0, "b2": 1.0})
+    cands = [{"x": float(x)} for x in np.linspace(-1, 1, 41)]
+    good = [{"x": -1.0}, {"x": 0.0}, {"x": 0.0}, {"x": 1.0}]
+    bad = [{"x": 0.2}, {"x": 0.4}, {"x": 0.6}, {"x": 0.8}]
+    for crit in ("max_variance", "min_eigenvalue"):
+        cg = certify_design(Quadratic(), Q, good, target, criterion=crit, candidates=cands)
+        cb = certify_design(Quadratic(), Q, bad, target, criterion=crit, candidates=cands)
+        assert cg.efficiency_lower_bound > 0.99
+        assert cb.efficiency_lower_bound < 0.3

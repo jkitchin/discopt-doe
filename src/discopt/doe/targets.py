@@ -210,6 +210,18 @@ class _Block:
     commensurable: bool  # weights carry units (tolerances or relative)
     build: _Builder  # (experiment, θ, layout) -> (K, names, weights, tolerances)
     label: str
+    # (experiment, θ, layout) -> [(name, ψ(θ))]: the target's value itself,
+    # nonlinear in θ (what a profile likelihood constrains).
+    value: Callable[[Any, Mapping[str, Any], _Layout], list[tuple[str, float]]] | None = None
+
+
+def _param_value(theta: Mapping[str, Any], lay: _Layout, row: int) -> float:
+    """The value of FIM row ``row``'s parameter entry in ``theta``."""
+    for p, a, b in lay.blocks:
+        if a <= row < b:
+            raw = np.asarray(theta[p], dtype=float).ravel()
+            return float(raw[0] if raw.size == 1 else raw[row - a])
+    raise IndexError(row)
 
 
 @dataclass(frozen=True)
@@ -296,6 +308,11 @@ class Target:
             )
             return K, names, w, tau
 
+        def value(experiment, theta, lay: _Layout):
+            return [
+                (lay.names[i], _param_value(theta, lay, i)) for key in spec for i in lay.index(key)
+            ]
+
         return cls(
             (
                 _Block(
@@ -303,6 +320,7 @@ class Target:
                     relative or tolerances is not None,
                     build,
                     f"parameters {list(spec)}",
+                    value,
                 ),
             )
         )
@@ -339,8 +357,30 @@ class Target:
             w, tau = _weights_and_tolerances(names, names, weights, tolerances, None)
             return K, names, w, tau
 
+        def value(experiment, theta, lay: _Layout):
+            return [
+                (
+                    n,
+                    float(
+                        sum(
+                            float(a) * _param_value(theta, lay, lay.index(p)[0])
+                            for p, a in c.items()
+                        )
+                    ),
+                )
+                for n, c in combos.items()
+            ]
+
         return cls(
-            (_Block(_PARAMETER_SPACE, tolerances is not None, build, f"linear {list(combos)}"),)
+            (
+                _Block(
+                    _PARAMETER_SPACE,
+                    tolerances is not None,
+                    build,
+                    f"linear {list(combos)}",
+                    value,
+                ),
+            )
         )
 
     @classmethod
@@ -425,7 +465,69 @@ class Target:
             w, tau = _weights_and_tolerances(names, keys, weights, tolerances, scale)
             return K, names, w, tau
 
-        return cls((_Block(_OUTPUT_SPACE, relative or tolerances is not None, build, "responses"),))
+        predictors: dict[int, Any] = {}
+
+        def predictor(qexp):
+            """A θ-generic compiled ``h(θ, u)`` for ``qexp``, or ``None``.
+
+            ``predict_responses`` caches its compiled model per parameter value,
+            which is right for design (one nominal θ, many designs) and ruinous
+            for a profile likelihood, which visits thousands of θ: every one
+            would recompile. The campaign machinery's per-run function takes θ
+            as an argument and compiles once.
+            """
+            key = id(qexp)
+            if key not in predictors:
+                try:
+                    import jax
+
+                    from discopt.doe.runs import _per_run
+
+                    pr = getattr(qexp, "per_run", None) or _per_run(qexp)
+                    predictors[key] = (pr, jax.jit(pr.h))
+                except Exception:  # noqa: BLE001 - fall back to predict_responses
+                    predictors[key] = None
+            return predictors[key]
+
+        def predict(qexp, theta, pt):
+            fast = predictor(qexp)
+            if fast is not None:
+                pr, h = fast
+                th = np.array([float(theta[n]) for n in pr.parameter_names])
+                u = np.array([float((pt or {})[n]) for n in pr.input_names])
+                y = np.asarray(h(th, u), dtype=float).ravel()
+                return dict(zip(pr.response_names, map(float, y)))
+            from discopt.doe.fim import predict_responses
+
+            return predict_responses(qexp, dict(theta), pt)
+
+        def value(design_experiment, theta, lay: _Layout):
+            qexp = experiment if experiment is not None else design_experiment
+            chosen = list(responses) if responses is not None else None
+            if chosen is None and (weights or tolerances):
+                chosen = list(weights or tolerances)
+            out = []
+            for pt in points:
+                pred = predict(qexp, theta, pt)
+                for r in chosen if chosen is not None else list(pred):
+                    where = ",".join(f"{k}={v:g}" for k, v in pt.items()) if pt else ""
+                    out.append((f"{r}@{where}" if where and len(points) > 1 else r, pred[r]))
+            names = [n for n, _ in out]
+            if len(set(names)) != len(names):
+                out = [(f"{n}#{i}", v) for i, (n, v) in enumerate(out)]
+            return out
+
+        return cls(
+            (
+                _Block(
+                    _OUTPUT_SPACE,
+                    relative or tolerances is not None,
+                    build,
+                    "responses",
+                    value,
+                ),
+            )
+        )
 
     @classmethod
     def function(
@@ -465,7 +567,21 @@ class Target:
             w, tau = _weights_and_tolerances(names, names, weights, tolerances, None)
             return J.T, names, w, tau
 
-        return cls((_Block(_FUNCTION_SPACE, tolerances is not None, build, f"function {names}"),))
+        def value(experiment, theta, lay: _Layout):
+            th = {
+                p: (
+                    float(np.asarray(theta[p], dtype=float).ravel()[0])
+                    if lay.scalar[p]
+                    else np.broadcast_to(np.asarray(theta[p], dtype=float).ravel(), (b - a,))
+                )
+                for (p, a, b) in lay.blocks
+            }
+            vals = np.atleast_1d(np.asarray(fn(th), dtype=float)).ravel()
+            return list(zip(names, map(float, vals)))
+
+        return cls(
+            (_Block(_FUNCTION_SPACE, tolerances is not None, build, f"function {names}", value),)
+        )
 
     @classmethod
     def expression(
@@ -509,6 +625,20 @@ class Target:
             w, tau = _weights_and_tolerances(names, names, weights, tolerances, scale)
             return K, names, w, tau
 
+        compiled: dict[str, Any] = {}
+
+        def value(experiment, theta, lay: _Layout):
+            from discopt.doe.symbolic import _require_sympy, parse_expression
+
+            sp = _require_sympy()
+            scalars = [p for (p, a, b) in lay.blocks if b - a == 1]
+            if not compiled:
+                syms = [sp.Symbol(p, real=True) for p in scalars]
+                for n, src in exprs.items():
+                    compiled[n] = sp.lambdify(syms, parse_expression(src, scalars), "numpy")
+            args = [_param_value(theta, lay, lay.index(p)[0]) for p in scalars]
+            return [(n, float(f(*args))) for n, f in compiled.items()]
+
         return cls(
             (
                 _Block(
@@ -516,6 +646,7 @@ class Target:
                     relative or tolerances is not None,
                     build,
                     f"expressions {list(exprs)}",
+                    value,
                 ),
             )
         )
@@ -610,6 +741,29 @@ class Target:
                 f"{loose} tolerances (or relative=True) to make them comparable."
             )
         return combined
+
+    # -- values -------------------------------------------------------------
+
+    def values(self, experiment: Any, param_values: Mapping[str, Any]) -> dict[str, float]:
+        """The targets' values ``ψ(θ)`` at ``param_values`` (nonlinear, not via ``K``).
+
+        Same names as :meth:`resolve` (zero-weight targets included). A
+        :meth:`region` target has no single value and is refused.
+        """
+        from discopt.doe.fim import ParameterScaledExperiment
+
+        if isinstance(experiment, ParameterScaledExperiment):
+            experiment = experiment.experiment
+        lay = _layout(experiment, param_values)
+        return self._values(experiment, param_values, lay)
+
+    def _values(self, experiment: Any, theta: Mapping[str, Any], lay: _Layout) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for b in self.blocks:
+            if b.value is None:
+                raise ValueError(f"the {b.label} target has no value to evaluate")
+            out.update(b.value(experiment, theta, lay))
+        return out
 
     # -- resolution ---------------------------------------------------------
 

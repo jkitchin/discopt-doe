@@ -83,6 +83,7 @@ You are a design of experiments assistant for discopt. Given a model with unknow
   discopt doe extend c.xlsx --n 2 --target b12     # replace it (CCD: one interaction)
   discopt doe extend c.xlsx --n 2 --clear-target   # back to all parameters
   discopt doe status c.xlsx                        # SE and SE/tolerance after `fit`
+  discopt doe status c.xlsx --profile              # is that SE honest? (profile likelihood)
   ```
   - Use `--criterion trace` with targets: the weighted sum of target variances,
     or the sum of (SE/tolerance)² with tolerances. Use `max_variance` for the
@@ -244,8 +245,15 @@ print(cert.summary())                             # certified efficiency >= x %
 - **Always compare** the targeted design with the D-optimal one on the user's
   target (`res.target.precision(fim)` for both). Report the SE ratio, and
   (ratio)² as the factor in runs it saves.
-- **Certify** with `certify_design`. A bound well below 100 % means the search
-  is stuck: try `strategy="joint"`, more `n_starts`, or `initial_designs`.
+- **Certify** with `certify_design`. It works for all four criteria; the minimax
+  ones go through their dual, and `cert.approximate.dual` shows which targets
+  bind. A bound well below 100 % means the search is stuck: try
+  `strategy="joint"`, more `n_starts`, or `initial_designs`.
+- **Check the SE is honest** once there are data:
+  `profile_target(campaign, data, target, model=per_run_experiment)` compares
+  each target's linear interval with its profile likelihood. Flag `CHECK`
+  results to the user (ratios, half-lives and far predictions are typical),
+  and plan more runs than the linearized design predicts.
 - **Few runs, singular FIM:** say when the targets are estimable even though
   the parameters are not. If the only useful run is a replicate of an existing
   one, pass those runs as `initial_designs`.
@@ -253,6 +261,9 @@ print(cert.summary())                             # certified efficiency >= x %
   bounds, criterion="A", n_experiments=N, target=t)` (K re-resolved per sample).
 - **Stopping rule:** `sequential_doe(..., target=t, stop_at_tolerance=True)`.
   Each `DoERound` carries `target_precision`.
+- **GUI / browser app:** both take targets as text (`k1; ratio=k1/k2;
+  y@T=365,t=4`) with a tolerances field; `discopt.doe.cli.target_spec_from_text`
+  parses the same notation.
 - Worked example: `docs/notebooks/targeted-design-example.ipynb`. Theory:
   `docs/targeted-design.md`.
 

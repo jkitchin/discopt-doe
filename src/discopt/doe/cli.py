@@ -373,6 +373,73 @@ def _target_spec_from_args(args) -> dict[str, Any] | None:
     return spec
 
 
+def target_spec_from_text(
+    targets: str | Sequence[str] | None,
+    tolerances: str | Sequence[str] | None = None,
+    relative: bool = False,
+) -> dict[str, Any] | None:
+    """A target spec from free text, for the GUI and the browser app.
+
+    ``targets`` holds items separated by semicolons or new lines (commas belong
+    to operating points and formulas):
+
+    * ``k1`` or ``k1=2`` -- a parameter, optionally weighted;
+    * ``ratio=k1/k2`` -- a formula (anything after ``=`` that is not a number);
+    * ``y@T=365,t=4`` -- a prediction at an operating point.
+
+    ``tolerances`` is ``name=tau`` items separated by commas, semicolons or new
+    lines. Returns ``None`` when no target is named.
+    """
+    import re
+
+    def items(text: str | Sequence[str] | None, seps: str) -> list[str]:
+        if text is None:
+            return []
+        parts = [text] if isinstance(text, str) else list(text)
+        out: list[str] = []
+        for part in parts:
+            out += [x.strip() for x in re.split(seps, str(part)) if x.strip()]
+        return out
+
+    params: dict[str, float] = {}
+    exprs: dict[str, str] = {}
+    responses: dict[str, list[dict[str, float]]] = {}
+    try:
+        for item in items(targets, r"[;\n]"):
+            if "@" in item:
+                name, point = _parse_target_response(item)
+                responses.setdefault(name, [])
+                if point is not None:
+                    responses[name].append(point)
+                continue
+            name, eq, rhs = item.partition("=")
+            name, rhs = name.strip(), rhs.strip()
+            if not eq:
+                params[name] = 1.0
+                continue
+            try:
+                params[name] = float(rhs)
+            except ValueError:
+                exprs[name] = rhs
+        tol = dict(_parse_kv_float(x) for x in items(tolerances, r"[;,\n]"))
+    except argparse.ArgumentTypeError as e:
+        raise DoEError(f"bad design target: {e}") from e
+    if not (params or exprs or responses):
+        if tol or relative:
+            raise DoEError("tolerances and relative precision qualify a target; name one")
+        return None
+    spec: dict[str, Any] = {"relative": bool(relative)}
+    if params:
+        spec["parameters"] = params
+    if exprs:
+        spec["expressions"] = exprs
+    if responses:
+        spec["responses"] = responses
+    if tol:
+        spec["tolerances"] = tol
+    return spec
+
+
 def _check_target_spec(
     spec: Mapping[str, Any],
     parameter_names: Sequence[str],
@@ -1786,13 +1853,54 @@ def _symbolic_target_design(
     n_starts: int,
     seed: int,
     strategy: str = "joint",
+    use_jax: bool | None = None,
 ) -> tuple[list[dict[str, float]], float, Any]:
-    """A targeted design for a symbolic model, through its jax Experiment.
+    """A targeted design for a symbolic model.
 
-    The basis-driven search the symbolic template normally uses (jax-free)
-    knows only the whole-FIM criteria, so a target routes the search through
-    :func:`symbolic_experiment` and the Experiment design functions.
+    Through its jax Experiment (:func:`symbolic_experiment`) where jax and the
+    base discopt package are available: every batch strategy, and replicate
+    candidates. Otherwise -- the browser app, Pyodide -- through the jax-free
+    basis search with :func:`~discopt.doe.targets.basis_target`.
+    ``use_jax=None`` picks automatically.
     """
+    if use_jax is None:
+        try:
+            import jax  # noqa: F401
+
+            from discopt.doe.runs import symbolic_experiment  # noqa: F401
+
+            use_jax = True
+        except ImportError:
+            use_jax = False
+    if not use_jax:
+        from discopt.doe.linear_design import batch_design_from_basis
+        from discopt.doe.symbolic import basis_evaluator
+
+        basis = basis_evaluator(model, dict(theta))
+        target = _basis_target_or_error(
+            spec,
+            list(model.parameter_names),
+            list(model.input_names),
+            basis,
+            model.response_name,
+            dict(theta),
+        )
+        batch = batch_design_from_basis(
+            basis,
+            int(n),
+            parameter_names=list(model.parameter_names),
+            input_names=list(model.input_names),
+            design_bounds=bounds,
+            measurement_error=model.measurement_error,
+            criterion=criterion,
+            prior_fim=prior_fim,
+            n_starts=n_starts,
+            seed=seed,
+            target=target,
+        )
+        precision = _target_precision_without_ridge(target, batch.joint_fim, ridge)
+        return list(batch.designs), float(batch.criterion_value), precision
+
     from discopt.doe.design import batch_optimal_experiment, optimal_experiment
     from discopt.doe.runs import symbolic_experiment
 
@@ -2713,6 +2821,16 @@ def do_status(params: dict[str, Any]) -> dict[str, Any]:
                 f"(discopt doe extend {wb.path} --n N)"
             )
 
+    target_profile: dict[str, Any] | None = None
+    if params.get("profile") and target_spec:
+        if not completed:
+            target_error = "no completed runs to profile"
+        else:
+            try:
+                target_profile = _status_target_profile(wb, target_spec, completed)
+            except Exception as e:  # noqa: BLE001 - status must still report the rest
+                target_error = f"profile failed: {type(e).__name__}: {e}"
+
     return {
         "workbook_path": str(wb.path),
         "template": wb.template_name(),
@@ -2733,7 +2851,61 @@ def do_status(params: dict[str, Any]) -> dict[str, Any]:
         "target": target_spec,
         "target_precision": target_out,
         "target_precision_error": target_error,
+        "target_profile": target_profile,
         "next_command": next_command,
+    }
+
+
+def _status_target_profile(
+    wb: Workbook, spec: Mapping[str, Any], completed: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Each target's linearized interval next to its profile-likelihood one.
+
+    Refits the campaign (``campaign_experiment`` over the completed runs) and
+    profiles every target with :func:`~discopt.doe.profile_target`. The
+    classical designs are linear in their coefficients, where the two agree
+    exactly, so they are not profiled.
+    """
+    from discopt.doe.profile import profile_target
+    from discopt.doe.runs import campaign_experiment, symbolic_experiment
+    from discopt.doe.templates import CLASSICAL_TEMPLATES
+
+    template = wb.template_name() or ""
+    if template in CLASSICAL_TEMPLATES:
+        return {
+            "adequate": True,
+            "targets": {},
+            "note": "linear in its coefficients: the linearized precision is exact",
+        }
+    runs, _ = _module_campaign_runs(wb, completed)
+    if template == "symbolic":
+        model: Any = wb.symbolic_model()
+        bounds = {s.name: (s.lb, s.ub) for s in wb.input_specs()}
+        per_run: Any = symbolic_experiment(model, input_bounds=bounds)
+        guess = _symbolic_start_values(wb, model)
+    else:
+        per_run, names = wb.rebuild_experiment()
+        model = per_run
+        guess = _param_values_for_design(names, wb)
+    camp = campaign_experiment(model, runs)
+    data = camp.data_from_runs(runs)
+    est = camp.estimate(data, initial_guess=guess)
+    check = profile_target(camp, data, _target_from_spec(spec), model=per_run, initial_estimate=est)
+    return {
+        "adequate": check.adequate,
+        "confidence_level": check.confidence_level,
+        "targets": {
+            name: {
+                "estimate": p.estimate,
+                "std_error": p.std_error,
+                "linear_ci": list(p.linear_ci),
+                "profile_ci": [p.profile.ci_lower, p.profile.ci_upper],
+                "half_width_ratios": list(p.half_width_ratios),
+                "adequate": p.adequate,
+                "note": p.note,
+            }
+            for name, p in check.profiles.items()
+        },
     }
 
 
@@ -2765,10 +2937,22 @@ def _status_target_precision(
             raise ValueError(f"the stored FIM is over {list(names)}, the basis over {pnames}")
         return target.precision(fim)
     if wb.template_name() == "symbolic":
-        from discopt.doe.runs import symbolic_experiment
-
         model = wb.symbolic_model()
         theta = _symbolic_start_values(wb, model)
+        try:
+            from discopt.doe.runs import symbolic_experiment
+        except ImportError:  # no base discopt (the browser): the basis path
+            from discopt.doe.symbolic import basis_evaluator
+
+            target = _basis_target_or_error(
+                spec,
+                list(model.parameter_names),
+                list(model.input_names),
+                basis_evaluator(model, theta),
+                model.response_name,
+                theta,
+            )
+            return target.precision(fim)
         bounds = {s.name: (s.lb, s.ub) for s in wb.input_specs()}
         experiment: Any = symbolic_experiment(model, input_bounds=bounds)
     else:
@@ -2785,7 +2969,9 @@ def _status_target_precision(
 
 def _cmd_status(args) -> int:
     try:
-        out = do_status({"workbook": args.workbook})
+        out = do_status(
+            {"workbook": args.workbook, "profile": bool(getattr(args, "profile", False))}
+        )
     except (FileNotFoundError, ValueError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
     if args.json:
@@ -2838,6 +3024,20 @@ def _cmd_status(args) -> int:
                 print(f"    (could not evaluate: {out['target_precision_error']})")
             else:
                 print("    (precision available after `discopt doe fit`)")
+            prof = out.get("target_profile")
+            if prof:
+                level = f"{prof.get('confidence_level', 0.95):.0%}"
+                print(f"  profile likelihood check ({level} intervals):")
+                if prof.get("note"):
+                    print(f"    {prof['note']}")
+                for name, t in prof["targets"].items():
+                    lo, hi = t["profile_ci"]
+                    fmt = lambda v: "unbounded" if v is None else f"{v:.5g}"  # noqa: E731
+                    print(
+                        f"    {name:>12s}  linear [{t['linear_ci'][0]:.5g}, {t['linear_ci'][1]:.5g}]"
+                        f"  profile [{fmt(lo)}, {fmt(hi)}]  {'ok' if t['adequate'] else 'CHECK'}"
+                    )
+                    print(f"      {t['note']}")
         print(f"  next:        {out['next_command']}")
     return 0
 
@@ -4610,6 +4810,15 @@ def add_subparser(subparsers) -> None:
     # --- status ---
     p_status = doe_sub.add_parser("status", help="Show campaign state and suggested next step.")
     p_status.add_argument("workbook", help="Path to the .xlsx workbook.")
+    p_status.add_argument(
+        "--profile",
+        action="store_true",
+        help=(
+            "Check the design target's linearized precision against its profile "
+            "likelihood (refits the campaign; slower). Flags targets whose real "
+            "uncertainty the SE understates."
+        ),
+    )
     _add_json(p_status)
     p_status.set_defaults(doe_func=_cmd_status)
 

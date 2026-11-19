@@ -362,6 +362,13 @@ const OPTION_SPECS = {
   runs: { label: "Runs (blank = smallest)", type: "number", value: "", min: 4 },
   generators: { label: "Generators (e.g. D=ABC, E=ABD)", type: "text", value: "" },
   fake_factors: { label: "Fake factors", type: "number", value: 0, min: 0 },
+  targets: {
+    label: "Design target (optional): k1; ratio=k1/k2; y@T=365",
+    type: "text",
+    value: "",
+  },
+  tolerances: { label: "Target tolerances (name=SE, ...)", type: "text", value: "" },
+  relative_precision: { label: "Tolerances relative to the value", type: "check", value: false },
   optimize: {
     label: "Space-filling criterion",
     type: "select",
@@ -812,6 +819,28 @@ function showProblem(title, fixes = [], err = null) {
   }
 }
 
+/** The campaign's design target against its tolerances, after a fit. */
+function targetBlock(target, prec) {
+  const names = Object.keys(prec.std_errors ?? {});
+  const hint =
+    prec.met === true
+      ? "Every target is within its tolerance — more runs are optional."
+      : prec.met === false
+        ? "Not every target is within its tolerance yet."
+        : "Standard errors at the declared measurement error.";
+  return block("Design target", hint, (el) => {
+    const rows = names.map((n) => ({
+      target: n,
+      std_error: prec.std_errors[n],
+      "SE / tolerance": prec.ratios?.[n] ?? "—",
+    }));
+    dataTable(el, ["target", "std_error", "SE / tolerance"], rows);
+    if (!prec.estimable) {
+      el.appendChild(note("Not every target is identified yet", ["Add runs and fit again."]));
+    }
+  });
+}
+
 /** A non-blocking caveat, shown inline with the results it qualifies. */
 function note(title, lines) {
   const div = document.createElement("div");
@@ -1055,7 +1084,10 @@ async function runAnalyses(out, pending, diag) {
   await paint();
   let fitted = false;
   try {
-    const { fit, model } = call("run_fit", state.analyzePath);
+    const { fit, model, target, target_precision: targetPrecision } = call(
+      "run_fit",
+      state.analyzePath,
+    );
     fitted = true;
     // `coefficients` carries the t-tests; the symbolic path returns only
     // `parameters`. Both carry the 95% interval, which is what the verdict
@@ -1156,6 +1188,7 @@ async function runAnalyses(out, pending, diag) {
     );
     // fit writes the parameters/FIM/ANOVA sheets back into the workbook.
     $("download-analyzed").hidden = false;
+    if (target && targetPrecision) box.appendChild(targetBlock(target, targetPrecision));
   } catch (err) {
     box.appendChild(
       note("The model fit did not run", [

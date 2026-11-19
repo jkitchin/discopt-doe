@@ -73,13 +73,17 @@ TEMPLATE_GROUPS = [
     },
 ]
 
+# The design-target fields (see discopt.doe.cli.target_spec_from_text): offered
+# wherever the design is optimized for a model.
+TARGET_OPTIONS = ["targets", "tolerances", "relative_precision"]
+
 # Per-template UI metadata: which factor input style applies, and which extra
 # options to render. Kept here rather than in JS so the CLI stays the single
 # source of truth for what each template actually accepts.
 TEMPLATE_UI: dict[str, dict[str, Any]] = {
     "symbolic": {
         "factors": "bounds",
-        "options": ["n", "criterion"],
+        "options": ["n", "criterion", *TARGET_OPTIONS],
         "min": 1,
         "max": 6,
         # Drives the model editor: an expression box plus a parameter table.
@@ -135,15 +139,30 @@ TEMPLATE_UI: dict[str, dict[str, Any]] = {
     "latin-square": {"factors": "levels", "options": ["replicates"], "min": 3, "max": 3},
     "graeco-latin": {"factors": "levels", "options": ["replicates"], "min": 4, "max": 4},
     "hyper-graeco-latin": {"factors": "levels", "options": ["replicates"], "min": 5, "max": 5},
-    "linear": {"factors": "bounds", "options": ["n", "criterion"], "min": 1, "max": 8},
+    "linear": {
+        "factors": "bounds",
+        "options": ["n", "criterion", *TARGET_OPTIONS],
+        "min": 1,
+        "max": 8,
+    },
     "polynomial-1d": {
         "factors": "bounds",
-        "options": ["n", "degree", "criterion"],
+        "options": ["n", "degree", "criterion", *TARGET_OPTIONS],
         "min": 1,
         "max": 1,
     },
-    "response-surface-2d": {"factors": "bounds", "options": ["n", "criterion"], "min": 2, "max": 2},
-    "response-surface-3d": {"factors": "bounds", "options": ["n", "criterion"], "min": 3, "max": 3},
+    "response-surface-2d": {
+        "factors": "bounds",
+        "options": ["n", "criterion", *TARGET_OPTIONS],
+        "min": 2,
+        "max": 2,
+    },
+    "response-surface-3d": {
+        "factors": "bounds",
+        "options": ["n", "criterion", *TARGET_OPTIONS],
+        "min": 3,
+        "max": 3,
+    },
     "scheffe-linear": {
         "factors": "bounds",
         "options": ["n", "mixture_total", "criterion"],
@@ -232,7 +251,7 @@ def create_design(spec_json: str) -> str:
     ``spec_json`` carries the template name, the factor rows, and whatever
     template-specific options the UI collected.
     """
-    from discopt.doe.cli import NewParams, do_new
+    from discopt.doe.cli import NewParams, do_new, target_spec_from_text
     from discopt.doe.linear_design import LINEAR_TEMPLATES
 
     spec = json.loads(spec_json)
@@ -299,6 +318,11 @@ def create_design(spec_json: str) -> str:
         expression=(spec.get("expression") or None),
         param_initial_guess=nominal,
         force=True,
+        # Design for chosen quantities instead of every parameter; stored in
+        # the workbook, so a later CLI `extend` reuses it.
+        target=target_spec_from_text(
+            spec.get("targets"), spec.get("tolerances"), bool(spec.get("relative_precision"))
+        ),
     )
 
     out = do_new(params)
@@ -620,10 +644,21 @@ def run_fit(path: str = str(UPLOAD_PATH)) -> str:
     from discopt.doe.cli import do_fit
     from discopt.doe.workbook import Workbook
 
+    from discopt.doe.cli import do_status
+
     fit = do_fit({"workbook": path})
     estimates = {p["name"]: p["estimate"] for p in fit["parameters"]}
+    # The campaign's design target, judged on the fit just written.
+    status = do_status({"workbook": path})
     # Re-open after the fit so the model is described from the saved workbook.
-    return _ok({"fit": fit, "model": _model_summary(Workbook.open(Path(path)), estimates)})
+    return _ok(
+        {
+            "fit": fit,
+            "model": _model_summary(Workbook.open(Path(path)), estimates),
+            "target": status.get("target"),
+            "target_precision": status.get("target_precision"),
+        }
+    )
 
 
 @_guard
