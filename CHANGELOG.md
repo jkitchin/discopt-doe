@@ -67,6 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `discopt[jax]>=0.10` floor stays, since nothing here needs 0.11 or 0.12.
 
 ### Fixed
+- **Greedy batch I/G designs ignored a custom prediction region.**
+  `batch_optimal_experiment(strategy="greedy", ...)` rebuilt the region inside
+  every pick and exchange sweep from the design box, which dropped
+  `prediction_points` and `prediction_region`. A batch built to predict at
+  chosen points was therefore I/G-optimal for the whole box instead. The picks
+  now use the batch's own region.
 - **Center points with a categorical factor.** A 2-level full factorial,
   fractional factorial or Plackett-Burman design with any string-valued factor
   (e.g. `catalyst:A:B`) refused center points ("center_points > 0 requires all

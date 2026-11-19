@@ -1653,6 +1653,9 @@ def _greedy_batch(
                 feasible_projection=feasible_projection,
                 n_starts=n_starts,
                 local_refine=local_refine,
+                # The batch's own region/target: rebuilding it here re-sampled
+                # the design box and dropped prediction_points.
+                prediction_region=None if _is_target(region) else region,
                 target=region if _is_target(region) else None,
                 seed=seed + i,
             )
@@ -1685,6 +1688,7 @@ def _greedy_batch(
                         feasible_projection=feasible_projection,
                         n_starts=n_starts,
                         local_refine=local_refine,
+                        prediction_region=None if _is_target(region) else region,
                         target=region if _is_target(region) else None,
                         seed=seed + n_experiments + sweep * n_experiments + i,
                     )

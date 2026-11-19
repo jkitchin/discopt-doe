@@ -198,6 +198,49 @@ def test_batch_designs_accept_the_prediction_criteria(strategy, criterion) -> No
     assert res.criterion_value < alone
 
 
+class Amplitude(Experiment):
+    """``y = A exp(-k t)``: two parameters, so where to predict moves the design."""
+
+    def create_model(self, **kwargs):
+        m = dm.Model("amplitude")
+        A = m.continuous("A", lb=0.01, ub=100.0)
+        k = m.continuous("k", lb=1e-3, ub=10.0)
+        t = m.continuous("t", lb=0.0, ub=20.0)
+        return ExperimentModel(
+            m, {"A": A, "k": k}, {"t": t}, {"y": A * dm.exp(-k * t)}, {"y": SIGMA}
+        )
+
+
+@pytest.mark.parametrize("given", ["prediction_points", "prediction_region"])
+def test_greedy_batch_predicts_where_it_was_told(given) -> None:
+    """The greedy picks used to drop prediction_points / prediction_region and
+    re-sample the whole design box, so a batch built to predict at t = 6 was
+    I-optimal for the box instead (t = 2.30 rather than 2.46 here)."""
+    exp = Amplitude()
+    theta = {"A": 2.0, "k": 0.5}
+    bounds = {"t": (0.05, 10.0)}
+    prior = compute_fim(exp, theta, {"t": 0.3}).fim
+    points = [{"t": 6.0}]
+    region = experiment_region(exp, theta, points=points)
+    where = {given: points if given == "prediction_points" else region}
+    single = optimal_experiment(
+        exp, theta, bounds, criterion=DesignCriterion.I_OPTIMAL, prior_fim=prior, **where
+    )
+    batch = batch_optimal_experiment(
+        exp,
+        theta,
+        bounds,
+        n_experiments=1,
+        criterion=DesignCriterion.I_OPTIMAL,
+        prior_fim=prior,
+        exchange_passes=0,
+        **where,
+    )
+    assert batch.designs[0]["t"] == pytest.approx(single.design["t"], rel=1e-4)
+    assert batch.criterion_value == pytest.approx(single.criterion_value, rel=1e-6)
+    assert single.design["t"] == pytest.approx(2.45, rel=0.03)
+
+
 # ---------------------------------------------------------------------------
 # The region itself
 # ---------------------------------------------------------------------------
