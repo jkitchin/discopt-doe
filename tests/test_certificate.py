@@ -132,6 +132,10 @@ def test_with_a_prior_and_a_rounded_design():
 def test_refusals():
     with pytest.raises(ValueError, match="certificates are available"):
         approximate_targeted_design(
+            Quadratic(), Q, Target.parameters(["b1"]), design_bounds=QB, criterion="bogus"
+        )
+    with pytest.raises(ValueError, match="invertible set"):
+        approximate_targeted_design(
             Quadratic(),
             Q,
             Target.parameters(["b1"]),
@@ -220,3 +224,117 @@ def test_certify_a_minimax_design():
         cb = certify_design(Quadratic(), Q, bad, target, criterion=crit, candidates=cands)
         assert cg.efficiency_lower_bound > 0.99
         assert cb.efficiency_lower_bound < 0.3
+
+
+# ---------------------------------------------------------------------------
+# Beyond the candidate grid: refinement and a region certificate
+# ---------------------------------------------------------------------------
+
+
+def test_refinement_finds_the_optimum_between_grid_points():
+    prior = compute_fim(Decay(), DT, {"t": 0.3}).fim
+    target = Target.parameters(["k"])
+    coarse = [{"t": t} for t in (0.05, 1.0, 4.0, 10.0)]  # the optimum (t ~ 2.5) is not on it
+    plain = approximate_targeted_design(
+        Decay(), DT, target, candidates=coarse, prior_fim=prior, refine=False
+    )
+    refined = approximate_targeted_design(
+        Decay(), DT, target, candidates=coarse, design_bounds=DB, prior_fim=prior
+    )
+    fine = approximate_targeted_design(
+        Decay(), DT, target, design_bounds=DB, prior_fim=prior, refine=False, n_candidates=2001
+    )
+    assert refined.n_refined >= 1
+    assert refined.value < plain.value
+    assert refined.value == pytest.approx(fine.value, rel=1e-4)
+    assert "refinement" in refined.summary()
+
+
+def _symbolic_decay():
+    from discopt.doe import SymbolicModel
+    from discopt.doe.runs import symbolic_experiment
+
+    model = SymbolicModel(
+        source="A*exp(-k*t)",
+        parameter_names=("A", "k"),
+        input_names=("t",),
+        measurement_error=0.05,
+    )
+    return model, symbolic_experiment(model, input_bounds=DB)
+
+
+@pytest.mark.parametrize("criterion", ["trace", "determinant", "max_variance"])
+def test_region_certificate_holds_over_the_continuum(criterion):
+    model, exp = _symbolic_decay()
+    target = Target.parameters(["A", "k"]) if criterion != "trace" else Target.parameters(["k"])
+    prior = compute_fim(exp, DT, {"t": 0.3}).fim
+    a = approximate_targeted_design(
+        exp,
+        DT,
+        target,
+        design_bounds=DB,
+        prior_fim=prior,
+        criterion=criterion,
+        n_runs=2,
+        global_bound=True,
+    )
+    assert a.region_certified, a.region_note
+    assert a.max_sensitivity_bound >= a.sensitivity.max() - 1e-9
+    assert a.lower_bound <= a.value
+    assert a.gap <= 1e-2 * abs(a.value) + 1e-9  # the grid + refinement were already tight
+    # Every exact 2-run design in the region scores at least the certified bound.
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        ts = rng.uniform(*DB["t"], size=2)
+        fim = prior + sum(compute_fim(exp, DT, {"t": float(t)}).fim for t in ts)
+        assert a.phi(fim) >= a.lower_bound - 1e-9 * abs(a.lower_bound)
+
+
+def test_certify_design_over_the_region():
+    _, exp = _symbolic_decay()
+    target = Target.parameters(["k"])
+    prior = compute_fim(exp, DT, {"t": 0.3}).fim
+    best = optimal_experiment(exp, DT, DB, criterion="trace", target=target, prior_fim=prior)
+    cert = certify_design(
+        exp, DT, [best.design], target, design_bounds=DB, prior_fim=prior, global_bound=True
+    )
+    assert cert.region_certified
+    assert cert.efficiency_lower_bound > 0.99
+    assert "whole design region" in cert.summary()
+
+
+# ---------------------------------------------------------------------------
+# Condition number (targets = an invertible set of all parameters)
+# ---------------------------------------------------------------------------
+
+
+def test_condition_number_bound_is_below_every_exact_design():
+    import itertools
+
+    target = Target.parameters(["b0", "b1", "b2"])
+    grid = np.linspace(-1.0, 1.0, 21)
+    cands = [{"x": float(x)} for x in grid]
+    a = approximate_targeted_design(
+        Quadratic(), Q, target, candidates=cands, criterion="condition_number", n_runs=3
+    )
+    infos = {x: compute_fim(Quadratic(), Q, {"x": float(x)}).fim for x in grid}
+    exact = min(
+        a.phi(sum(infos[x] for x in runs))
+        for runs in itertools.combinations_with_replacement(grid, 3)
+    )
+    assert 1.0 <= a.lower_bound <= a.value <= exact * (1 + 1e-9)
+    assert a.gap <= 0.02 * a.value
+    good = [{"x": x} for x in (-1.0, -1.0, 0.0, 0.0, 0.0, 1.0, 1.0)]
+    bad = [{"x": x} for x in (0.6, 0.7, 0.8, 0.9, 1.0, 0.95, 0.85)]
+    cg = certify_design(
+        Quadratic(), Q, good, target, criterion="condition_number", candidates=cands
+    )
+    cb = certify_design(Quadratic(), Q, bad, target, criterion="condition_number", candidates=cands)
+    assert cb.efficiency_lower_bound < 0.1 < cg.efficiency_lower_bound
+
+
+def test_region_certificate_is_opt_in():
+    """Without global_bound the certificate is relative to the candidates, and says so."""
+    _, exp = _symbolic_decay()
+    a = approximate_targeted_design(exp, DT, Target.parameters(["k"]), design_bounds=DB)
+    assert not a.region_certified and "relative to the candidates" in a.region_note

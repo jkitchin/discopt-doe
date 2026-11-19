@@ -245,13 +245,18 @@ print(cert.summary())                             # certified efficiency >= x %
 - **Always compare** the targeted design with the D-optimal one on the user's
   target (`res.target.precision(fim)` for both). Report the SE ratio, and
   (ratio)² as the factor in runs it saves.
-- **Certify** with `certify_design`. It works for all four criteria; the minimax
-  ones go through their dual, and `cert.approximate.dual` shows which targets
-  bind. A bound well below 100 % means the search is stuck: try
+- **Certify** with `certify_design`. It works for every target criterion; the
+  minimax ones go through their dual (`cert.approximate.dual` shows which
+  targets bind), and `condition_number` needs the targets to be an invertible
+  set of all parameters. By default the bound is relative to a candidate grid
+  refined between its points. For a symbolic model, `global_bound=True` makes it
+  hold over the whole region (`cert.region_certified`) when the formula admits a
+  finite bound. A bound well below 100 % means the search is stuck: try
   `strategy="joint"`, more `n_starts`, or `initial_designs`.
 - **Check the SE is honest** once there are data:
   `profile_target(campaign, data, target, model=per_run_experiment)` compares
-  each target's linear interval with its profile likelihood. Flag `CHECK`
+  each target's linear interval with its profile likelihood (a two-point
+  check, then the full profile only for flagged targets). Flag `CHECK`
   results to the user (ratios, half-lives and far predictions are typical),
   and plan more runs than the linearized design predicts.
 - **Few runs, singular FIM:** say when the targets are estimable even though

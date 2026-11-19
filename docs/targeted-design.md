@@ -179,9 +179,47 @@ The weights are found by alternating multiplicative updates
 {cite:p}`silvey1978-algorithm,yu2010-monotonic` with Frank-Wolfe vertex-direction
 and away steps, in the spirit of the cocktail algorithm {cite:p}`yu2011-cocktail`.
 Exact designs come from the weights by efficient rounding
-{cite:p}`pukelsheim1992-rounding`. The bound is relative to designs on the
+{cite:p}`pukelsheim1992-rounding`.
+
+**Beyond the grid.** The bound as described is relative to designs on the
 candidate grid. The default grid is fine in one or two inputs and Sobol in
-more, and the runs being certified are always added to it.
+more, and the runs being certified are always added to it. Two options extend
+it to the continuous region:
+
+- **Refinement** (on by default when `design_bounds` is given). A local search
+  maximizes $d(x)$ between the grid points, starting from the most sensitive
+  candidates and the support. Any point that beats every candidate is added,
+  and the weights are re-solved, until none does. `n_refined` reports how many
+  points it added. In the worked example it moved the approximate optimum by
+  0.5 %. Refinement finds what local searches find; it does not prove there is
+  nothing better.
+- **A region certificate** (`global_bound=True`). For a model written as a
+  formula (a `symbolic_experiment`, or `global_model=SymbolicModel(...)`),
+  $d(x) = (n/\sigma^2)\,J(x)^\top G\,J(x)$ is itself a formula in $x$.
+  discopt's spatial branch-and-bound bounds its maximum over the box
+  *rigorously*. With that bound in place of the grid maximum,
+  $\varphi^\star \ge \varphi(w) - (\overline{\max_x d} - \sum_i w_i d_i)$ holds for
+  every design in the region, and `region_certified` is true. The solver's
+  bound is valid even when it stops at its time limit, just looser. Some
+  formulas admit no finite bound. For example,
+  $k_1/(k_2-k_1)$ has a removable singularity where the two rate constants
+  can be equal, so an interval relaxation sees a division by zero. Then
+  `region_note` says so and the certificate stays relative to the candidates.
+  The option is opt-in, because the solve can take up to `global_time_limit`.
+
+**Condition number.** `"condition_number"` is not convex, so none of the above
+applies directly. When the targets are an invertible set of combinations of
+*all* the parameters, the target information $C = A M A^\top$ (with
+$A = W^{-1/2}K^{-1}$) is linear in $M$, and $\operatorname{cond} C$ is
+quasiconvex. Whether $\operatorname{cond} \le t$ is reachable is then a bilinear
+game between the design weights and two density matrices, one for
+$\lambda_{\max}$ and one for $\lambda_{\min}$. Averaged exponentiated-gradient
+play, sharpened by an exact LP over rank-1 duals, brackets the game's value.
+A positive lower end at $t$ proves $t$ unreachable, and bisection on $t$ gives
+a certified lower bound on the optimal condition number. For the quadratic in
+the tests it lands within 1 % of the exact optimum $3 + 2\sqrt2$. With fewer
+targets than parameters there is no such structure, and the criterion is
+refused.
 
 **Minimax criteria.** `"max_variance"` and `"min_eigenvalue"` are convex but not
 differentiable, so they have no sensitivity function of their own. With
@@ -222,7 +260,16 @@ print(check.summary())   # per target: linear vs profile interval, ok / CHECK
 
 A target is `adequate` when both profile half-widths are within 25 % of the
 linear ones (`tolerance=`). Otherwise the note says which way the
-linearization errs. For example, a decay rate measured from three early
+linearization errs.
+
+By default (`mode="auto"`) a target is first given the **two-point check**.
+That is the constrained deviance at the linear interval's two ends,
+$\hat\psi \pm z\,\mathrm{SE}$: two fits. A profile that is locally quadratic
+with half-width $h$ has $\Delta D = q\,(z\,\mathrm{SE}/h)^2$ there, so
+$\sqrt{q/\Delta D}$ is the half-width ratio. Only the targets this flags get the
+full profile. On an 18-run campaign the two-point ratios matched the full
+profiles' to within 2 %, in 0.4–1.5 s per target instead of 2–30 s.
+`mode="quick"` stops at the two-point check, and `mode="full"` always profiles. For example, a decay rate measured from three early
 samples is fine, but the half-life $\ln 2 / k$ computed from the same data has
 a profile 2.7 times wider above the estimate than its SE suggests, and a
 prediction far beyond the data 6.8 times wider. On the command line, use
@@ -309,7 +356,9 @@ error, the same scale the design predictions use. When every target is within it
 tolerance, `status` says so.
 
 `discopt doe status --profile` also refits the campaign and checks each target's
-linear interval against its profile likelihood (see above).
+linear interval against its profile likelihood (see above). The result is
+cached in the workbook, keyed by the data, the target and the model, so asking
+again before anything changes costs nothing.
 
 `discopt doe extend` reuses the stored target. `--target ...` on `extend` replaces
 it, and `--clear-target` goes back to designing for all parameters. Both `new` and

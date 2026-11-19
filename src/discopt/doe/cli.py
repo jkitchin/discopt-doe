@@ -2878,6 +2878,32 @@ def _status_target_profile(
             "note": "linear in its coefficients: the linearized precision is exact",
         }
     runs, _ = _module_campaign_runs(wb, completed)
+    # The check refits and profiles, so it is cached in the workbook against
+    # exactly what it depends on: the data, the target and the model.
+    import hashlib
+
+    key = hashlib.sha256(
+        json.dumps(
+            {
+                "runs": [{k: v for k, v in r.items() if k != "run_id"} for r in runs],
+                "target": spec,
+                "template": template,
+                "template_args": wb.template_args(),
+                "module": wb.module_callable(),
+                "sigmas": wb.response_sigmas(),
+            },
+            sort_keys=True,
+            default=str,
+        ).encode()
+    ).hexdigest()
+    cached = wb.metadata().get("target_profile_cache")
+    if cached:
+        try:
+            entry = json.loads(cached)
+            if entry.get("key") == key:
+                return {**entry["result"], "cached": True}
+        except (ValueError, TypeError):
+            pass
     if template == "symbolic":
         model: Any = wb.symbolic_model()
         bounds = {s.name: (s.lb, s.ub) for s in wb.input_specs()}
@@ -2891,7 +2917,7 @@ def _status_target_profile(
     data = camp.data_from_runs(runs)
     est = camp.estimate(data, initial_guess=guess)
     check = profile_target(camp, data, _target_from_spec(spec), model=per_run, initial_estimate=est)
-    return {
+    result = {
         "adequate": check.adequate,
         "confidence_level": check.confidence_level,
         "targets": {
@@ -2899,14 +2925,18 @@ def _status_target_profile(
                 "estimate": p.estimate,
                 "std_error": p.std_error,
                 "linear_ci": list(p.linear_ci),
-                "profile_ci": [p.profile.ci_lower, p.profile.ci_upper],
+                "profile_ci": None if p.profile_ci is None else list(p.profile_ci),
                 "half_width_ratios": list(p.half_width_ratios),
+                "method": p.method,
                 "adequate": p.adequate,
                 "note": p.note,
             }
             for name, p in check.profiles.items()
         },
     }
+    wb.set_target_profile_cache({"key": key, "result": _sanitize_json(result)})
+    wb.save()
+    return {**result, "cached": False}
 
 
 def _status_target_precision(
@@ -3030,14 +3060,21 @@ def _cmd_status(args) -> int:
                 print(f"  profile likelihood check ({level} intervals):")
                 if prof.get("note"):
                     print(f"    {prof['note']}")
+                fmt = lambda v: "unbounded" if v is None else f"{v:.5g}"  # noqa: E731
                 for name, t in prof["targets"].items():
-                    lo, hi = t["profile_ci"]
-                    fmt = lambda v: "unbounded" if v is None else f"{v:.5g}"  # noqa: E731
+                    if t.get("profile_ci"):
+                        lo, hi = t["profile_ci"]
+                        shown = f"profile [{fmt(lo)}, {fmt(hi)}]"
+                    else:
+                        r = t["half_width_ratios"]
+                        shown = f"two-point check {fmt(r[0])}x / {fmt(r[1])}x"
                     print(
                         f"    {name:>12s}  linear [{t['linear_ci'][0]:.5g}, {t['linear_ci'][1]:.5g}]"
-                        f"  profile [{fmt(lo)}, {fmt(hi)}]  {'ok' if t['adequate'] else 'CHECK'}"
+                        f"  {shown}  {'ok' if t['adequate'] else 'CHECK'}"
                     )
                     print(f"      {t['note']}")
+                if prof.get("cached"):
+                    print("    (cached: same data and target as the last check)")
         print(f"  next:        {out['next_command']}")
     return 0
 

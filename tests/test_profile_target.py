@@ -39,12 +39,17 @@ def early():
 
 def test_a_parameter_the_data_measure_is_adequate(early):
     camp, data = early
+    # Two-point check (the default): two constrained fits settle it.
     chk = profile_target(camp, data, Target.parameters(["b"]))
     p = chk.profiles["b"]
-    assert chk.adequate and p.adequate
-    lo, hi = p.linear_ci
-    assert p.profile.ci_lower == pytest.approx(lo, rel=0.05)
-    assert p.profile.ci_upper == pytest.approx(hi, rel=0.05)
+    assert chk.adequate and p.adequate and p.method == "two-point" and p.profile is None
+    assert all(abs(r - 1) < 0.1 for r in p.half_width_ratios)
+    # The full profile agrees with the linear interval.
+    full = profile_target(camp, data, Target.parameters(["b"]), mode="full").profiles["b"]
+    assert full.method == "profile"
+    lo, hi = full.linear_ci
+    assert full.profile.ci_lower == pytest.approx(lo, rel=0.05)
+    assert full.profile.ci_upper == pytest.approx(hi, rel=0.05)
 
 
 def test_a_nonlinear_target_is_flagged(early):
@@ -53,10 +58,16 @@ def test_a_nonlinear_target_is_flagged(early):
     chk = profile_target(camp, data, Target.expression({"half_life": "log(2)/b"}))
     p = chk.profiles["half_life"]
     assert not chk.adequate
+    assert p.method == "profile"  # flagged by the two-point check, then profiled
     below, above = p.half_width_ratios
     assert above > 1.5 > below  # much wider above the estimate than the SE says
     assert "optimistic" in p.note
     assert "CHECK" in chk.summary()
+    # The two-point check alone already sees it.
+    quick = profile_target(
+        camp, data, Target.expression({"half_life": "log(2)/b"}), mode="quick"
+    ).profiles["half_life"]
+    assert not quick.adequate and quick.half_width_ratios[1] > 1.5
 
 
 def test_a_prediction_far_from_the_data(early):
@@ -113,6 +124,9 @@ def test_status_profile_from_the_cli(tmp_path):
     prof = st["target_profile"]
     assert prof is not None, st.get("target_precision_error")
     t = prof["targets"]["half_life"]
-    assert t["profile_ci"][0] is not None
-    assert t["note"]
+    assert t["note"] and t["method"] in ("two-point", "profile")
+    assert prof["cached"] is False
     assert do_status({"workbook": path})["target_profile"] is None  # only on request
+    # Same data, same target: the stored result, no refit.
+    again = do_status({"workbook": path, "profile": True})["target_profile"]
+    assert again["cached"] is True and again["targets"] == prof["targets"]

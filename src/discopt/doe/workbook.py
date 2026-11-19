@@ -531,6 +531,10 @@ class Workbook:
         """Store (or with ``None`` clear) the design target that `extend` reuses."""
         self._set_metadata("target", json.dumps(dict(spec)) if spec else "")
 
+    def set_target_profile_cache(self, entry: Mapping[str, Any] | None) -> None:
+        """Store the last ``status --profile`` result with the key it is valid for."""
+        self._set_metadata("target_profile_cache", json.dumps(dict(entry)) if entry else "")
+
     def measurement_error(self) -> float:
         # `or 1.0` would turn a legitimately-stored 0.0 into 1.0; guard on
         # None/"" only so falsy-but-valid values survive the round-trip.

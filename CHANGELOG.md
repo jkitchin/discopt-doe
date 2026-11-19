@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Certificates beyond the candidate grid.** `approximate_targeted_design` /
+  `certify_design` refine the candidates by local search for sensitivity
+  maxima between the grid points. This is on by default with `design_bounds`,
+  and `n_refined` reports the points added. With `global_bound=True`, for a
+  symbolic model, discopt's spatial branch-and-bound bounds the maximum
+  sensitivity over the whole region rigorously, so the certificate holds for
+  every design there (`region_certified`). Formulas with no finite bound are
+  reported in `region_note` rather than trusted.
+- **Condition-number certificate.** When the targets are an invertible set of
+  all the parameters, the condition number is quasiconvex. Bisection over a
+  bilinear game (exponentiated-gradient play plus an exact LP over rank-1
+  duals) gives a certified lower bound on the optimal condition number,
+  within 1 % of the exact optimum in the tests.
+- **Fast profile check.** `profile_target(mode="auto")` first evaluates the
+  constrained deviance only at the linear interval's ends (2 fits per
+  target), and profiles fully only the targets that fail. It is 4–40×
+  faster, and its ratios matched the full profiles' to within 2 %.
+  `discopt doe status --profile` caches its result in the workbook, keyed by
+  the data, the target and the model.
 - **Certificates for the minimax target criteria.** `approximate_targeted_design`
   and `certify_design` now cover `"max_variance"` and `"min_eigenvalue"` as well
   as `"trace"` and `"determinant"`. Each is a maximum of trace criteria, so

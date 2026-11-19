@@ -253,12 +253,13 @@ approx = approximate_targeted_design(
 )
 print(approx.summary())
 
-Ts = np.array([c["T"] for c in approx.candidates])
-ts = np.array([c["t"] for c in approx.candidates])
-n = int(np.sqrt(len(Ts)))
+n = 41  # the 41 x 41 grid; candidates after it were added by refinement
+Ts = np.array([c["T"] for c in approx.candidates[: n * n]])
+ts = np.array([c["t"] for c in approx.candidates[: n * n]])
 fig, ax = plt.subplots(figsize=(6.4, 4.4))
 cs = ax.contourf(
-    Ts.reshape(n, n), ts.reshape(n, n), approx.sensitivity.reshape(n, n), levels=20, cmap="viridis"
+    Ts.reshape(n, n), ts.reshape(n, n), approx.sensitivity[: n * n].reshape(n, n), levels=20,
+    cmap="viridis",
 )
 fig.colorbar(cs, label="sensitivity $d(T, t)$ for the plant yield")
 for point, w in approx.support():
