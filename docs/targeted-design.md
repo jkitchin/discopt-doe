@@ -135,3 +135,45 @@ history = sequential_doe(
 
 `target_precision(fim, target, experiment, theta)` reports the same check for any
 FIM, for example the FIM of data you already have.
+
+## From the command line
+
+`discopt doe new` and `discopt doe extend` take the same targets as flags, for the
+parametric templates, `--module` experiments and the `symbolic` template:
+
+| Flag | Target |
+|---|---|
+| `--target PARAM[=WEIGHT]` | a parameter, optionally weighted (repeatable) |
+| `--target-expr NAME=FORMULA` | a function of the parameters, e.g. `ratio=k1/k2`, `half_life=log(2)/k` |
+| `--target-response RESP@INPUT=V[,...]` | a prediction at an operating point; repeat it for more points |
+| `--tolerance NAME=TAU` | the standard error wanted on a target; if one target has a tolerance, all must |
+| `--relative-precision` | tolerances become fractions of each target's value |
+
+`--criterion` then applies to the targets (`trace` is usually what you want). For
+example, to pin down a rate constant to 5 % with as few runs as possible:
+
+```bash
+discopt doe new symbolic --expr "A*exp(-k*t)" --param A=2 --param k=0.5 \
+    --input t:0.05:10 --error 0.05 --n 3 --criterion trace \
+    --target k --tolerance k=0.05 --relative-precision -o decay.xlsx
+```
+
+The target is stored in the workbook. After you record the responses and run
+`discopt doe fit`, `discopt doe status` reports each target's standard error and
+its ratio to the tolerance. It uses the fitted FIM at the *declared* measurement
+error, the same scale the design predictions use. When every target is within its
+tolerance, `status` says so.
+
+`discopt doe extend` reuses the stored target. `--target ...` on `extend` replaces
+it, and `--clear-target` goes back to designing for all parameters. Both `new` and
+`extend` report the precision the new runs are predicted to give, counting only
+the information the runs carry. That is why one run of a two-parameter model
+reports "not estimable" rather than a small, misleading number.
+
+A target can make fewer runs than parameters useful. For example, `new symbolic`
+accepts `--n` below the parameter count when a target is named. With a target,
+`new` searches the batch jointly. A greedy search picks the first runs before
+the target is identifiable, so it can leave the batch in a poor arrangement:
+two runs that should sit symmetrically to measure a slope are one example. Fixed
+and model-free designs (factorial, classical, Latin, `optimize`) do not accept
+targets.

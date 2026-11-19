@@ -23,6 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stop_at_tolerance=True)` stops once every target meets its tolerance.
   `target_precision()` reports the same check for any FIM. New docs page
   *Targeted design*.
+- **Design targets in the CLI.** `discopt doe new` (parametric templates,
+  `--module`, `symbolic`) and `discopt doe extend` take `--target PARAM[=WEIGHT]`,
+  `--target-expr NAME=FORMULA`, `--target-response RESP@INPUT=V[,...]`,
+  `--tolerance NAME=TAU` and `--relative-precision`. The target is stored in the
+  workbook (`Workbook.target_spec`) and reused by `extend`. `extend --target`
+  replaces it and `--clear-target` drops it. `new` and `extend` report the
+  predicted target precision, counting only the runs' information and not the
+  search's regularizing ridge. After `fit`, `status` reports each target's
+  standard error and tolerance ratio, and says when every tolerance is met.
+  With a target, `new symbolic` accepts fewer runs than parameters, and a
+  targeted symbolic `extend` offers every `--batch-strategy`. The Python side
+  adds `Target.expression` (sympy formulas), `Target.from_spec` and
+  `validate_target_spec`.
 - **Multi-response `--module` campaigns, end to end** (#46). `discopt doe new
   module` now takes its response columns from the `ExperimentModel` the
   callable returns: one runs-sheet column per response, each with the model's

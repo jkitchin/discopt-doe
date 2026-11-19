@@ -306,7 +306,13 @@ _SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
     ),
     "tradeoff": ("TradeoffPoint", "TradeoffResult", "design_tradeoff"),
     "surrogate": ("GPSurrogate", "Surrogate", "coerce_surrogate", "gp_surrogate"),
-    "targets": ("ResolvedTarget", "Target", "TargetPrecision", "target_precision"),
+    "targets": (
+        "ResolvedTarget",
+        "Target",
+        "TargetPrecision",
+        "target_precision",
+        "validate_target_spec",
+    ),
     "templates": (
         "TEMPLATE_NAMES",
         "build_template",
@@ -334,6 +340,7 @@ __all__ = [
     "Target",
     "TargetPrecision",
     "target_precision",
+    "validate_target_spec",
     "estimate_parameters",
     "MSESubsetResult",
     "mse_subset_selection",

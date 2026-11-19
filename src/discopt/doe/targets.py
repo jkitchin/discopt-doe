@@ -465,6 +465,101 @@ class Target:
         return cls((_Block(_FUNCTION_SPACE, tolerances is not None, build, f"function {names}"),))
 
     @classmethod
+    def expression(
+        cls,
+        expressions: Mapping[str, str],
+        *,
+        weights: Mapping[str, float] | None = None,
+        tolerances: Mapping[str, float] | None = None,
+        relative: bool = False,
+    ) -> Target:
+        """Target functions of the parameters written as formulas.
+
+        ``expressions`` maps a name to a formula in the (scalar) parameter
+        names, e.g. ``{"ratio": "k1 / k2", "diff": "Ea1 - Ea2"}``, in the
+        syntax of :func:`~discopt.doe.parse_expression`. The gradient is taken
+        symbolically (sympy), so no JAX is needed. ``relative=True`` measures
+        precision relative to the formula's value at the nominal parameters.
+        This is the form the command line uses (``--target-expr``).
+        """
+        exprs = {str(n): str(e) for n, e in expressions.items()}
+        if not exprs:
+            raise ValueError("Target.expression needs at least one formula")
+
+        def build(experiment, theta, lay: _Layout):
+            from discopt.doe.symbolic import _require_sympy, parse_expression
+
+            sp = _require_sympy()
+            scalars = [p for (p, a, b) in lay.blocks if b - a == 1]
+            subs = {sp.Symbol(p, real=True): float(lay.values[lay.index(p)[0]]) for p in scalars}
+            K = np.zeros((len(lay.names), len(exprs)))
+            values = []
+            for j, src in enumerate(exprs.values()):
+                expr = parse_expression(src, scalars)
+                for p in scalars:
+                    K[lay.index(p)[0], j] = float(sp.diff(expr, sp.Symbol(p, real=True)).subs(subs))
+                values.append(float(expr.subs(subs)))
+            names = list(exprs)
+            scale = np.abs(np.asarray(values)) if relative else None
+            if relative and np.any(~(scale > 0)):
+                raise ValueError("relative=True needs every formula to be nonzero at the nominals")
+            w, tau = _weights_and_tolerances(names, names, weights, tolerances, scale)
+            return K, names, w, tau
+
+        return cls(
+            (
+                _Block(
+                    _FUNCTION_SPACE,
+                    relative or tolerances is not None,
+                    build,
+                    f"expressions {list(exprs)}",
+                ),
+            )
+        )
+
+    @classmethod
+    def from_spec(cls, spec: Mapping[str, Any]) -> Target:
+        """Build a target from a JSON-able description (what workbooks store).
+
+        ``spec`` has any of the keys ``parameters`` (name -> weight),
+        ``expressions`` (name -> formula), ``responses`` (response name ->
+        list of operating points, each a mapping of design inputs; an empty
+        list for a model without inputs), ``tolerances`` (target name -> τ;
+        when given, every target needs one) and ``relative`` (bool). Use
+        :func:`validate_target_spec` to check it first.
+        """
+        spec = validate_target_spec(spec)
+        tol = spec.get("tolerances") or None
+        rel = bool(spec.get("relative", False))
+
+        def pick(keys):
+            return None if tol is None else {k: tol[k] for k in keys}
+
+        parts: list[Target] = []
+        if spec.get("parameters"):
+            p = spec["parameters"]
+            if tol is None:
+                parts.append(cls.parameters(p, relative=rel))
+            else:
+                parts.append(cls.parameters(list(p), relative=rel, tolerances=pick(p)))
+        if spec.get("expressions"):
+            e = spec["expressions"]
+            parts.append(cls.expression(e, relative=rel, tolerances=pick(e)))
+        for r, pts in (spec.get("responses") or {}).items():
+            parts.append(
+                cls.responses(
+                    at=[dict(x) for x in pts] or None,
+                    responses=[r],
+                    relative=rel,
+                    tolerances=pick([r]),
+                )
+            )
+        out = parts[0]
+        for part in parts[1:]:
+            out = out + part
+        return out
+
+    @classmethod
     def region(
         cls,
         bounds: Mapping[str, tuple[float, float]] | None = None,
@@ -773,6 +868,62 @@ class TargetPrecision:
         if self.met is not None:
             lines.append(f"  all within tolerance: {self.met}")
         return "\n".join(lines)
+
+
+_SPEC_KEYS = ("parameters", "expressions", "responses", "tolerances", "relative")
+
+
+def validate_target_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Check a target description (see :meth:`Target.from_spec`); return a clean copy.
+
+    Raises ``ValueError`` with a message naming the problem: an unknown key, a
+    negative weight, a non-positive tolerance, a target name used twice, or
+    tolerances that do not cover every target.
+    """
+    if not isinstance(spec, Mapping):
+        raise ValueError("a target spec must be a mapping")
+    unknown = sorted(set(spec) - set(_SPEC_KEYS))
+    if unknown:
+        raise ValueError(f"unknown target spec key(s) {unknown}; allowed: {list(_SPEC_KEYS)}")
+    params = {str(k): float(v) for k, v in (spec.get("parameters") or {}).items()}
+    _check_positive(params, "weight")
+    exprs = {str(k): str(v) for k, v in (spec.get("expressions") or {}).items()}
+    responses: dict[str, list[dict[str, float]]] = {}
+    for r, pts in (spec.get("responses") or {}).items():
+        responses[str(r)] = [{str(k): float(v) for k, v in dict(pt).items()} for pt in pts or []]
+    names = list(params) + list(exprs) + list(responses)
+    if not names:
+        raise ValueError("the target spec names no parameter, expression or response")
+    dup = sorted({n for n in names if names.count(n) > 1})
+    if dup:
+        raise ValueError(f"target name(s) {dup} used more than once")
+    out: dict[str, Any] = {"relative": bool(spec.get("relative", False))}
+    if params:
+        out["parameters"] = params
+    if exprs:
+        out["expressions"] = exprs
+    if responses:
+        out["responses"] = responses
+    tol = spec.get("tolerances")
+    if tol:
+        tol = {str(k): float(v) for k, v in tol.items()}
+        bad = sorted(k for k, v in tol.items() if not (np.isfinite(v) and v > 0))
+        if bad:
+            raise ValueError(f"tolerances must be finite and > 0 (got {bad})")
+        extra = sorted(set(tol) - set(names))
+        if extra:
+            raise ValueError(f"tolerance(s) for {extra}, which are not targets")
+        missing = sorted(set(names) - set(tol))
+        if missing:
+            raise ValueError(
+                f"tolerances were given, so every target needs one; missing for {missing}"
+            )
+        if any(w != 1.0 for w in params.values()):
+            raise ValueError(
+                "give parameter weights or tolerances, not both (a tolerance τ is a weight 1/τ²)"
+            )
+        out["tolerances"] = tol
+    return out
 
 
 def target_precision(
