@@ -306,7 +306,7 @@ def test_bad_targets_are_refused(tmp_path, spec, match):
 
 
 def test_fixed_designs_refuse_a_target(tmp_path):
-    with pytest.raises(DoEError, match="need a model designed through an Experiment"):
+    with pytest.raises(DoEError, match="fixed or model-free design"):
         do_new(
             NewParams(
                 output=tmp_path / "c.xlsx",
@@ -321,3 +321,60 @@ def test_fixed_designs_refuse_a_target(tmp_path):
                 target={"parameters": {"b1": 1.0}},
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# jax-free basis path: classical augmentation and --use-linear-design
+# ---------------------------------------------------------------------------
+
+
+def test_classical_design_extended_for_an_interaction(tmp_path):
+    out = do_new(
+        NewParams(
+            output=tmp_path / "ccd.xlsx",
+            n=1,
+            inputs=[("a", -1.0, 1.0), ("b", -1.0, 1.0)],
+            response_name="y",
+            measurement_error=0.1,
+            criterion="determinant",
+            seed=0,
+            n_starts=2,
+            template="central-composite",
+        )
+    )
+    path = Path(out["workbook_path"])
+    wb = Workbook.open(path)
+    names = list(wb.parameter_names())
+    assert "b12" in names, names  # the a*b interaction coefficient
+    inter = ["b12"]
+    ext = do_extend(
+        ExtendParams(workbook=path, n=2, n_starts=3, target={"parameters": {inter[0]: 1.0}})
+    )
+    assert ext["target"]["parameters"] == {inter[0]: 1.0}
+    prec = ext["target_precision"]
+    assert prec["estimable"] and prec["std_errors"][inter[0]] > 0
+    # Runs that measure an interaction sit at the corners of the square.
+    for d in ext["designs"]:
+        assert abs(abs(d["a"]) - 1) < 1e-3 and abs(abs(d["b"]) - 1) < 1e-3
+    assert Workbook.open(path).target_spec()["parameters"] == {inter[0]: 1.0}
+
+
+def test_linear_design_path_takes_a_target(tmp_path):
+    out = do_new(
+        NewParams(
+            output=tmp_path / "lin.xlsx",
+            n=2,
+            inputs=[("x", -1.0, 1.0)],
+            response_name="y",
+            measurement_error=0.1,
+            criterion="trace",
+            seed=0,
+            n_starts=4,
+            template="polynomial-1d",
+            degree=2,
+            use_linear_design=True,
+            target={"parameters": {"b1": 1.0}},
+        )
+    )
+    assert sorted(d["x"] for d in out["designs"]) == pytest.approx([-1.0, 1.0], abs=1e-3)
+    assert out["target_precision"]["std_errors"]["b1"] == pytest.approx(0.1 / np.sqrt(2), rel=1e-3)

@@ -511,6 +511,11 @@ def optimal_experiment(
         ``"max_variance"`` the largest weighted variance. The targets'
         precision is in ``result.target_precision()``. Targeted criteria do
         not depend on parameter units, so ``scale_parameters`` is ignored.
+        With a singular ``prior_fim``, a target can be estimable but improvable
+        only by *replicating* a run already made (the criterion then jumps at
+        exactly that point, and no local search finds it): pass those runs as
+        ``initial_designs`` so they are candidates. The batch searches do this
+        for their own earlier picks.
     n_refine : int, default 4
         Number of the best-scoring multi-start candidates the local solver is
         started from (unconstrained problems); the best refined design wins.
@@ -1141,9 +1146,13 @@ def _top_candidates(
     except Exception:
         return []
     scored = []
+    # With a target, rank refinement seeds on the smoothed criterion: on a
+    # singular FIM the exact one can tie every candidate (a target estimable
+    # only by replicating one exact point), leaving the seeds arbitrary.
+    smooth = _is_target(region)
     for design_point, fim_result in zip(candidates, fims):
         try:
-            value = _evaluate_criterion(fim_result, criterion, region)
+            value = _evaluate_criterion(fim_result, criterion, region, smooth=smooth)
         except Exception:
             continue
         if np.isfinite(value):
@@ -1374,6 +1383,7 @@ def batch_optimal_experiment(
     response_bounds: Mapping[str, tuple[float | None, float | None]] | None = None,
     scale_parameters: bool = False,
     target: Target | ResolvedTarget | None = None,
+    initial_designs: Sequence[Mapping[str, float]] | None = None,
 ) -> BatchDesignResult:
     """Design a batch of ``N`` experiments to run in parallel.
 
@@ -1426,6 +1436,11 @@ def batch_optimal_experiment(
         Evaluate ``criterion`` on the joint precision of chosen targets; see
         :func:`optimal_experiment`. A batch can make targets estimable that no
         single run can.
+    initial_designs : sequence of mapping, optional
+        Extra starting candidates for every greedy pick (and so for the joint
+        search, which starts from the greedy batch): the runs already made, a
+        known good design. With a target and a singular prior, replicating a
+        run already made can be the only way to improve it.
 
     Returns
     -------
@@ -1465,6 +1480,7 @@ def batch_optimal_experiment(
             min_distance=min_distance,
             seed=seed,
             exchange_passes=exchange_passes,
+            initial_designs=initial_designs,
         )
         pieces = [wrapped.unscaled(r) for r in res.fim_results]
         sc = wrapped.scale
@@ -1502,6 +1518,7 @@ def batch_optimal_experiment(
             local_refine=local_refine,
             seed=seed,
             exchange_passes=exchange_passes,
+            initial_designs=list(initial_designs or ()),
         )
     elif strategy == BatchStrategy.JOINT:
         # Seed the joint search with the greedy batch: the joint optimum is at
@@ -1524,6 +1541,7 @@ def batch_optimal_experiment(
                 local_refine=local_refine,
                 seed=seed,
                 exchange_passes=exchange_passes,
+                initial_designs=list(initial_designs or ()),
             )
             extra_starts = [greedy.designs]
         except Exception:  # noqa: BLE001 - the joint search runs without it
@@ -1623,6 +1641,7 @@ def _greedy_batch(
     local_refine: bool,
     seed: int,
     exchange_passes: int = 0,
+    initial_designs: Sequence[Mapping[str, float]] = (),
 ) -> BatchDesignResult:
     """Greedy batch: pick one design at a time, folding each FIM into the prior.
 
@@ -1657,6 +1676,11 @@ def _greedy_batch(
                 # the design box and dropped prediction_points.
                 prediction_region=None if _is_target(region) else region,
                 target=region if _is_target(region) else None,
+                # Replicating an earlier pick is a candidate: while the FIM is
+                # singular it can be the only run that helps a target.
+                initial_designs=(
+                    list(initial_designs) + (list(designs) if _is_target(region) else []) or None
+                ),
                 seed=seed + i,
             )
         per_fim = compute_fim(experiment, param_values, picked.design, prior_fim=None)
@@ -1690,6 +1714,15 @@ def _greedy_batch(
                         local_refine=local_refine,
                         prediction_region=None if _is_target(region) else region,
                         target=region if _is_target(region) else None,
+                        initial_designs=(
+                            list(initial_designs)
+                            + (
+                                [d for j, d in enumerate(designs) if j != i]
+                                if _is_target(region)
+                                else []
+                            )
+                            or None
+                        ),
                         seed=seed + n_experiments + sweep * n_experiments + i,
                     )
             except Exception:  # noqa: BLE001 - a failed re-search keeps the greedy pick

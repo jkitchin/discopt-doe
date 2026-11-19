@@ -467,9 +467,29 @@ def _print_target_precision(out: Mapping[str, Any], label: str) -> None:
 
 def _no_target_for(what: str) -> DoEError:
     return DoEError(
-        f"design targets (--target, --target-expr, --target-response) need a model designed "
-        f"through an Experiment: the parametric templates, --module, or symbolic. {what}"
+        f"design targets (--target, --target-expr, --target-response) need a model the "
+        f"design is optimized for: the parametric templates, --module, symbolic, or "
+        f"`extend` of a classical design. {what}"
     )
+
+
+def _basis_target_or_error(
+    spec: Mapping[str, Any],
+    parameter_names: Sequence[str],
+    input_names: Sequence[str],
+    basis: Any,
+    response_name: str,
+    param_values: Mapping[str, float] | None = None,
+) -> Any:
+    """A target on the jax-free basis path; errors as DoEError."""
+    from discopt.doe.targets import basis_target
+
+    try:
+        return basis_target(
+            spec, parameter_names, input_names, basis, param_values, response_name=response_name
+        )
+    except ValueError as e:
+        raise DoEError(f"bad design target: {e}") from e
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -1048,9 +1068,10 @@ def do_new(params: NewParams) -> dict[str, Any]:
         or params.template in COMBINATORIAL_TEMPLATES
         or params.template in CLASSICAL_TEMPLATES
     ):
-        raise _no_target_for(f"Template {params.template!r} is a fixed or model-free design.")
-    if params.target and params.use_linear_design and params.template != "symbolic":
-        raise _no_target_for("The closed-form (no-jax) linear design path does not support them.")
+        raise _no_target_for(
+            f"Template {params.template!r} is a fixed or model-free design (to target "
+            "coefficients of a classical design, `extend` it with --target)."
+        )
 
     if params.template in _TWO_LEVEL_TEMPLATE_NAMES:
         return _do_new_factorial(params)
@@ -1960,6 +1981,32 @@ def _do_new_linear(params: NewParams) -> dict[str, Any]:
     if params.mixture_total is not None:
         template_args["mixture_total"] = float(params.mixture_total)
 
+    ridge = _scaled_ridge(
+        _template_reference_fim(
+            template,
+            template_args,
+            parameter_names,
+            input_names,
+            params.inputs,
+            params.measurement_error,
+        ),
+        len(parameter_names),
+    )
+    target_spec, target = None, None
+    if params.target:
+        from discopt.doe.linear_design import _basis_evaluator
+
+        target_spec = _check_target_spec(
+            params.target, parameter_names, [params.response_name], input_names
+        )
+        target = _basis_target_or_error(
+            target_spec,
+            parameter_names,
+            input_names,
+            _basis_evaluator(template, template_args, parameter_names, input_names),
+            params.response_name,
+        )
+
     try:
         batch = linear_batch_design(
             template,
@@ -1976,21 +2023,12 @@ def _do_new_linear(params: NewParams) -> dict[str, Any]:
             # only once the design has accumulated full rank — and it is scaled
             # to the information in each direction so it cannot decide the
             # design (see _scaled_ridge).
-            prior_fim=_scaled_ridge(
-                _template_reference_fim(
-                    template,
-                    template_args,
-                    parameter_names,
-                    input_names,
-                    params.inputs,
-                    params.measurement_error,
-                ),
-                len(parameter_names),
-            ),
+            prior_fim=ridge,
             equality_constraints=eq_cons or None,
             feasible_projection=proj,
             n_starts=params.n_starts,
             seed=params.seed,
+            target=target,
         )
     except (ValueError, RuntimeError) as e:
         raise DoEError(str(e)) from e
@@ -2009,6 +2047,8 @@ def _do_new_linear(params: NewParams) -> dict[str, Any]:
         param_initial_guess=None,
         extra_columns=_extra_columns(params),
     )
+    if target_spec:
+        wb.set_target_spec(target_spec)
     new_ids = wb.append_runs(1, designs)
     wb.log(
         "new",
@@ -2017,9 +2057,11 @@ def _do_new_linear(params: NewParams) -> dict[str, Any]:
             "n": params.n,
             "criterion": params.criterion,
             "fim": "linear",
+            "target": target_spec,
         },
     )
     wb.save()
+    precision = _target_precision_without_ridge(target, batch.joint_fim, ridge)
 
     return {
         "workbook_path": str(wb.path),
@@ -2035,6 +2077,8 @@ def _do_new_linear(params: NewParams) -> dict[str, Any]:
         "criterion_value": float(batch.criterion_value),
         "parameter_names": parameter_names,
         "n_parameters": len(parameter_names),
+        "target": target_spec,
+        "target_precision": _precision_out(precision) if precision is not None else None,
         "next_command": f"discopt doe status {wb.path}",
     }
 
@@ -2703,6 +2747,23 @@ def _status_target_precision(
     sigma estimate from a handful of runs (the parameters table may use one).
     """
     fim, names = fim_data
+    from discopt.doe.templates import CLASSICAL_TEMPLATES
+
+    if wb.template_name() in CLASSICAL_TEMPLATES:
+        from discopt.doe.linear_design import _basis_evaluator
+
+        input_names = [s.name for s in wb.input_specs()]
+        pnames = list(wb.parameter_names())
+        target = _basis_target_or_error(
+            spec,
+            pnames,
+            input_names,
+            _basis_evaluator(wb.template_name() or "", wb.template_args(), pnames, input_names),
+            wb.response_name(),
+        )
+        if list(pnames) != list(names):
+            raise ValueError(f"the stored FIM is over {list(names)}, the basis over {pnames}")
+        return target.precision(fim)
     if wb.template_name() == "symbolic":
         from discopt.doe.runs import symbolic_experiment
 
@@ -2783,7 +2844,10 @@ def _cmd_status(args) -> int:
 
 def _describe_target(spec: Mapping[str, Any]) -> str:
     parts = list(spec.get("parameters") or {})
-    parts += [f"{n}={e}" for n, e in (spec.get("expressions") or {}).items()]
+    parts += [
+        f"{n}={e}" if len(e) <= 40 else f"{n} (formula)"
+        for n, e in (spec.get("expressions") or {}).items()
+    ]
     for r, pts in (spec.get("responses") or {}).items():
         parts += (
             [r]
@@ -3696,12 +3760,6 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
         )
     if params.target and params.clear_target:
         raise DoEError("give a new target or clear_target (--clear-target), not both")
-    if (
-        (params.target or wb.target_spec())
-        and not params.clear_target
-        and (wb.template_name() in CLASSICAL_TEMPLATES)
-    ):
-        raise _no_target_for(f"Template {wb.template_name()!r} augments its regression basis.")
     if params.clear_target:
         wb.set_target_spec(None)
     if wb.template_name() == "symbolic":
@@ -3743,8 +3801,14 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
     _check_prediction_criterion(wb.criterion(), template)
     target_spec = _extend_target_spec(wb, params, parameter_names, wb.response_names(), input_names)
     target = None
+    replicates = None
     if target_spec:
         target = _target_from_spec(target_spec)
+        # Replicating a completed run is always a candidate: while the data
+        # leave the FIM singular it can be the only run that helps a target.
+        replicates = [
+            {n: float(r[n]) for n in input_names} for r in completed if _all_inputs(r, input_names)
+        ] or None
 
     cached = wb.read_fim()
     ridge: np.ndarray | None = None
@@ -3789,6 +3853,7 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
             n_starts=params.n_starts,
             seed=design_seed,
             target=target,
+            initial_designs=replicates,
         )
         designs = [single.design]
         criterion_value = float(single.criterion_value)
@@ -3807,6 +3872,7 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
             n_starts=params.n_starts,
             seed=design_seed,
             target=target,
+            initial_designs=replicates,
         )
         designs = list(batch.designs)
         criterion_value = float(batch.criterion_value)
@@ -3859,6 +3925,13 @@ def _extend_target_spec(
     return _check_target_spec(stored, parameter_names, response_names, input_names)
 
 
+def _all_inputs(row: Mapping[str, Any], input_names: Sequence[str]) -> bool:
+    try:
+        return all(math.isfinite(float(row[n])) for n in input_names)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def _any_blank_response(wb: Workbook, rows: list[dict[str, Any]]) -> bool:
     names = wb.response_names()
     return len(names) > 1 and any(
@@ -3895,6 +3968,22 @@ def _do_extend_classical(wb: Workbook, params: ExtendParams) -> dict[str, Any]:
     if criterion not in _CRITERION_CHOICES:
         # Classical workbooks record no optimality criterion of their own.
         criterion = "determinant"
+    target_spec = _extend_target_spec(wb, params, names, wb.response_names(), input_names)
+    target = None
+    if target_spec:
+        from discopt.doe.linear_design import _basis_evaluator
+
+        target = _basis_target_or_error(
+            target_spec,
+            names,
+            input_names,
+            _basis_evaluator(template, args, names, input_names),
+            wb.response_name(),
+        )
+        if wb.criterion() not in _CRITERION_CHOICES:
+            # Augmenting for a target: the weighted variance sum unless the
+            # workbook names a criterion.
+            criterion = "trace"
 
     result = linear_batch_design(
         template,
@@ -3908,10 +3997,14 @@ def _do_extend_classical(wb: Workbook, params: ExtendParams) -> dict[str, Any]:
         prior_fim=prior,
         n_starts=int(params.n_starts),
         seed=wb.seed() + batch_idx,
+        target=target,
     )
     designs = [{nm: float(d[nm]) for nm in input_names} for d in result.designs]
     new_ids = wb.append_runs(batch_idx, designs)
-    wb.log("extend", {"n": params.n, "batch": batch_idx, "mode": "classical-augment"})
+    wb.log(
+        "extend",
+        {"n": params.n, "batch": batch_idx, "mode": "classical-augment", "target": target_spec},
+    )
     wb.save()
 
     # Per-parameter geometric precision gain: how much the confidence intervals
@@ -3932,6 +4025,12 @@ def _do_extend_classical(wb: Workbook, params: ExtendParams) -> dict[str, Any]:
         "criterion_value": float(result.criterion_value),
         "parameter_names": names,
         "precision_gain": gain,
+        "target": target_spec,
+        "target_precision": (
+            _precision_out(target.precision(np.asarray(result.joint_fim, dtype=float)))
+            if target is not None
+            else None
+        ),
         "warnings": [],
         "next_command": f"discopt doe status {wb.path}",
     }

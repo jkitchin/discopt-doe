@@ -17,6 +17,7 @@ parts:
     chapters:
       - file: notebooks/model_based_doe
       - file: targeted-design
+      - file: notebooks/targeted-design-example
       - file: notebooks/identifiability-estimability
       - file: notebooks/model-based-active-learning
       - file: notebooks/model-discrimination

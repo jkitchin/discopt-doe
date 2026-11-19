@@ -83,6 +83,9 @@ _RANK_RTOL = 1e-12
 # fraction of its norm is not estimable.
 _ESTIMABLE_RTOL = 1e-6
 
+# Relative ridge of the smoothed criterion (see ResolvedTarget.criterion).
+_SMOOTH_RIDGE = 1e-8
+
 TARGET_CRITERIA = (
     "determinant",
     "trace",
@@ -775,11 +778,24 @@ class ResolvedTarget:
         return 0.5 * (C + C.T) if np.all(np.isfinite(C)) else None
 
     def criterion(self, fim: np.ndarray, criterion: str, *, smooth: bool = False) -> float:
-        """Value of a targeted criterion (same sense as the untargeted one)."""
+        """Value of a targeted criterion (same sense as the untargeted one).
+
+        ``smooth=True`` is for local search: the soft maximum for
+        ``"max_variance"``, and a ridge far below the FIM's own scale. On a
+        singular FIM a target can be estimable yet the exact criterion is
+        discontinuous -- one more run helps only at exactly the right point --
+        so a gradient search would never find it; the ridge makes the surface
+        continuous and leads the search there. Report the exact value.
+        """
         if criterion not in TARGET_CRITERIA:
             raise ValueError(f"criterion {criterion!r} is not available with a target")
         maximize = criterion in ("determinant", "min_eigenvalue")
         bad = -np.inf if maximize else np.inf
+        if smooth:
+            fim = np.asarray(fim, dtype=float)
+            d = np.abs(np.diag(fim))
+            floor = float(d.max()) if d.size and d.max() > 0 else 1.0
+            fim = fim + np.diag(_SMOOTH_RIDGE * np.where(d > 0, d, floor))
         sigma, ok = self.covariance(fim)
         if not ok:
             return bad
@@ -924,6 +940,95 @@ def validate_target_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
             )
         out["tolerances"] = tol
     return out
+
+
+def basis_target(
+    spec: Mapping[str, Any],
+    parameter_names: Sequence[str],
+    input_names: Sequence[str],
+    basis: Callable[[np.ndarray], np.ndarray],
+    param_values: Mapping[str, float] | None = None,
+    response_name: str = "y",
+) -> ResolvedTarget:
+    """Resolve a target spec on a basis model, with no Experiment and no JAX.
+
+    For the jax-free design path (:func:`~discopt.doe.linear_design.batch_design_from_basis`):
+    ``basis(x)`` returns the Jacobian row ``∂y/∂θ`` at the input vector ``x``
+    (ordered by ``input_names``) -- the regression basis of a linear model, or
+    :func:`~discopt.doe.symbolic.basis_evaluator` for a nonlinear one. A
+    response target's column of ``K`` is that row at its operating point; a
+    formula's column is its sympy gradient at ``param_values`` (default 0 for
+    every parameter, which is the right point for a linear model).
+    """
+    spec = validate_target_spec(spec)
+    names_p = list(parameter_names)
+    theta = {n: float((param_values or {}).get(n, 0.0)) for n in names_p}
+    rel = bool(spec.get("relative", False))
+    tol = spec.get("tolerances")
+    cols: list[np.ndarray] = []
+    names: list[str] = []
+    keys: list[str] = []
+    values: list[float] = []
+    for pname in spec.get("parameters", {}):
+        if pname not in names_p:
+            raise ValueError(f"{pname!r} is not a parameter; the parameters are {names_p}")
+        col = np.zeros(len(names_p))
+        col[names_p.index(pname)] = 1.0
+        cols.append(col)
+        names.append(pname)
+        keys.append(pname)
+        values.append(theta[pname])
+    if spec.get("expressions"):
+        from discopt.doe.symbolic import _require_sympy, parse_expression
+
+        sp = _require_sympy()
+        subs = {sp.Symbol(n, real=True): v for n, v in theta.items()}
+        for ename, src in spec["expressions"].items():
+            expr = parse_expression(src, names_p)
+            cols.append(
+                np.array(
+                    [float(sp.diff(expr, sp.Symbol(n, real=True)).subs(subs)) for n in names_p]
+                )
+            )
+            names.append(ename)
+            keys.append(ename)
+            values.append(float(expr.subs(subs)))
+    for rname, points in (spec.get("responses") or {}).items():
+        if rname != response_name:
+            raise ValueError(
+                f"unknown response {rname!r}; the model's response is {response_name!r}"
+            )
+        for pt in points or [{}]:
+            missing = [n for n in input_names if n not in pt]
+            if missing:
+                raise ValueError(f"operating point {pt} is missing inputs {missing}")
+            row = np.asarray(basis(np.array([pt[n] for n in input_names], dtype=float)), float)
+            cols.append(row.ravel())
+            where = ",".join(f"{k}={v:g}" for k, v in pt.items())
+            names.append(f"{rname}@{where}" if len(points) > 1 else rname)
+            keys.append(rname)
+            values.append(float(row.ravel() @ np.array([theta[n] for n in names_p])))
+    K = np.stack(cols, axis=1)
+    scale = np.abs(np.asarray(values)) if rel else None
+    if rel and np.any(~(scale > 0)):
+        raise ValueError(
+            "relative precision needs every target to be nonzero at the nominal parameters"
+        )
+    if tol is not None:
+        w, tau = _weights_and_tolerances(names, keys, None, tol, scale)
+    else:
+        weights = {k: float(spec.get("parameters", {}).get(k, 1.0)) for k in keys}
+        w, tau = _weights_and_tolerances(names, keys, weights, None, scale)
+    keep = w > 0
+    if not np.any(keep):
+        raise ValueError("every target has weight 0")
+    return ResolvedTarget(
+        K=K[:, keep],
+        weights=w[keep],
+        names=[n for n, k in zip(names, keep) if k],
+        parameter_names=names_p,
+        tolerances=tau[keep],
+    )
 
 
 def target_precision(

@@ -14,6 +14,12 @@ combinations) {cite:p}`Atkinson2007`, and, for model outputs, goal-oriented
 optimal design {cite:p}`attia2018-goal-oriented`. `discopt.doe` implements all of
 them through a single object, following {cite:t}`pukelsheim2006`.
 
+The {doc}`worked example <notebooks/targeted-design-example>` is a four-parameter
+kinetic model with a question about the plant's operating point. It shows
+everything on this page at work: four targeted designs against D-optimal,
+certified efficiencies, a sequential campaign that stops at a precision goal in
+half the runs D-optimal needs, robust design, and the command line.
+
 ## One matrix for every kind of target
 
 Let $M$ be the Fisher information matrix of the $p$ parameters $\theta$, and
@@ -34,6 +40,7 @@ computed once per round, and each candidate design costs one factorization of $M
 | graded importance over parameters | `Target.parameters({"k1": 1, "k2": 0.1})` | $I$, with weights |
 | linear combinations | `Target.linear({"k1-k2": {"k1": 1, "k2": -1}})` | the coefficients |
 | any function of the parameters | `Target.function(lambda th: th["k1"] / th["k2"], ["ratio"])` | its JAX Jacobian |
+| the same, written as a formula | `Target.expression({"ratio": "k1/k2"})` | its sympy gradient |
 | model outputs at operating points | `Target.responses(qoi_model, at=[{"T": 350}])` | $(\partial q / \partial \theta)^\top$ |
 | predictions over a region (I, G) | `Target.region(bounds=...)` | sensitivity rows |
 
@@ -135,6 +142,85 @@ history = sequential_doe(
 
 `target_precision(fim, target, experiment, theta)` reports the same check for any
 FIM, for example the FIM of data you already have.
+
+## How good is a design? Certificates
+
+The design searches are local and multi-start, so on their own they cannot show
+how far a design is from the best possible. `certify_design` can. It solves the
+*approximate* design problem: weights $w_i$ on candidate conditions $x_i$, with
+information $M(w) = P + n\sum_i w_i I(x_i)$. That problem is convex for the
+`"trace"` and `"determinant"` criteria. The *sensitivity* of a candidate is
+$d(x) = -\langle \nabla\varphi(M), n\,I(x)\rangle$, for example
+$n\operatorname{tr}(I(x) M^{-1} L M^{-1})$ for the trace. Convexity gives, for
+every other design,
+
+$$\varphi^\star \;\ge\; \varphi(w) - \Big(\max_x d(x) - \sum_i w_i\, d(x_i)\Big),$$
+
+so the gap in the general equivalence theorem {cite:p}`KieferWolfowitz1960` is a
+certified bound on the optimum. Every exact $n$-run design on the candidates is
+also an approximate one, so this turns into a lower bound on any design's
+efficiency:
+
+```python
+from discopt.doe import certify_design, approximate_targeted_design
+
+cert = certify_design(experiment, theta, designs, target, design_bounds=bounds,
+                      prior_fim=prior)
+print(cert.summary())   # "... certified efficiency >= 97.3%"
+
+approx = approximate_targeted_design(experiment, theta, target, design_bounds=bounds,
+                                     n_runs=4, prior_fim=prior)
+print(approx.summary())    # the optimal support and weights
+approx.sensitivity         # d(x) on the candidates: where the information is
+approx.rounded(4)          # an exact 4-run design (efficient rounding)
+```
+
+The weights are found by alternating multiplicative updates
+{cite:p}`silvey1978-algorithm,yu2010-monotonic` with Frank-Wolfe vertex-direction
+and away steps, in the spirit of the cocktail algorithm {cite:p}`yu2011-cocktail`.
+Exact designs come from the weights by efficient rounding
+{cite:p}`pukelsheim1992-rounding`. The bound is relative to designs on the
+candidate grid. The default grid is fine in one or two inputs and Sobol in
+more, and the runs being certified are always added to it.
+
+## When the parameters are uncertain: robust targeted design
+
+Targeted designs for nonlinear models are *local*: $K$ and $M$ are evaluated at
+the current estimate. `robust_optimal_experiment(..., target=t)` averages the
+targeted criterion over parameter samples (`robust="expected"`, pseudo-Bayesian)
+or protects the worst sample's efficiency (`robust="maximin"`). It re-resolves
+$K$ at every sample, because the sensitivity of an output or function target
+moves with the parameters. With a target, `criterion="A"` means the weighted
+target variance, `"D"` means $D_s$ on the targets, and `"E"` means the worst
+weighted target direction. The result reports each target's standard error at
+every sample (`target_std_errors`).
+
+## Without JAX: classical designs and the browser app
+
+The jax-free design path (`discopt.doe.linear_design`, which the browser app
+uses) takes targets too. Pass `target=` to `linear_batch_design` or
+`batch_design_from_basis`, built with
+`basis_target(spec, parameter_names, input_names, basis)` from a target spec.
+On the command line this is how
+`discopt doe extend --target b12` augments a central composite or Box-Behnken
+design for one interaction coefficient, and how `new ... --use-linear-design`
+handles targets.
+
+## Edge cases worth knowing
+
+- **Replication is sometimes the only way.** On a singular FIM a target can be
+  estimable yet improvable only by repeating a run already made: the criterion
+  then jumps at exactly that point, and no local search finds it. The batch
+  searches offer their own earlier picks as candidates, and `discopt doe
+  extend` offers the completed runs. In Python, pass the runs behind a singular
+  `prior_fim` as `initial_designs`.
+- **From scratch, the best way to know a prediction is often to measure it.**
+  With no data, a targeted design for the response at one operating point is to
+  replicate that point. The model pays off once there are data: then it can
+  combine runs elsewhere into a better prediction than replication gives.
+- **First-order precision.** $\Sigma_\psi = K^\top M^{-1}K$ is a linearization at
+  the current estimate. With few data and a strongly nonlinear target, check the
+  result with a profile likelihood.
 
 ## From the command line
 

@@ -13,6 +13,13 @@ parameter values, a sample from a prior or a grid over a region:
 - **max-min** (``robust="maximin"``): maximize the *worst* D-efficiency over
   the samples, each relative to that sample's own locally optimal design.
 
+With ``target=`` (a :class:`~discopt.doe.Target`) every criterion is taken on
+the targets' covariance instead of on all parameters, and the target's
+sensitivity matrix ``K`` is re-resolved at every sample -- an output or
+function target moves with the parameters, so a design for "the yield at the
+plant point" has to be judged at each plausible parameter value with that
+value's own ``K``.
+
 The information for each sample is computed with a response Jacobian
 compiled once per sample, so a design evaluation costs one Jacobian call per
 sample, not a model rebuild.
@@ -63,6 +70,13 @@ class RobustDesignResult:
         ``log det`` of each sample's locally optimal design.
     parameter_samples : list[dict]
     n_parameters : int
+    target_names : list[str] or None
+        With a target: its names. ``log_dets`` are then ``log det`` of the
+        (weighted) target information ``(W^½ Σ_ψ W^½)⁻¹`` and efficiencies are
+        on the targets (``n_parameters`` is then the number of targets).
+    target_std_errors : numpy.ndarray or None
+        With a target: the predicted standard error of each target (columns)
+        at each parameter sample (rows).
     """
 
     designs: list[dict[str, float]]
@@ -73,6 +87,8 @@ class RobustDesignResult:
     reference_log_dets: np.ndarray | None
     parameter_samples: list[dict[str, float]]
     n_parameters: int
+    target_names: list[str] | None = None
+    target_std_errors: np.ndarray | None = None
 
     def summary(self) -> str:
         lines = [f"robust design ({self.robust}), {len(self.designs)} run(s)"]
@@ -84,9 +100,16 @@ class RobustDesignResult:
         if self.efficiencies is not None:
             e = self.efficiencies
             lines.append(
-                f"  D-efficiency: mean {e.mean():.3f}, min {e.min():.3f}, "
+                f"  efficiency: mean {e.mean():.3f}, min {e.min():.3f}, "
                 f"5th percentile {np.percentile(e, 5):.3f}"
             )
+        if self.target_names is not None and self.target_std_errors is not None:
+            se = self.target_std_errors
+            for j, n in enumerate(self.target_names):
+                lines.append(
+                    f"  SE({n}) over the samples: median {np.median(se[:, j]):.4g}, "
+                    f"worst {np.max(se[:, j]):.4g}"
+                )
         return "\n".join(lines)
 
 
@@ -329,6 +352,7 @@ def robust_optimal_experiment(
     inequality_constraints: Sequence[DesignConstraint] = (),
     n_starts: int = 10,
     seed: int = 0,
+    target: Any = None,
 ) -> RobustDesignResult:
     """Design experiments that are good across a set of parameter values.
 
@@ -377,6 +401,11 @@ def robust_optimal_experiment(
     n_starts : int, default 10
         Random starts of the design search.
     seed : int, default 0
+    target : Target, optional
+        Judge every sample on the precision of these targets instead of all
+        parameters (see :class:`~discopt.doe.Target`): ``"D"`` is then ``D_s``
+        on the targets, ``"A"`` the weighted sum of their variances, ``"E"``
+        the worst weighted target direction. ``K`` is resolved at each sample.
 
     Returns
     -------
@@ -413,6 +442,14 @@ def robust_optimal_experiment(
     fims = _fim_functions(experiment, samples)
     p = fims[0]({n: float((lo + hi) / 2) for n, lo, hi in zip(names, lbs, ubs)}).shape[0]
     prior = np.zeros((p, p)) if prior_fim is None else np.asarray(prior_fim, dtype=float)
+    resolved = None if target is None else _resolve_targets(target, experiment, samples, crit)
+    # Efficiencies are per target, not per parameter, when there is a target.
+    p_eff = p if resolved is None else resolved[0].n_targets
+
+    def score_at(m: np.ndarray, s: int) -> float:
+        if resolved is None:
+            return _score(m, crit)
+        return _target_score(resolved[s], m, crit)
 
     def designs_of(z: np.ndarray) -> list[dict[str, float]]:
         z = np.clip(z.reshape(n_exp, len(names)), lbs, ubs)
@@ -430,9 +467,15 @@ def robust_optimal_experiment(
         return out
 
     def scores(z: np.ndarray, which: Sequence[int] | None = None) -> np.ndarray:
-        return np.asarray([_score(m, crit) for m in total_fims(z, which)])
+        idx = range(len(samples)) if which is None else which
+        return np.asarray([score_at(m, s) for s, m in zip(idx, total_fims(z, which))])
 
     def log_dets(z: np.ndarray, which: Sequence[int] | None = None) -> np.ndarray:
+        if resolved is not None:
+            idx = range(len(samples)) if which is None else which
+            return np.asarray(
+                [_target_score(resolved[s], m, "D") for s, m in zip(idx, total_fims(z, which))]
+            )
         return np.asarray([_logdet(m) for m in total_fims(z, which)])
 
     rng = np.random.default_rng(seed)
@@ -539,7 +582,7 @@ def robust_optimal_experiment(
         z = _maximin_epigraph(
             minimize,
             scores=scores,
-            efficiencies=lambda sc: _efficiencies(sc, ref, crit, p),
+            efficiencies=lambda sc: _efficiencies(sc, ref, crit, p_eff),
             designs_of=designs_of,
             bounds=bounds,
             constraints=scipy_constraints(n_extra=1),
@@ -554,11 +597,11 @@ def robust_optimal_experiment(
             ),
             extra_starts=warm,
         )
-        value = float(np.min(_efficiencies(scores(z), ref, crit, p)))
+        value = float(np.min(_efficiencies(scores(z), ref, crit, p_eff)))
 
     ld = log_dets(z)
     final_scores = ld if crit == "D" else scores(z)
-    eff = None if ref is None else _efficiencies(final_scores, ref, crit, p)
+    eff = None if ref is None else _efficiencies(final_scores, ref, crit, p_eff)
     if constrained:
         broken = _violations(designs_of(z), equality_constraints, inequality_constraints)
         if broken:  # pragma: no cover - best_of already rejects infeasible designs
@@ -571,8 +614,47 @@ def robust_optimal_experiment(
         efficiencies=eff,
         reference_log_dets=ref,
         parameter_samples=samples,
-        n_parameters=int(p),
+        n_parameters=int(p_eff),
+        target_names=None if resolved is None else list(resolved[0].names),
+        target_std_errors=(
+            None
+            if resolved is None
+            else np.array(
+                [
+                    np.sqrt(np.abs(np.diag(resolved[s].covariance(m)[0])))
+                    for s, m in enumerate(total_fims(z))
+                ]
+            )
+        ),
     )
+
+
+_TARGET_CRITERION = {"D": "determinant", "A": "trace", "E": "min_eigenvalue"}
+
+
+def _resolve_targets(target: Any, experiment: Experiment, samples, crit: str) -> list[Any]:
+    """The target's ``K`` at every sample (they must agree on the names)."""
+    from discopt.doe.targets import ResolvedTarget, Target, _check_target_criterion
+
+    if isinstance(target, ResolvedTarget):
+        out = [target] * len(samples)
+    elif isinstance(target, Target):
+        out = [target.resolve(experiment, s) for s in samples]
+    else:
+        raise TypeError(f"target must be a Target or ResolvedTarget, got {type(target).__name__}")
+    names = out[0].names
+    if any(r.names != names for r in out):
+        raise ValueError("the target resolves to different names at different samples")
+    _check_target_criterion(out[0], _TARGET_CRITERION[crit])
+    return out
+
+
+def _target_score(resolved: Any, fim: np.ndarray, crit: str) -> float:
+    """A targeted criterion, signed larger-is-better like :func:`_score`."""
+    value = resolved.criterion(fim, _TARGET_CRITERION[crit])
+    if not np.isfinite(value):
+        return _SINGULAR
+    return float(-value) if crit == "A" else float(value)
 
 
 def design_efficiencies(

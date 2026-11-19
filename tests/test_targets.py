@@ -407,3 +407,48 @@ def test_a_scaled_experiment_gets_the_same_targeted_design():
     b = optimal_experiment(wrapped, THETA, BOUNDS, **kw)
     assert a.design["t"] == pytest.approx(b.design["t"], rel=1e-5)
     assert a.criterion_value == pytest.approx(b.criterion_value, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Robust (parameter-uncertain) targeted design
+# ---------------------------------------------------------------------------
+
+
+def test_robust_target_with_one_sample_is_the_local_design():
+    from discopt.doe import robust_optimal_experiment
+
+    target = Target.parameters(["k"])
+    local = batch_optimal_experiment(
+        Decay(), THETA, BOUNDS, 2, criterion="trace", target=target, strategy="joint"
+    )
+    rob = robust_optimal_experiment(
+        Decay(), [THETA], BOUNDS, criterion="A", n_experiments=2, target=target, n_starts=6
+    )
+    assert rob.target_names == ["k"]
+    assert rob.target_std_errors.shape == (1, 1)
+    # Same optimum: SE(k)^2 is the local criterion.
+    assert rob.target_std_errors[0, 0] ** 2 == pytest.approx(local.criterion_value, rel=1e-3)
+
+
+def test_robust_target_resolves_k_per_sample():
+    from discopt.doe import robust_optimal_experiment
+
+    samples = [{"A": 2.0, "k": k} for k in (0.25, 0.5, 1.0)]
+    target = Target.responses(at=[{"t": 4.0}], relative=True)
+    rob = robust_optimal_experiment(
+        Decay(),
+        samples,
+        BOUNDS,
+        criterion="A",
+        robust="maximin",
+        n_experiments=2,
+        target=target,
+        n_starts=4,
+    )
+    eff = rob.efficiencies
+    assert eff.shape == (3,) and np.all(eff <= 1 + 1e-6) and np.all(eff > 0.3)
+    assert rob.criterion_value == pytest.approx(eff.min())
+    # Each sample's K is its own: the predicted y(4) moves with k.
+    ks = [target.resolve(Decay(), s).K[:, 0] for s in samples]
+    assert not np.allclose(ks[0], ks[2])
+    assert "SE(y)" in rob.summary()
