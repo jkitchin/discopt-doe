@@ -1977,8 +1977,11 @@ def _penalized_batch(
                 f"from the {len(designs)} already-selected designs."
             )
 
+        # The region (I/G) or design target goes to both the scan and the
+        # refinement: without it the picks were ranked by the untargeted
+        # criterion, and I/G or a targeted max_variance found no candidate.
         best, best_crit, best_fim = _scan_candidates(
-            experiment, param_values, filtered, criterion, selection_prior
+            experiment, param_values, filtered, criterion, selection_prior, region
         )
 
         if best is None or best_fim is None:
@@ -1993,6 +1996,7 @@ def _penalized_batch(
                 design_bounds,
                 criterion,
                 selection_prior,
+                region=region,
                 equality_constraints=equality_constraints,
                 inequality_constraints=inequality_constraints,
             )

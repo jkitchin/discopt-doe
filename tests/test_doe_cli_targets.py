@@ -398,3 +398,104 @@ def test_symbolic_target_without_jax_matches(tmp_path):
     jx = _symbolic_target_design(model, THETA, bounds, 3, spec, use_jax=True, **kw)
     nj = _symbolic_target_design(model, THETA, bounds, 3, spec, use_jax=False, **kw)
     assert nj[2].std["k"] == pytest.approx(jx[2].std["k"], rel=0.02)
+
+
+def test_status_does_not_call_an_unidentifiable_target_precise(tmp_path):
+    """Review of PR #53: with one run of a straight line the slope is not
+    identifiable, so `status` must not report a finite SE (it used to report the
+    regularizing ridge's 707 and, with a loose tolerance, 'within tolerance')."""
+    out = do_new(
+        NewParams(
+            output=tmp_path / "l.xlsx",
+            n=1,
+            inputs=[("x", -1.0, 1.0)],
+            response_name="y",
+            measurement_error=1.0,
+            criterion="trace",
+            seed=0,
+            n_starts=2,
+            template="linear",
+            target={"parameters": {"b1": 1.0}, "tolerances": {"b1": 1e6}},
+        )
+    )
+    path = Path(out["workbook_path"])
+    wb = Workbook.open(path)
+    wb.record_responses({int(r["run_id"]): 1.0 for r in wb.pending_runs()})
+    wb.save()
+    do_fit({"workbook": str(path)})
+    prec = do_status({"workbook": str(path)})["target_precision"]
+    assert prec["estimable"] is False
+    assert prec["met"] is False
+    # extend reuses the fit's FIM as its prior and still predicts honestly.
+    ext = do_extend(ExtendParams(workbook=path, n=1, n_starts=2))
+    assert ext["target_precision"]["estimable"] is True  # a second x identifies the slope
+
+
+@pytest.mark.parametrize(
+    "text,match",
+    [("k; k", "named twice"), ("=k", "no name"), ("k1, k2", "separate targets with ';'")],
+)
+def test_target_text_quirks_are_refused(text, match):
+    from discopt.doe.cli import target_spec_from_text
+
+    with pytest.raises(DoEError, match=match):
+        target_spec_from_text(text, "")
+
+
+def test_duplicate_target_flags_are_refused():
+    args = _parser().parse_args(
+        [
+            "doe",
+            "new",
+            "symbolic",
+            "-o",
+            "x.xlsx",
+            *_SYMBOLIC_ARGS,
+            "--target",
+            "k",
+            "--target",
+            "k=2",
+        ]
+    )
+    with pytest.raises(DoEError, match="more than once"):
+        _target_spec_from_args(args)
+
+
+def test_formula_undefined_at_the_nominals_is_a_clear_error(tmp_path):
+    """Review of PR #53: `--target-expr r=b1/b2` on a linear template (nominals 0)
+    failed with 'Cannot convert complex to float'."""
+    with pytest.raises((DoEError, ValueError), match="not finite"):
+        do_new(
+            NewParams(
+                output=tmp_path / "f.xlsx",
+                n=3,
+                inputs=[("x", -1.0, 1.0)],
+                response_name="y",
+                measurement_error=0.1,
+                criterion="trace",
+                seed=0,
+                n_starts=2,
+                template="polynomial-1d",
+                degree=2,
+                target={"expressions": {"r": "b1/b2"}},
+            )
+        )
+
+
+def test_gui_target_text_round_trips_exactly():
+    pytest.importorskip("streamlit")
+    from discopt.doe.cli import target_spec_from_text
+    from discopt.doe.gui.app import _spec_to_text, _tol_to_text
+
+    spec = {
+        "relative": True,
+        "parameters": {"k": 2.5},
+        "expressions": {"r": "k/A"},
+        "responses": {"y": [{"t": 1.2345678901}]},
+    }
+    back = target_spec_from_text(_spec_to_text(spec), "", True)
+    assert back["parameters"] == spec["parameters"]
+    assert back["responses"] == spec["responses"]  # no 6-digit rounding
+    tol = {"relative": False, "parameters": {"k": 1.0}, "tolerances": {"k": 0.0123456789}}
+    again = target_spec_from_text(_spec_to_text(tol), _tol_to_text(tol), False)
+    assert again["tolerances"] == tol["tolerances"]

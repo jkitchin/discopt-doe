@@ -338,3 +338,47 @@ def test_region_certificate_is_opt_in():
     _, exp = _symbolic_decay()
     a = approximate_targeted_design(exp, DT, Target.parameters(["k"]), design_bounds=DB)
     assert not a.region_certified and "relative to the candidates" in a.region_note
+
+
+def test_a_global_model_that_is_not_the_experiment_is_refused():
+    """Review of PR #53: a SymbolicModel left at the default sigma = 1 while the
+    experiment has sigma = 0.05 used to give a 'certified' bound that was wrong."""
+    from discopt.doe import SymbolicModel
+
+    model, exp = _symbolic_decay()
+    wrong = SymbolicModel(
+        source="A*exp(-k*t)", parameter_names=("A", "k"), input_names=("t",)
+    )  # measurement_error defaults to 1.0
+    prior = compute_fim(exp, DT, {"t": 0.3}).fim
+    with pytest.raises(ValueError, match="does not reproduce"):
+        approximate_targeted_design(
+            exp,
+            DT,
+            Target.parameters(["k"]),
+            design_bounds=DB,
+            prior_fim=prior,
+            global_bound=True,
+            global_model=wrong,
+        )
+
+
+def test_determinant_certificate_stops_when_log_det_is_zero():
+    """Review of PR #53: the stop test was relative to log det, which is 0 here
+    (Var b2 = 4 sigma^2 = 1 at the optimum), so it ran all 20000 iterations."""
+
+    class Wide(Quadratic):
+        def create_model(self, **kwargs):
+            em = super().create_model(**kwargs)
+            em.measurement_error["y"] = 0.5
+            return em
+
+    a = approximate_targeted_design(
+        Wide(),
+        Q,
+        Target.parameters(["b2"]),
+        candidates=[{"x": float(x)} for x in np.linspace(-1, 1, 21)],
+        criterion="determinant",
+    )
+    assert a.value == pytest.approx(0.0, abs=1e-6)
+    assert a.iterations < 2000
+    assert a.gap <= 1e-6

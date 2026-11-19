@@ -452,3 +452,94 @@ def test_robust_target_resolves_k_per_sample():
     ks = [target.resolve(Decay(), s).K[:, 0] for s in samples]
     assert not np.allclose(ks[0], ks[2])
     assert "SE(y)" in rob.summary()
+
+
+@pytest.mark.parametrize("criterion", ["trace", "max_variance"])
+def test_penalized_batch_designs_for_the_target(criterion):
+    """Review of PR #53: the penalized strategy ranked picks without the target
+    (and found no candidate at all for a targeted max_variance)."""
+    target = Target.parameters({"A": 1.0, "k": 4.0})
+    pen = batch_optimal_experiment(
+        Decay(),
+        THETA,
+        BOUNDS,
+        2,
+        criterion=criterion,
+        target=target,
+        strategy="penalized",
+        prior_fim=_prior(),
+        min_distance=0.05,
+        n_starts=6,
+    )
+    greedy = batch_optimal_experiment(
+        Decay(),
+        THETA,
+        BOUNDS,
+        2,
+        criterion=criterion,
+        target=target,
+        prior_fim=_prior(),
+        n_starts=6,
+    )
+    assert np.isfinite(pen.criterion_value)
+    # Spacing costs a little at most; an untargeted search would cost much more.
+    assert pen.criterion_value <= greedy.criterion_value * 1.25
+
+
+def test_stop_at_tolerance_needs_tolerances():
+    m = _decay_model()
+    calls = []
+
+    def run(design):
+        calls.append(design)
+        return {"y": m.predict({"a": 2.0, "b": 0.7}, design)}
+
+    initial = [dict(r, **run(r)) for r in ({"x": 0.2}, {"x": 2.0})]
+    calls.clear()
+    with pytest.raises(ValueError, match="needs a target with tolerances"):
+        sequential_doe(
+            m,
+            None,
+            {"a": 1.5, "b": 1.0},
+            {"x": (0.0, 5.0)},
+            initial_runs=initial,
+            n_rounds=3,
+            run_experiment=run,
+            target=Target.parameters(["b"]),
+            stop_at_tolerance=True,
+        )
+    assert not calls  # refused before any experiment was run
+
+
+def test_smoothing_does_not_invent_information():
+    """Review of PR #53: the smoothing ridge used the largest diagonal for an
+    uninformed parameter, so a target on it scored finite (2.5e-11 vs inf)."""
+    t = ResolvedTarget.from_matrix(np.eye(2)[:, [1]], ["big", "none"])
+    M = np.diag([1e12, 0.0])
+    assert t.criterion(M, "trace") == np.inf
+    assert t.criterion(M, "trace", smooth=True) == np.inf
+
+
+def test_partial_weights_are_refused():
+    t = Target.responses(at=[{"t": 1.0}], responses=["y"], weights={})
+    with pytest.raises(ValueError, match="no weight given"):
+        t.resolve(Decay(), THETA)
+
+
+def test_rank_check_ignores_units():
+    """Two independent targets in wildly different units are still independent."""
+    t = ResolvedTarget.from_matrix(np.diag([1e-9, 1e9]), ["a", "b"])
+    assert t.full_rank
+
+
+def test_robust_target_on_a_scaled_experiment():
+    from discopt.doe import ParameterScaledExperiment, robust_optimal_experiment
+    from discopt.doe.fim import parameter_scale
+
+    wrapped = ParameterScaledExperiment(Decay(), parameter_scale(Decay(), THETA))
+    target = Target.parameters(["k"])
+    kw = dict(criterion="A", n_experiments=2, target=target, n_starts=4, seed=0)
+    plain = robust_optimal_experiment(Decay(), [THETA], BOUNDS, **kw)
+    scaled = robust_optimal_experiment(wrapped, [THETA], BOUNDS, **kw)
+    # The target's precision is the same whatever coordinates the FIM is in.
+    assert scaled.target_std_errors[0, 0] == pytest.approx(plain.target_std_errors[0, 0], rel=1e-3)

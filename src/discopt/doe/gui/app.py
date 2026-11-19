@@ -875,8 +875,10 @@ def _sidebar_new() -> None:
     try:
         target_spec = _target_inputs(st.sidebar, "new")
     except DoEError as e:
+        # Never fall back to an all-parameter design the user did not ask for:
+        # no Generate button until the target parses.
         st.sidebar.error(str(e))
-        target_spec = None
+        return
 
     output_dir, output_name = _output_path_picker()
     output_path = str(Path(output_dir) / output_name)
@@ -1528,7 +1530,14 @@ _TARGET_HELP = (
 )
 
 
-def _target_inputs(container: Any, key: str, *, default: str = "") -> dict[str, Any] | None:
+def _target_inputs(
+    container: Any,
+    key: str,
+    *,
+    default: str = "",
+    default_tol: str = "",
+    default_rel: bool = False,
+) -> dict[str, Any] | None:
     """Target / tolerance / relative widgets; the target spec they describe.
 
     Raises :class:`DoEError` for text that does not parse, so the caller can
@@ -1540,6 +1549,7 @@ def _target_inputs(container: Any, key: str, *, default: str = "") -> dict[str, 
     text = box.text_area("Targets", value=default, key=f"{key}_targets", help=_TARGET_HELP)
     tol = box.text_input(
         "Tolerances (name=SE, comma-separated)",
+        value=default_tol,
         key=f"{key}_tol",
         help=(
             "The standard error wanted on each target, e.g. `k1=0.05, y=0.01`. If any "
@@ -1549,6 +1559,7 @@ def _target_inputs(container: Any, key: str, *, default: str = "") -> dict[str, 
     )
     rel = box.checkbox(
         "Relative precision",
+        value=default_rel,
         key=f"{key}_rel",
         help="Tolerances are fractions of each target's value (0.05 = 5 %).",
     )
@@ -1565,17 +1576,25 @@ def _spec_to_text(spec: dict[str, Any] | None) -> str:
     """The target text box contents that reproduce ``spec``."""
     if not spec:
         return ""
+    # repr, not :g -- the text is parsed back, and :g rounds to 6 digits.
     parts = [
-        n if float(w) == 1.0 else f"{n}={w:g}" for n, w in (spec.get("parameters") or {}).items()
+        n if float(w) == 1.0 else f"{n}={float(w)!r}"
+        for n, w in (spec.get("parameters") or {}).items()
     ]
     parts += [f"{n}={e}" for n, e in (spec.get("expressions") or {}).items()]
     for r, pts in (spec.get("responses") or {}).items():
         parts += (
             [r]
             if not pts
-            else [f"{r}@" + ",".join(f"{k}={v:g}" for k, v in p.items()) for p in pts]
+            else [f"{r}@" + ",".join(f"{k}={float(v)!r}" for k, v in p.items()) for p in pts]
         )
     return "; ".join(parts)
+
+
+def _tol_to_text(spec: dict[str, Any] | None) -> str:
+    """The tolerances box contents that reproduce ``spec``."""
+    tol = (spec or {}).get("tolerances") or {}
+    return ", ".join(f"{k}={float(v)!r}" for k, v in tol.items())
 
 
 def _target_panel(status: dict[str, Any]) -> None:
@@ -2440,10 +2459,18 @@ def _extend_panel(path: str, status: dict[str, Any]) -> None:
     if target_mode == "replace" or not stored:
         try:
             target_spec = _target_inputs(
-                st, "extend", default=_spec_to_text(stored) if stored else ""
+                st,
+                "extend",
+                default=_spec_to_text(stored),
+                default_tol=_tol_to_text(stored),
+                default_rel=bool((stored or {}).get("relative", False)),
             )
         except DoEError as e:
             st.error(str(e))
+            return
+        if target_mode == "replace" and target_spec is None:
+            # An empty box must not quietly keep the old target.
+            st.error("Enter the new target, or choose 'clear' to design for all parameters.")
             return
     if st.button(f"Append {int(n)} run(s)", type="primary", key="extend_btn"):
         try:

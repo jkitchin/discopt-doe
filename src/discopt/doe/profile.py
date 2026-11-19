@@ -851,6 +851,12 @@ def _note(
     how = " (two-point check)" if two_point else ""
     if not np.isfinite(se):
         return "not estimable from these data on the linearization; see the profile."
+    if two_point and (below is None or above is None):
+        side = "lower" if below is None else "upper"
+        return (
+            f"the constrained fit at the linear interval's {side} end could not be evaluated "
+            "(the end may lie outside what the parameter bounds allow); see the full profile."
+        )
     if below is None or above is None:
         side = "below" if below is None else "above"
         return (

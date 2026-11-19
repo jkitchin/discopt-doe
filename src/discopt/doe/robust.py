@@ -640,6 +640,13 @@ def _resolve_targets(target: Any, experiment: Experiment, samples, crit: str) ->
         out = [target] * len(samples)
     elif isinstance(target, Target):
         out = [target.resolve(experiment, s) for s in samples]
+        from discopt.doe.fim import ParameterScaledExperiment
+
+        if isinstance(experiment, ParameterScaledExperiment):
+            # The FIM is w.r.t. θ / s, so ∂ψ/∂φ = S ∂ψ/∂θ (as in optimal_experiment).
+            import dataclasses
+
+            out = [dataclasses.replace(r, K=experiment.scale[:, None] * r.K) for r in out]
     else:
         raise TypeError(f"target must be a Target or ResolvedTarget, got {type(target).__name__}")
     names = out[0].names

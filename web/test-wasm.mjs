@@ -305,6 +305,42 @@ check("a linear template designed for its slope puts the runs at the ends", () =
   if (out.target_precision.ratios.b1 === undefined) throw new Error("no tolerance ratio");
 });
 
+check("a targeted linear template reports its target after the fit", () => {
+  // Review of PR #53: status rebuilt the Experiment (needs discopt.modeling,
+  // absent here), so the target block silently never appeared.
+  call(
+    "create_design",
+    JSON.stringify({
+      template: "linear",
+      factors: bounds(["x", -1, 1]),
+      n: 3,
+      criterion: "trace",
+      targets: "b1",
+      tolerances: "b1=0.5",
+      response: "y",
+      error: 0.1,
+      seed: 0,
+    }),
+  );
+  pyodide.runPython(`
+import shutil, openpyxl
+shutil.copy("/work/design.xlsx", "/work/upload.xlsx")
+book = openpyxl.load_workbook("/work/upload.xlsx")
+sheet = book["runs"]
+head = [c.value for c in sheet[1]]
+col = head.index("y") + 1
+for i, row in enumerate(sheet.iter_rows(min_row=2)):
+    vals = dict(zip(head, [c.value for c in row]))
+    if vals.get("run_id") is None:
+        continue
+    row[col - 1].value = 1.0 + 2.0 * float(vals["x"]) + 0.01 * i
+book.save("/work/upload.xlsx")
+`);
+  const out = call("run_fit", "/work/upload.xlsx");
+  if (!out.target_precision) throw new Error("no target precision after the fit");
+  if (!(out.target_precision.std_errors.b1 > 0)) throw new Error("no SE for b1");
+});
+
 check("a bad target is a message, not a crash", () => {
   const py = pyodide.globals.get("create_design");
   const out = JSON.parse(py(JSON.stringify({ ...ARRHENIUS, targets: "nope" })));

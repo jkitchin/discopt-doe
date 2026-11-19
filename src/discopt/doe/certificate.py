@@ -501,6 +501,7 @@ def approximate_targeted_design(
                 f"global_model's parameters {list(model.parameter_names)} do not match the "
                 f"experiment's {list(resolved.parameter_names)}"
             )
+        _check_model_matches(model, param_values, out)
         _certify_region(out, model, param_values, design_bounds, global_time_limit)
     return out
 
@@ -536,7 +537,12 @@ def _solve(cands, infos, P, n, resolved, crit, max_iter, tol, w_init):
         phi, d = evaluate(w0)
         if not np.isfinite(phi):
             raise not_estimable()
-        w, phi, d, gap, it = _optimize_weights(w0, evaluate, phi_of, rho, max_iter, tol)
+        # For the determinant the efficiency lost to the gap is exp(-gap / s),
+        # so the natural test is absolute: gap / s <= tol.
+        absolute = tol * resolved.n_targets if crit == "determinant" else None
+        w, phi, d, gap, it = _optimize_weights(
+            w0, evaluate, phi_of, rho, max_iter, tol, absolute=absolute
+        )
         G = _phi_and_grad(info(w), K, Wd, crit)[1]
         return ApproximateTargetDesign(
             candidates=cands,
@@ -897,6 +903,25 @@ def _sympy_to_discopt(expr: Any, variables: Mapping[str, Any]) -> Any:
     return conv(expr)
 
 
+def _check_model_matches(model, param_values, approx) -> None:
+    """The formula must give the experiment's own information, or the bound is about
+    another model (a different sigma, a different equation) and certifies nothing."""
+    theta = {k: float(param_values[k]) for k in model.parameter_names}
+    idx = list(np.flatnonzero(approx.weights > 1e-3)) + [0, len(approx.candidates) - 1]
+    for i in dict.fromkeys(idx):
+        cand = approx.candidates[i]
+        mine = np.asarray(model.fim(theta, [cand]), dtype=float)
+        theirs = approx.candidate_fims[i]
+        scale = max(float(np.max(np.abs(theirs))), 1e-300)
+        if not np.allclose(mine, theirs, rtol=1e-6, atol=1e-9 * scale):
+            raise ValueError(
+                "global_model does not reproduce the experiment's Fisher information at "
+                f"{cand} (largest difference {float(np.max(np.abs(mine - theirs))):.3g} on a "
+                f"scale of {scale:.3g}). Check its equation and measurement_error -- a bound "
+                "for another model would certify nothing."
+            )
+
+
 def _certify_region(approx, model, param_values, design_bounds, time_limit) -> None:
     """Bound ``max_x d(x)`` over the box with spatial branch-and-bound.
 
@@ -944,7 +969,16 @@ def _certify_region(approx, model, param_values, design_bounds, time_limit) -> N
     if ub is None or not getattr(res, "bound_valid", False) or not np.isfinite(ub):
         approx.region_note = f"global bound unavailable ({getattr(res, 'status', '?')})"
         return
-    ub = max(float(ub) * ref, float(d_grid.max()))
+    ub = float(ub) * ref
+    if ub < float(d_grid.max()) * (1.0 - 1e-6):
+        # The bound is below a sensitivity already observed at a candidate, so
+        # it cannot be about this experiment: never clamp that away.
+        raise RuntimeError(
+            f"the global bound on the sensitivity ({ub:.6g}) is below its value at a "
+            f"candidate ({float(d_grid.max()):.6g}): the formula does not describe the "
+            "experiment, so no region certificate is given"
+        )
+    ub = max(ub, float(d_grid.max()))
     region_lb = float(psi - (ub - float(w @ d_grid)))
     approx.max_sensitivity_bound = ub
     approx.lower_bound = min(approx.lower_bound, region_lb)
@@ -956,18 +990,24 @@ def _certify_region(approx, model, param_values, design_bounds, time_limit) -> N
     )
 
 
-def _optimize_weights(w, evaluate, phi_of, rho: float, max_iter: int, tol: float):
+def _optimize_weights(
+    w, evaluate, phi_of, rho: float, max_iter: int, tol: float, *, absolute: float | None = None
+):
     """Minimize a smooth convex design criterion over the weights.
 
     Alternates multiplicative steps with Frank-Wolfe vertex/away steps (see the
-    module docstring). Returns ``(w, φ, d, gap, iterations)``.
+    module docstring). Stops when the gap is below ``tol`` relative to ``φ``,
+    or below ``absolute`` when given -- the determinant criterion's ``φ`` is a
+    log determinant that can be zero, where a relative test never passes.
+    Returns ``(w, φ, d, gap, iterations)``.
     """
     phi, d = evaluate(w)
     it = 0
     for it in range(1, int(max_iter) + 1):
         mean_d = float(w @ d)
         gap = float(d.max() - mean_d)
-        if gap <= tol * max(abs(phi), 1e-300) or mean_d <= 0:
+        limit = absolute if absolute is not None else tol * max(abs(phi), 1e-300)
+        if gap <= limit or mean_d <= 0:
             break
         if it % 2:
             # Multiplicative step: fast early, slow to drop poor support points.

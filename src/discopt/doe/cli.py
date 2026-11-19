@@ -345,6 +345,12 @@ def _parse_target_response(s: str) -> tuple[str, dict[str, float] | None]:
 
 def _target_spec_from_args(args) -> dict[str, Any] | None:
     """The target spec the command-line flags describe; ``None`` without any."""
+    pairs = list(getattr(args, "target", None) or []) + list(
+        getattr(args, "target_expr", None) or []
+    )
+    dup = sorted({n for n, _ in pairs if [m for m, _ in pairs].count(n) > 1})
+    if dup:
+        raise DoEError(f"--target / --target-expr name {dup} more than once")
     params = dict(getattr(args, "target", None) or [])
     exprs = dict(getattr(args, "target_expr", None) or [])
     responses: dict[str, list[dict[str, float]]] = {}
@@ -404,8 +410,23 @@ def target_spec_from_text(
     params: dict[str, float] = {}
     exprs: dict[str, str] = {}
     responses: dict[str, list[dict[str, float]]] = {}
+    seen: set[str] = set()
+
+    def once(name: str) -> str:
+        if not name:
+            raise DoEError("bad design target: an item has no name (e.g. '=k')")
+        if name in seen:
+            raise DoEError(f"bad design target: {name!r} is named twice")
+        seen.add(name)
+        return name
+
     try:
         for item in items(targets, r"[;\n]"):
+            if "," in item and "@" not in item and "=" not in item:
+                raise DoEError(
+                    f"bad design target {item!r}: separate targets with ';' or new lines "
+                    "(commas belong to operating points, as in y@T=365,t=4)"
+                )
             if "@" in item:
                 name, point = _parse_target_response(item)
                 responses.setdefault(name, [])
@@ -413,12 +434,12 @@ def target_spec_from_text(
                     responses[name].append(point)
                 continue
             name, eq, rhs = item.partition("=")
-            name, rhs = name.strip(), rhs.strip()
+            name, rhs = once(name.strip()), rhs.strip()
             if not eq:
                 params[name] = 1.0
                 continue
             try:
-                params[name] = float(rhs)
+                params[name] = float(rhs)  # NAME=number: a weighted parameter
             except ValueError:
                 exprs[name] = rhs
         tol = dict(_parse_kv_float(x) for x in items(tolerances, r"[;,\n]"))
@@ -457,7 +478,8 @@ def _check_target_spec(
     if unknown:
         raise DoEError(
             f"--target names unknown parameter(s) {unknown}; the model's parameters are "
-            f"{list(parameter_names)}"
+            f"{list(parameter_names)} (NAME=number is a weighted parameter; a formula "
+            "needs parameter names on the right of '=')"
         )
     for r, points in spec.get("responses", {}).items():
         if r not in response_names:
@@ -2822,14 +2844,20 @@ def do_status(params: dict[str, Any]) -> dict[str, Any]:
             )
 
     target_profile: dict[str, Any] | None = None
-    if params.get("profile") and target_spec:
-        if not completed:
-            target_error = "no completed runs to profile"
+    profile_error: str | None = None
+    if params.get("profile"):
+        if not target_spec:
+            profile_error = (
+                "no design target is stored in this workbook; set one with "
+                "`discopt doe extend --target ...` (or `new ... --target`)"
+            )
+        elif not completed:
+            profile_error = "no completed runs to profile"
         else:
             try:
                 target_profile = _status_target_profile(wb, target_spec, completed)
             except Exception as e:  # noqa: BLE001 - status must still report the rest
-                target_error = f"profile failed: {type(e).__name__}: {e}"
+                profile_error = f"profile failed: {type(e).__name__}: {e}"
 
     return {
         "workbook_path": str(wb.path),
@@ -2852,8 +2880,26 @@ def do_status(params: dict[str, Any]) -> dict[str, Any]:
         "target_precision": target_out,
         "target_precision_error": target_error,
         "target_profile": target_profile,
+        "target_profile_error": profile_error,
         "next_command": next_command,
     }
+
+
+def _module_source_hash(spec: str | None) -> str | None:
+    """A hash of a --module experiment's source file, so the cache sees edits to it."""
+    if not spec:
+        return None
+    import hashlib
+    import importlib.util
+
+    try:
+        found = importlib.util.find_spec(spec.split(":", 1)[0])
+        origin = getattr(found, "origin", None)
+        if origin:
+            return hashlib.sha256(Path(origin).read_bytes()).hexdigest()
+    except (ImportError, ValueError, OSError):
+        pass
+    return None
 
 
 def _status_target_profile(
@@ -2890,6 +2936,7 @@ def _status_target_profile(
                 "template": template,
                 "template_args": wb.template_args(),
                 "module": wb.module_callable(),
+                "module_source": _module_source_hash(wb.module_callable()),
                 "sigmas": wb.response_sigmas(),
             },
             sort_keys=True,
@@ -2934,9 +2981,15 @@ def _status_target_profile(
             for name, p in check.profiles.items()
         },
     }
-    wb.set_target_profile_cache({"key": key, "result": _sanitize_json(result)})
-    wb.save()
-    return {**result, "cached": False}
+    # Caching is a convenience: a workbook that cannot be written (read-only,
+    # open in Excel on Windows) must not cost the result just computed.
+    cache_note = None
+    try:
+        wb.set_target_profile_cache({"key": key, "result": _sanitize_json(result)})
+        wb.save()
+    except Exception as e:  # noqa: BLE001
+        cache_note = f"not cached ({type(e).__name__}: {e})"
+    return {**result, "cached": False, "cache_note": cache_note}
 
 
 def _status_target_precision(
@@ -2949,9 +3002,14 @@ def _status_target_precision(
     sigma estimate from a handful of runs (the parameters table may use one).
     """
     fim, names = fim_data
+    from discopt.doe.linear_design import LINEAR_TEMPLATES
     from discopt.doe.templates import CLASSICAL_TEMPLATES
 
-    if wb.template_name() in CLASSICAL_TEMPLATES:
+    # Templates linear in their coefficients (classical designs and the
+    # parametric linear/RSM/Scheffé ones) resolve the target on their basis:
+    # no Experiment to rebuild, so this also works without discopt.modeling
+    # (the browser app).
+    if wb.template_name() in CLASSICAL_TEMPLATES or wb.template_name() in LINEAR_TEMPLATES:
         from discopt.doe.linear_design import _basis_evaluator
 
         input_names = [s.name for s in wb.input_specs()]
@@ -3055,6 +3113,8 @@ def _cmd_status(args) -> int:
             else:
                 print("    (precision available after `discopt doe fit`)")
             prof = out.get("target_profile")
+            if out.get("target_profile_error"):
+                print(f"  profile likelihood check: {out['target_profile_error']}")
             if prof:
                 level = f"{prof.get('confidence_level', 0.95):.0%}"
                 print(f"  profile likelihood check ({level} intervals):")
@@ -3075,6 +3135,10 @@ def _cmd_status(args) -> int:
                     print(f"      {t['note']}")
                 if prof.get("cached"):
                     print("    (cached: same data and target as the last check)")
+                elif prof.get("cache_note"):
+                    print(f"    ({prof['cache_note']})")
+        elif out.get("target_profile_error"):
+            print(f"  profile likelihood check: {out['target_profile_error']}")
         print(f"  next:        {out['next_command']}")
     return 0
 
@@ -3248,10 +3312,12 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
     # FIM = XᵀX / σ² is the design's information about the parameters
     # under the user-declared measurement_error. Use the declared σ
     # (not σ̂) so the prior FIM reflects design quality rather than fit
-    # residuals. This is what a later `extend` reads back as its prior, so the
-    # ridge has to stay negligible against it (see _scaled_ridge).
+    # residuals. This is what a later `extend` reads back as its prior. It is
+    # stored without a ridge: `status` judges design targets on it, and a
+    # ridge would make an unidentifiable target look precise. `extend` adds
+    # the ridge itself when it uses this as a prior.
     information = (X.T @ X) / (sigma**2)
-    cum_fim = information + _scaled_ridge(information, n_p)
+    cum_fim = information
 
     # The sigma behind the standard errors above: the residual estimate when
     # there were degrees of freedom to spare, else the declared value. Stored so
@@ -4050,8 +4116,11 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
     cached = wb.read_fim()
     ridge: np.ndarray | None = None
     if cached is not None and cached[1] == parameter_names:
-        # Written by `fit` at the estimates the design below is centred on.
-        prior_fim = cached[0]
+        # Written by `fit` at the estimates the design below is centred on --
+        # the information the data carry, with no ridge. Add it here, and
+        # remember it, so the predicted target precision can leave it out.
+        ridge = _scaled_ridge(cached[0], len(parameter_names))
+        prior_fim = cached[0] + ridge
     elif not template and completed and _any_blank_response(wb, completed):
         # Not fitted yet and some responses are missing: count only what was
         # measured (a per-run compute_fim would count every response).

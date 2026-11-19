@@ -145,6 +145,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `discopt[jax]>=0.10` floor stays, since nothing here needs 0.11 or 0.12.
 
 ### Fixed
+- **`status` called an unidentifiable target precise.** `fit` stored the FIM with
+  its regularizing ridge, and `status` judged targets on it, so one run of a
+  straight line reported a finite SE for the slope (and, with a loose
+  tolerance, "within tolerance"). `fit` now stores the information the data
+  carry, and `extend` adds the ridge itself when it uses that as a prior.
+- **The penalized batch strategy ignored the design target and the I/G region.**
+  Picks were ranked by the untargeted criterion, and a targeted
+  `max_variance` (or I/G) found no candidate at all.
+- **A `global_model` that did not match the experiment gave a wrong "certified"
+  region bound.** It is now checked against the experiment's FIM, and a bound
+  below an observed sensitivity is an error, not clamped.
+- Determinant certificates stop on an absolute gap (log det can be 0); the
+  smoothed criterion no longer gives uninformed parameters a borrowed ridge;
+  partial target weights, `stop_at_tolerance` without tolerances, duplicate or
+  malformed target text, and formulas undefined at the nominals are refused
+  with a clear message; `status --profile` reports its errors (including no
+  stored target) and keeps its result when the cache cannot be written; the GUI
+  no longer designs without the target when the target text is invalid, and its
+  replace mode keeps tolerances and exact values; linear/RSM workbooks show the
+  target in the browser app; robust targeted design handles a
+  `ParameterScaledExperiment`; the rank check uses the scale-normalized `K`.
 - **Targeted searches on a singular FIM.** A target can be estimable while the
   FIM is singular, and then the exact criterion can be discontinuous: only a
   run at exactly the right point (often a replicate) helps. Local refinement

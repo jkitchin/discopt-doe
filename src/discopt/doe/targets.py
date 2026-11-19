@@ -193,7 +193,14 @@ def _weights_and_tolerances(
         unknown = set(weights) - set(keys)
         if unknown:
             raise ValueError(f"weights for unknown targets {sorted(unknown)}")
-        w = np.array([float(weights.get(k, 0.0)) for k in keys])
+        missing = sorted({k for k in keys if k not in weights})
+        if missing:
+            # A missing weight used to mean 0, which silently dropped the target.
+            raise ValueError(
+                f"no weight given for {missing}; give every target a weight (0 makes it a "
+                "nuisance target)"
+            )
+        w = np.array([float(weights[k]) for k in keys])
     return w / scale**2, np.full(s, np.nan)
 
 
@@ -613,11 +620,15 @@ class Target:
             subs = {sp.Symbol(p, real=True): float(lay.values[lay.index(p)[0]]) for p in scalars}
             K = np.zeros((len(lay.names), len(exprs)))
             values = []
-            for j, src in enumerate(exprs.values()):
+            for j, (ename, src) in enumerate(exprs.items()):
                 expr = parse_expression(src, scalars)
                 for p in scalars:
-                    K[lay.index(p)[0], j] = float(sp.diff(expr, sp.Symbol(p, real=True)).subs(subs))
-                values.append(float(expr.subs(subs)))
+                    K[lay.index(p)[0], j] = _finite_formula(
+                        ename,
+                        sp.diff(expr, sp.Symbol(p, real=True)).subs(subs),
+                        f"(its derivative in {p})",
+                    )
+                values.append(_finite_formula(ename, expr.subs(subs), ""))
             names = list(exprs)
             scale = np.abs(np.asarray(values)) if relative else None
             if relative and np.any(~(scale > 0)):
@@ -870,8 +881,12 @@ class ResolvedTarget:
 
     @property
     def full_rank(self) -> bool:
-        """The targets are linearly independent (needed by D / E criteria)."""
-        return bool(np.linalg.matrix_rank(self.K) == self.n_targets)
+        """The targets are linearly independent (needed by D / E criteria).
+
+        Judged on ``K`` with its rows and columns scaled to unit norm, so
+        parameters or targets in very different units do not look dependent.
+        """
+        return bool(np.linalg.matrix_rank(_normalized(self.K)) == self.n_targets)
 
     @property
     def uniform_weights(self) -> bool:
@@ -946,10 +961,13 @@ class ResolvedTarget:
         maximize = criterion in ("determinant", "min_eigenvalue")
         bad = -np.inf if maximize else np.inf
         if smooth:
+            # Each parameter's ridge is relative to its own information, and a
+            # parameter with none gets none: a ridge borrowed from another
+            # parameter's scale would make an uninformed one look determined
+            # (in other units it can be many orders of magnitude off).
             fim = np.asarray(fim, dtype=float)
             d = np.abs(np.diag(fim))
-            floor = float(d.max()) if d.size and d.max() > 0 else 1.0
-            fim = fim + np.diag(_SMOOTH_RIDGE * np.where(d > 0, d, floor))
+            fim = fim + np.diag(_SMOOTH_RIDGE * d)
         sigma, ok = self.covariance(fim)
         if not ok:
             return bad
@@ -1141,12 +1159,19 @@ def basis_target(
             expr = parse_expression(src, names_p)
             cols.append(
                 np.array(
-                    [float(sp.diff(expr, sp.Symbol(n, real=True)).subs(subs)) for n in names_p]
+                    [
+                        _finite_formula(
+                            ename,
+                            sp.diff(expr, sp.Symbol(n, real=True)).subs(subs),
+                            f"(its derivative in {n})",
+                        )
+                        for n in names_p
+                    ]
                 )
             )
             names.append(ename)
             keys.append(ename)
-            values.append(float(expr.subs(subs)))
+            values.append(_finite_formula(ename, expr.subs(subs), ""))
     for rname, points in (spec.get("responses") or {}).items():
         if rname != response_name:
             raise ValueError(
@@ -1203,6 +1228,30 @@ def target_precision(
     return target.precision(fim)
 
 
+def _normalized(K: np.ndarray) -> np.ndarray:
+    """``K`` with nonzero rows, then columns, scaled to unit norm."""
+    K = np.asarray(K, dtype=float)
+    r = np.linalg.norm(K, axis=1, keepdims=True)
+    K = np.where(r > 0, K / np.where(r > 0, r, 1.0), 0.0)
+    c = np.linalg.norm(K, axis=0, keepdims=True)
+    return np.where(c > 0, K / np.where(c > 0, c, 1.0), 0.0)
+
+
+def _finite_formula(name: str, value: Any, where: str) -> float:
+    """A formula's value or derivative as a float, or a clear error."""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        out = float("nan")
+    if not np.isfinite(out):
+        raise ValueError(
+            f"the formula {name!r} is not finite {where} at the nominal parameters (e.g. a "
+            "division by a parameter that is 0 there); give nominal values where it is "
+            "defined (--param / param_values)"
+        )
+    return out
+
+
 def _check_target_criterion(target: ResolvedTarget, criterion: str) -> None:
     """Refuse criteria the target cannot support; warn when weights do nothing."""
     if criterion not in TARGET_CRITERIA:
@@ -1212,7 +1261,8 @@ def _check_target_criterion(target: ResolvedTarget, criterion: str) -> None:
     if criterion in _INFORMATION_CRITERIA and not target.full_rank:
         raise ValueError(
             f"criterion {criterion!r} needs linearly independent targets, but these "
-            f"{target.n_targets} targets span only {np.linalg.matrix_rank(target.K)} "
+            f"{target.n_targets} targets span only "
+            f"{np.linalg.matrix_rank(_normalized(target.K))} "
             "parameter directions (e.g. more output targets than parameters). Use "
             "'trace' or 'max_variance'."
         )

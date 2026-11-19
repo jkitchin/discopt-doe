@@ -130,3 +130,63 @@ def test_status_profile_from_the_cli(tmp_path):
     # Same data, same target: the stored result, no refit.
     again = do_status({"workbook": path, "profile": True})["target_profile"]
     assert again["cached"] is True and again["targets"] == prof["targets"]
+
+
+def test_status_profile_without_a_target_says_so(tmp_path):
+    from discopt.doe.cli import NewParams, do_new, do_status
+
+    out = do_new(
+        NewParams(
+            output=tmp_path / "n.xlsx",
+            n=2,
+            inputs=[("x", 0.0, 1.0)],
+            response_name="y",
+            measurement_error=0.1,
+            criterion="determinant",
+            seed=0,
+            n_starts=2,
+            template="linear",
+        )
+    )
+    st = do_status({"workbook": out["workbook_path"], "profile": True})
+    assert st["target_profile"] is None
+    assert "no design target" in st["target_profile_error"]
+
+
+def test_a_failed_cache_write_keeps_the_profile(tmp_path, monkeypatch):
+    from discopt.doe import cli
+    from discopt.doe.workbook import Workbook
+
+    def boom(self, entry):
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(Workbook, "set_target_profile_cache", boom)
+    out = cli.do_new(
+        cli.NewParams(
+            output=tmp_path / "c.xlsx",
+            n=3,
+            inputs=[("x", 0.05, 0.4)],
+            response_name="y",
+            measurement_error=0.05,
+            criterion="trace",
+            seed=0,
+            n_starts=2,
+            template="symbolic",
+            expression="a*exp(-b*x)",
+            param_initial_guess={"a": 2.0, "b": 0.7},
+            target={"parameters": {"b": 1.0}},
+        )
+    )
+    wb = Workbook.open(out["workbook_path"])
+    rng = np.random.default_rng(1)
+    wb.record_responses(
+        {
+            int(r["run_id"]): MODEL.predict(TRUTH, {"x": float(r["x"])}) + rng.normal(0, 0.05)
+            for r in wb.pending_runs()
+        }
+    )
+    wb.save()
+    cli.do_fit({"workbook": out["workbook_path"]})
+    st = cli.do_status({"workbook": out["workbook_path"], "profile": True})
+    assert st["target_profile"] is not None and "read-only" in st["target_profile"]["cache_note"]
+    assert st["target_profile_error"] is None

@@ -106,6 +106,14 @@ def _round_design(
 
 
 def _should_stop(precision: TargetPrecision | None, stop_at_tolerance: bool) -> bool:
+    if stop_at_tolerance and precision is not None and precision.met is None:
+        # Without tolerances "precise enough" is undefined, and the loop would
+        # silently run every round. Raised at the first round, before any
+        # experiment is run.
+        raise ValueError(
+            "stop_at_tolerance needs a target with tolerances (e.g. "
+            "Target.parameters(tolerances={'k': 0.05})); this target has none"
+        )
     return bool(stop_at_tolerance and precision is not None and precision.met)
 
 
