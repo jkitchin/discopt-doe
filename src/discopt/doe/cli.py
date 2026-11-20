@@ -295,6 +295,293 @@ def _normalize_criterion(c: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────
+# Design targets (--target, --target-expr, --target-response, --tolerance)
+# ──────────────────────────────────────────────────────────────────
+
+
+def _parse_target(s: str) -> tuple[str, float]:
+    """Parse ``NAME`` or ``NAME=WEIGHT`` (``--target``)."""
+    name, eq, val = s.partition("=")
+    name = name.strip()
+    if not name:
+        raise argparse.ArgumentTypeError(f"expected 'NAME' or 'NAME=WEIGHT', got {s!r}")
+    if not eq:
+        return (name, 1.0)
+    try:
+        return (name, float(val))
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"bad weight in {s!r}: {e}") from e
+
+
+def _parse_target_expr(s: str) -> tuple[str, str]:
+    """Parse ``NAME=FORMULA`` (``--target-expr``), e.g. ``ratio=k1/k2``."""
+    name, eq, expr = s.partition("=")
+    if not eq or not name.strip() or not expr.strip():
+        raise argparse.ArgumentTypeError(f"expected 'NAME=FORMULA', got {s!r}")
+    return (name.strip(), expr.strip())
+
+
+def _parse_target_response(s: str) -> tuple[str, dict[str, float] | None]:
+    """Parse ``RESPONSE`` or ``RESPONSE@INPUT=V[,INPUT=V...]`` (``--target-response``)."""
+    name, at, rest = s.partition("@")
+    name = name.strip()
+    if not name or (at and not rest.strip()):
+        raise argparse.ArgumentTypeError(
+            f"expected 'RESPONSE' or 'RESPONSE@INPUT=VALUE[,INPUT=VALUE]', got {s!r}"
+        )
+    if not at:
+        return (name, None)
+    point: dict[str, float] = {}
+    for item in rest.split(","):
+        k, eq, v = item.partition("=")
+        try:
+            if not eq or not k.strip():
+                raise ValueError("missing '='")
+            point[k.strip()] = float(v)
+        except ValueError as e:
+            raise argparse.ArgumentTypeError(f"bad operating point {item!r} in {s!r}") from e
+    return (name, point)
+
+
+def _target_spec_from_args(args) -> dict[str, Any] | None:
+    """The target spec the command-line flags describe; ``None`` without any."""
+    pairs = list(getattr(args, "target", None) or []) + list(
+        getattr(args, "target_expr", None) or []
+    )
+    dup = sorted({n for n, _ in pairs if [m for m, _ in pairs].count(n) > 1})
+    if dup:
+        raise DoEError(f"--target / --target-expr name {dup} more than once")
+    params = dict(getattr(args, "target", None) or [])
+    exprs = dict(getattr(args, "target_expr", None) or [])
+    responses: dict[str, list[dict[str, float]]] = {}
+    for name, point in getattr(args, "target_response", None) or []:
+        responses.setdefault(name, [])
+        if point is not None:
+            responses[name].append(point)
+    tolerances = dict(getattr(args, "tolerance", None) or [])
+    relative = bool(getattr(args, "relative_precision", False))
+    if not (params or exprs or responses):
+        if tolerances or relative:
+            raise DoEError(
+                "--tolerance / --relative-precision qualify a target; name one with "
+                "--target, --target-expr or --target-response"
+            )
+        return None
+    spec: dict[str, Any] = {"relative": relative}
+    if params:
+        spec["parameters"] = params
+    if exprs:
+        spec["expressions"] = exprs
+    if responses:
+        spec["responses"] = responses
+    if tolerances:
+        spec["tolerances"] = tolerances
+    return spec
+
+
+def target_spec_from_text(
+    targets: str | Sequence[str] | None,
+    tolerances: str | Sequence[str] | None = None,
+    relative: bool = False,
+) -> dict[str, Any] | None:
+    """A target spec from free text, for the GUI and the browser app.
+
+    ``targets`` holds items separated by semicolons or new lines (commas belong
+    to operating points and formulas):
+
+    * ``k1`` or ``k1=2`` -- a parameter, optionally weighted;
+    * ``ratio=k1/k2`` -- a formula (anything after ``=`` that is not a number);
+    * ``y@T=365,t=4`` -- a prediction at an operating point.
+
+    ``tolerances`` is ``name=tau`` items separated by commas, semicolons or new
+    lines. Returns ``None`` when no target is named.
+    """
+    import re
+
+    def items(text: str | Sequence[str] | None, seps: str) -> list[str]:
+        if text is None:
+            return []
+        parts = [text] if isinstance(text, str) else list(text)
+        out: list[str] = []
+        for part in parts:
+            out += [x.strip() for x in re.split(seps, str(part)) if x.strip()]
+        return out
+
+    params: dict[str, float] = {}
+    exprs: dict[str, str] = {}
+    responses: dict[str, list[dict[str, float]]] = {}
+    seen: set[str] = set()
+
+    def once(name: str) -> str:
+        if not name:
+            raise DoEError("bad design target: an item has no name (e.g. '=k')")
+        if name in seen:
+            raise DoEError(f"bad design target: {name!r} is named twice")
+        seen.add(name)
+        return name
+
+    try:
+        for item in items(targets, r"[;\n]"):
+            if "," in item and "@" not in item and "=" not in item:
+                raise DoEError(
+                    f"bad design target {item!r}: separate targets with ';' or new lines "
+                    "(commas belong to operating points, as in y@T=365,t=4)"
+                )
+            if "@" in item:
+                name, point = _parse_target_response(item)
+                responses.setdefault(name, [])
+                if point is not None:
+                    responses[name].append(point)
+                continue
+            name, eq, rhs = item.partition("=")
+            name, rhs = once(name.strip()), rhs.strip()
+            if not eq:
+                params[name] = 1.0
+                continue
+            try:
+                params[name] = float(rhs)  # NAME=number: a weighted parameter
+            except ValueError:
+                exprs[name] = rhs
+        tol = dict(_parse_kv_float(x) for x in items(tolerances, r"[;,\n]"))
+    except argparse.ArgumentTypeError as e:
+        raise DoEError(f"bad design target: {e}") from e
+    if not (params or exprs or responses):
+        if tol or relative:
+            raise DoEError("tolerances and relative precision qualify a target; name one")
+        return None
+    spec: dict[str, Any] = {"relative": bool(relative)}
+    if params:
+        spec["parameters"] = params
+    if exprs:
+        spec["expressions"] = exprs
+    if responses:
+        spec["responses"] = responses
+    if tol:
+        spec["tolerances"] = tol
+    return spec
+
+
+def _check_target_spec(
+    spec: Mapping[str, Any],
+    parameter_names: Sequence[str],
+    response_names: Sequence[str],
+    input_names: Sequence[str],
+) -> dict[str, Any]:
+    """Validate a target spec against the campaign's model; a clean copy or DoEError."""
+    from discopt.doe.targets import validate_target_spec
+
+    try:
+        spec = validate_target_spec(spec)
+    except ValueError as e:
+        raise DoEError(f"bad design target: {e}") from e
+    unknown = [p for p in spec.get("parameters", {}) if p not in parameter_names]
+    if unknown:
+        raise DoEError(
+            f"--target names unknown parameter(s) {unknown}; the model's parameters are "
+            f"{list(parameter_names)} (NAME=number is a weighted parameter; a formula "
+            "needs parameter names on the right of '=')"
+        )
+    for r, points in spec.get("responses", {}).items():
+        if r not in response_names:
+            raise DoEError(
+                f"--target-response names unknown response {r!r}; the model's responses are "
+                f"{list(response_names)}"
+            )
+        if input_names and not points:
+            raise DoEError(
+                f"--target-response {r} needs an operating point: write "
+                f"'{r}@" + ",".join(f"{n}=VALUE" for n in input_names) + "'"
+            )
+        for pt in points:
+            missing = [n for n in input_names if n not in pt]
+            extra = [n for n in pt if n not in input_names]
+            if missing or extra:
+                raise DoEError(
+                    f"--target-response {r}@...: the operating point must give exactly the "
+                    f"design inputs {list(input_names)} (missing {missing}, unknown {extra})"
+                )
+    return spec
+
+
+def _target_from_spec(spec: Mapping[str, Any]) -> Any:
+    """``Target.from_spec`` with its errors as DoEError (e.g. kinds mixed without tolerances)."""
+    from discopt.doe.targets import Target
+
+    try:
+        return Target.from_spec(spec)
+    except ValueError as e:
+        raise DoEError(f"bad design target: {e}") from e
+
+
+def _target_precision_without_ridge(
+    target: Any, fim: np.ndarray | None, ridge: np.ndarray | None
+) -> Any:
+    """Target precision on the information the runs carry, not the search's ridge.
+
+    The design searches add a tiny ridge to keep early FIMs invertible; it must
+    not count as data, or a target that the runs cannot identify reports a
+    finite (ridge-sized) standard error instead of "not estimable".
+    """
+    if target is None or fim is None:
+        return None
+    info = np.asarray(fim, dtype=float)
+    if ridge is not None:
+        info = info - np.asarray(ridge, dtype=float)
+    return target.precision(info)
+
+
+def _precision_out(prec: Any) -> dict[str, Any]:
+    """A TargetPrecision as JSON-able output."""
+    return {
+        "estimable": bool(prec.estimable),
+        "std_errors": prec.std,
+        "ratios": prec.ratios,
+        "met": prec.met,
+    }
+
+
+def _print_target_precision(out: Mapping[str, Any], label: str) -> None:
+    prec = out.get("target_precision")
+    if not prec:
+        return
+    note = "" if prec["estimable"] else "  (not estimable yet)"
+    print(f"  {label}{note}")
+    for name, se in prec["std_errors"].items():
+        ratio = prec["ratios"].get(name)
+        extra = f"   SE/tolerance = {ratio:.3g}" if ratio is not None else ""
+        print(f"    {name:>12s}  SE = {se:.4g}{extra}")
+    if prec["met"] is not None:
+        print(f"    every target within tolerance: {'yes' if prec['met'] else 'no'}")
+
+
+def _no_target_for(what: str) -> DoEError:
+    return DoEError(
+        f"design targets (--target, --target-expr, --target-response) need a model the "
+        f"design is optimized for: the parametric templates, --module, symbolic, or "
+        f"`extend` of a classical design. {what}"
+    )
+
+
+def _basis_target_or_error(
+    spec: Mapping[str, Any],
+    parameter_names: Sequence[str],
+    input_names: Sequence[str],
+    basis: Any,
+    response_name: str,
+    param_values: Mapping[str, float] | None = None,
+) -> Any:
+    """A target on the jax-free basis path; errors as DoEError."""
+    from discopt.doe.targets import basis_target
+
+    try:
+        return basis_target(
+            spec, parameter_names, input_names, basis, param_values, response_name=response_name
+        )
+    except ValueError as e:
+        raise DoEError(f"bad design target: {e}") from e
+
+
+# ──────────────────────────────────────────────────────────────────
 # Typed parameter / result records
 # ──────────────────────────────────────────────────────────────────
 
@@ -356,6 +643,10 @@ class NewParams:
     # replace the model's sigma for the named responses, in the design and in
     # every later fit/extend.
     sigma_overrides: dict[str, float] = field(default_factory=dict)
+    # Design target (a Target spec, see discopt.doe.Target.from_spec): design
+    # for the precision of these parameters / formulas / predictions instead
+    # of all parameters. Stored in the workbook so `extend` reuses it.
+    target: dict[str, Any] | None = None
 
 
 @dataclass
@@ -387,6 +678,10 @@ class ExtendParams:
     n_starts: int
     # "greedy" | "joint" | "penalized"; see batch_optimal_experiment.
     batch_strategy: str = "greedy"
+    # A new design target replacing the stored one (None: keep the stored
+    # target, if any); clear_target drops it and designs for all parameters.
+    target: dict[str, Any] | None = None
+    clear_target: bool = False
 
 
 @dataclass
@@ -545,6 +840,8 @@ def _cumulative_fim_from_completed(
     completed_runs: list[dict[str, Any]],
     input_names: list[str],
     param_values: dict[str, float] | None = None,
+    *,
+    ridge: bool = True,
 ) -> np.ndarray:
     """Sum FIMs over every completed run. Adds a ridge so first-batch
     FIMs stay non-singular when fewer runs than parameters have come in.
@@ -573,7 +870,7 @@ def _cumulative_fim_from_completed(
         fim = fim + np.asarray(r.fim)
     # Ridge last, scaled to what the completed runs actually carry — the sum
     # is its own best scale reference.
-    return fim + _scaled_ridge(fim, n_p)
+    return fim + _scaled_ridge(fim, n_p) if ridge else fim
 
 
 def _module_campaign_runs(
@@ -854,6 +1151,17 @@ def do_new(params: NewParams) -> dict[str, Any]:
             "required sum of the component values."
         )
 
+    if params.target and (
+        params.template in _TWO_LEVEL_TEMPLATE_NAMES
+        or params.template == "optimize"
+        or params.template in COMBINATORIAL_TEMPLATES
+        or params.template in CLASSICAL_TEMPLATES
+    ):
+        raise _no_target_for(
+            f"Template {params.template!r} is a fixed or model-free design (to target "
+            "coefficients of a classical design, `extend` it with --target)."
+        )
+
     if params.template in _TWO_LEVEL_TEMPLATE_NAMES:
         return _do_new_factorial(params)
     if params.template == "optimize":
@@ -877,6 +1185,15 @@ def do_new(params: NewParams) -> dict[str, Any]:
     bounds = _design_bounds(params.inputs)
     input_names = [s[0] for s in params.inputs]
     _check_prediction_criterion(params.criterion, params.template)
+    target_spec, target = None, None
+    if params.target:
+        target_spec = _check_target_spec(
+            params.target,
+            parameter_names,
+            [r.name for r in response_specs] if response_specs else [params.response_name],
+            input_names,
+        )
+        target = _target_from_spec(target_spec)
 
     n_p = len(parameter_names)
 
@@ -907,10 +1224,12 @@ def do_new(params: NewParams) -> dict[str, Any]:
             equality_constraints=eq_cons,
             feasible_projection=proj,
             n_starts=params.n_starts,
+            target=target,
             seed=params.seed,
         )
         designs = [single.design]
         criterion_value = float(single.criterion_value)
+        precision = _target_precision_without_ridge(single.target, single.fim, prior_fim)
     else:
         from discopt.doe import batch_optimal_experiment
 
@@ -920,14 +1239,22 @@ def do_new(params: NewParams) -> dict[str, Any]:
             bounds,
             n_experiments=params.n,
             criterion=params.criterion,
+            # A target the first runs cannot identify on their own (fewer runs
+            # than parameters) leaves the greedy picks arbitrary, and exchange
+            # cannot restore the joint structure it needs (e.g. two runs placed
+            # symmetrically). The joint search starts from the greedy batch,
+            # so it is never worse.
+            strategy="joint" if target is not None else "greedy",
             prior_fim=prior_fim,
             equality_constraints=eq_cons,
             feasible_projection=proj,
             n_starts=params.n_starts,
             seed=params.seed,
+            target=target,
         )
         designs = list(batch.designs)
         criterion_value = float(batch.criterion_value)
+        precision = _target_precision_without_ridge(batch.target, batch.joint_fim, prior_fim)
 
     template_args: dict[str, Any] = {}
     if params.degree is not None:
@@ -949,6 +1276,8 @@ def do_new(params: NewParams) -> dict[str, Any]:
         extra_columns=_extra_columns(params),
         responses=response_specs,
     )
+    if target_spec:
+        wb.set_target_spec(target_spec)
     new_ids = wb.append_runs(1, designs)
     wb.log(
         "new",
@@ -957,6 +1286,7 @@ def do_new(params: NewParams) -> dict[str, Any]:
             "module_callable": params.module_callable,
             "n": params.n,
             "criterion": params.criterion,
+            "target": target_spec,
         },
     )
     wb.save()
@@ -976,6 +1306,8 @@ def do_new(params: NewParams) -> dict[str, Any]:
         "parameter_names": parameter_names,
         "n_parameters": len(parameter_names),
         "response_names": wb.response_names(),
+        "target": target_spec,
+        "target_precision": _precision_out(precision) if precision is not None else None,
         "next_command": f"discopt doe status {wb.path}",
     }
 
@@ -1419,9 +1751,10 @@ def _do_extend_symbolic(wb: Workbook, params: ExtendParams) -> dict[str, Any]:
     if completed:
         designs_done = [{n: float(r[n]) for n in model.input_names} for r in completed]
         collected = model.fim(theta, designs_done)
-        prior = collected + _scaled_ridge(collected, n_p)
+        ridge = _scaled_ridge(collected, n_p)
+        prior = collected + ridge
     else:
-        prior = _scaled_ridge(
+        ridge = _scaled_ridge(
             _basis_reference_fim(
                 basis_evaluator(model, theta),
                 [(s.name, s.lb, s.ub) for s in specs],
@@ -1429,29 +1762,57 @@ def _do_extend_symbolic(wb: Workbook, params: ExtendParams) -> dict[str, Any]:
             ),
             n_p,
         )
+        prior = ridge
 
     batch_idx = wb.next_batch_index()
+    target_spec = _extend_target_spec(
+        wb, params, list(model.parameter_names), [model.response_name], list(model.input_names)
+    )
+    criterion = wb.criterion() or _DEFAULT_CRITERION
+    precision = None
     try:
-        batch = batch_design_from_basis(
-            basis_evaluator(model, theta),
-            int(params.n),
-            parameter_names=list(model.parameter_names),
-            input_names=list(model.input_names),
-            design_bounds=bounds,
-            measurement_error=wb.measurement_error(),
-            criterion=wb.criterion() or _DEFAULT_CRITERION,
-            prior_fim=prior,
-            n_starts=params.n_starts,
-            seed=wb.seed() + batch_idx,
-        )
+        if target_spec:
+            designs, criterion_value, precision = _symbolic_target_design(
+                model,
+                theta,
+                bounds,
+                int(params.n),
+                target_spec,
+                criterion=criterion,
+                prior_fim=prior,
+                ridge=ridge,
+                n_starts=params.n_starts,
+                seed=wb.seed() + batch_idx,
+                strategy=str(params.batch_strategy or "greedy"),
+            )
+        else:
+            batch = batch_design_from_basis(
+                basis_evaluator(model, theta),
+                int(params.n),
+                parameter_names=list(model.parameter_names),
+                input_names=list(model.input_names),
+                design_bounds=bounds,
+                measurement_error=wb.measurement_error(),
+                criterion=criterion,
+                prior_fim=prior,
+                n_starts=params.n_starts,
+                seed=wb.seed() + batch_idx,
+            )
+            designs, criterion_value = list(batch.designs), float(batch.criterion_value)
+            criterion = batch.criterion
     except (ValueError, RuntimeError) as e:
         raise DoEError(str(e)) from e
 
-    designs = list(batch.designs)
     new_ids = wb.append_runs(batch_idx, designs)
     wb.log(
         "extend",
-        {"template": "symbolic", "n": params.n, "batch": batch_idx, "theta": theta},
+        {
+            "template": "symbolic",
+            "n": params.n,
+            "batch": batch_idx,
+            "theta": theta,
+            "target": target_spec,
+        },
     )
     wb.save()
 
@@ -1463,10 +1824,12 @@ def _do_extend_symbolic(wb: Workbook, params: ExtendParams) -> dict[str, Any]:
             {"run_id": rid, **{nm: float(d[nm]) for nm in model.input_names}}
             for rid, d in zip(new_ids, designs)
         ],
-        "criterion": batch.criterion,
-        "criterion_value": float(batch.criterion_value),
+        "criterion": criterion,
+        "criterion_value": criterion_value,
         "parameter_names": list(model.parameter_names),
         "design_parameters": theta,
+        "target": target_spec,
+        "target_precision": _precision_out(precision) if precision is not None else None,
         "warnings": warnings_out,
         "next_command": f"discopt doe status {wb.path}",
     }
@@ -1499,6 +1862,102 @@ def _build_symbolic_model(params: NewParams):
         raise DoEError(str(e)) from e
 
 
+def _symbolic_target_design(
+    model: Any,
+    theta: Mapping[str, float],
+    bounds: dict[str, tuple[float, float]],
+    n: int,
+    spec: Mapping[str, Any],
+    *,
+    criterion: str,
+    prior_fim: np.ndarray,
+    ridge: np.ndarray | None,
+    n_starts: int,
+    seed: int,
+    strategy: str = "joint",
+    use_jax: bool | None = None,
+) -> tuple[list[dict[str, float]], float, Any]:
+    """A targeted design for a symbolic model.
+
+    Through its jax Experiment (:func:`symbolic_experiment`) where jax and the
+    base discopt package are available: every batch strategy, and replicate
+    candidates. Otherwise -- the browser app, Pyodide -- through the jax-free
+    basis search with :func:`~discopt.doe.targets.basis_target`.
+    ``use_jax=None`` picks automatically.
+    """
+    if use_jax is None:
+        try:
+            import jax  # noqa: F401
+
+            from discopt.doe.runs import symbolic_experiment  # noqa: F401
+
+            use_jax = True
+        except ImportError:
+            use_jax = False
+    if not use_jax:
+        from discopt.doe.linear_design import batch_design_from_basis
+        from discopt.doe.symbolic import basis_evaluator
+
+        basis = basis_evaluator(model, dict(theta))
+        target = _basis_target_or_error(
+            spec,
+            list(model.parameter_names),
+            list(model.input_names),
+            basis,
+            model.response_name,
+            dict(theta),
+        )
+        batch = batch_design_from_basis(
+            basis,
+            int(n),
+            parameter_names=list(model.parameter_names),
+            input_names=list(model.input_names),
+            design_bounds=bounds,
+            measurement_error=model.measurement_error,
+            criterion=criterion,
+            prior_fim=prior_fim,
+            n_starts=n_starts,
+            seed=seed,
+            target=target,
+        )
+        precision = _target_precision_without_ridge(target, batch.joint_fim, ridge)
+        return list(batch.designs), float(batch.criterion_value), precision
+
+    from discopt.doe.design import batch_optimal_experiment, optimal_experiment
+    from discopt.doe.runs import symbolic_experiment
+
+    exp = symbolic_experiment(model, input_bounds=bounds)
+    target = _target_from_spec(spec)
+    theta = {k: float(v) for k, v in theta.items()}
+    if n == 1:
+        res = optimal_experiment(
+            exp,
+            theta,
+            bounds,
+            criterion=criterion,
+            prior_fim=prior_fim,
+            n_starts=n_starts,
+            seed=seed,
+            target=target,
+        )
+        precision = _target_precision_without_ridge(res.target, res.fim, ridge)
+        return [res.design], float(res.criterion_value), precision
+    batch = batch_optimal_experiment(
+        exp,
+        theta,
+        bounds,
+        n_experiments=n,
+        criterion=criterion,
+        strategy=strategy,
+        prior_fim=prior_fim,
+        n_starts=n_starts,
+        seed=seed,
+        target=target,
+    )
+    precision = _target_precision_without_ridge(batch.target, batch.joint_fim, ridge)
+    return list(batch.designs), float(batch.criterion_value), precision
+
+
 def _do_new_symbolic(params: NewParams) -> dict[str, Any]:
     """Design a locally-optimal batch for a user-defined model.
 
@@ -1515,33 +1974,57 @@ def _do_new_symbolic(params: NewParams) -> dict[str, Any]:
     nominal = dict(params.param_initial_guess)
     input_names = list(model.input_names)
     n_p = len(model.parameter_names)
+    target_spec = (
+        _check_target_spec(
+            params.target, list(model.parameter_names), [model.response_name], input_names
+        )
+        if params.target
+        else None
+    )
 
-    if int(params.n) < n_p:
+    # With a target, fewer runs than parameters is the point: only the targets
+    # have to be identifiable.
+    if int(params.n) < n_p and target_spec is None:
         raise DoEError(
             f"a model with {n_p} parameters needs at least {n_p} runs to be "
-            f"identifiable; got --n {params.n}"
+            f"identifiable; got --n {params.n} (or name the parameters you need with "
+            "--target)"
         )
 
     basis = basis_evaluator(model, nominal)
+    prior = _scaled_ridge(_basis_reference_fim(basis, params.inputs, params.measurement_error), n_p)
+    precision = None
     try:
-        batch = batch_design_from_basis(
-            basis,
-            int(params.n),
-            parameter_names=list(model.parameter_names),
-            input_names=input_names,
-            design_bounds=_design_bounds(params.inputs),
-            measurement_error=params.measurement_error,
-            criterion=params.criterion,
-            prior_fim=_scaled_ridge(
-                _basis_reference_fim(basis, params.inputs, params.measurement_error), n_p
-            ),
-            n_starts=params.n_starts,
-            seed=params.seed,
-        )
+        if target_spec is not None:
+            designs, criterion_value, precision = _symbolic_target_design(
+                model,
+                nominal,
+                _design_bounds(params.inputs),
+                int(params.n),
+                target_spec,
+                criterion=params.criterion,
+                prior_fim=prior,
+                ridge=prior,
+                n_starts=params.n_starts,
+                seed=params.seed,
+            )
+        else:
+            batch = batch_design_from_basis(
+                basis,
+                int(params.n),
+                parameter_names=list(model.parameter_names),
+                input_names=input_names,
+                design_bounds=_design_bounds(params.inputs),
+                measurement_error=params.measurement_error,
+                criterion=params.criterion,
+                prior_fim=prior,
+                n_starts=params.n_starts,
+                seed=params.seed,
+            )
+            designs, criterion_value = list(batch.designs), float(batch.criterion_value)
     except (ValueError, RuntimeError) as e:
         raise DoEError(str(e)) from e
 
-    designs = list(batch.designs)
     wb = Workbook.create(
         params.output,
         template="symbolic",
@@ -1555,6 +2038,8 @@ def _do_new_symbolic(params: NewParams) -> dict[str, Any]:
         param_initial_guess=nominal,
         extra_columns=_extra_columns(params),
     )
+    if target_spec:
+        wb.set_target_spec(target_spec)
     new_ids = wb.append_runs(1, designs)
     wb.log(
         "new",
@@ -1564,6 +2049,7 @@ def _do_new_symbolic(params: NewParams) -> dict[str, Any]:
             "n": params.n,
             "criterion": params.criterion,
             "nominal": nominal,
+            "target": target_spec,
         },
     )
     wb.save()
@@ -1579,11 +2065,13 @@ def _do_new_symbolic(params: NewParams) -> dict[str, Any]:
             for rid, d in zip(new_ids, designs)
         ],
         "criterion": params.criterion,
-        "criterion_value": float(batch.criterion_value),
+        "criterion_value": criterion_value,
         "parameter_names": list(model.parameter_names),
         "n_parameters": n_p,
         "expression": model.source,
         "nominal_parameters": nominal,
+        "target": target_spec,
+        "target_precision": _precision_out(precision) if precision is not None else None,
         "next_command": f"discopt doe status {wb.path}",
     }
 
@@ -1623,6 +2111,32 @@ def _do_new_linear(params: NewParams) -> dict[str, Any]:
     if params.mixture_total is not None:
         template_args["mixture_total"] = float(params.mixture_total)
 
+    ridge = _scaled_ridge(
+        _template_reference_fim(
+            template,
+            template_args,
+            parameter_names,
+            input_names,
+            params.inputs,
+            params.measurement_error,
+        ),
+        len(parameter_names),
+    )
+    target_spec, target = None, None
+    if params.target:
+        from discopt.doe.linear_design import _basis_evaluator
+
+        target_spec = _check_target_spec(
+            params.target, parameter_names, [params.response_name], input_names
+        )
+        target = _basis_target_or_error(
+            target_spec,
+            parameter_names,
+            input_names,
+            _basis_evaluator(template, template_args, parameter_names, input_names),
+            params.response_name,
+        )
+
     try:
         batch = linear_batch_design(
             template,
@@ -1639,21 +2153,12 @@ def _do_new_linear(params: NewParams) -> dict[str, Any]:
             # only once the design has accumulated full rank — and it is scaled
             # to the information in each direction so it cannot decide the
             # design (see _scaled_ridge).
-            prior_fim=_scaled_ridge(
-                _template_reference_fim(
-                    template,
-                    template_args,
-                    parameter_names,
-                    input_names,
-                    params.inputs,
-                    params.measurement_error,
-                ),
-                len(parameter_names),
-            ),
+            prior_fim=ridge,
             equality_constraints=eq_cons or None,
             feasible_projection=proj,
             n_starts=params.n_starts,
             seed=params.seed,
+            target=target,
         )
     except (ValueError, RuntimeError) as e:
         raise DoEError(str(e)) from e
@@ -1672,6 +2177,8 @@ def _do_new_linear(params: NewParams) -> dict[str, Any]:
         param_initial_guess=None,
         extra_columns=_extra_columns(params),
     )
+    if target_spec:
+        wb.set_target_spec(target_spec)
     new_ids = wb.append_runs(1, designs)
     wb.log(
         "new",
@@ -1680,9 +2187,11 @@ def _do_new_linear(params: NewParams) -> dict[str, Any]:
             "n": params.n,
             "criterion": params.criterion,
             "fim": "linear",
+            "target": target_spec,
         },
     )
     wb.save()
+    precision = _target_precision_without_ridge(target, batch.joint_fim, ridge)
 
     return {
         "workbook_path": str(wb.path),
@@ -1698,6 +2207,8 @@ def _do_new_linear(params: NewParams) -> dict[str, Any]:
         "criterion_value": float(batch.criterion_value),
         "parameter_names": parameter_names,
         "n_parameters": len(parameter_names),
+        "target": target_spec,
+        "target_precision": _precision_out(precision) if precision is not None else None,
         "next_command": f"discopt doe status {wb.path}",
     }
 
@@ -2227,6 +2738,7 @@ def _cmd_new(args) -> int:
         sigma_overrides=sigma_overrides,
     )
     try:
+        params.target = _target_spec_from_args(args)
         out = do_new(params)
     except (DoEError, ValueError, TypeError, FileNotFoundError, ImportError, RuntimeError) as e:
         # RuntimeError: the optimal-design search can fail to find a non-singular
@@ -2245,6 +2757,9 @@ def _print_new_human(out: dict[str, Any]) -> None:
     print(f"  model:         {label}")
     print(f"  parameters:    {out['n_parameters']} ({', '.join(out['parameter_names'])})")
     print(f"  criterion:     {out['criterion']}")
+    if out.get("target"):
+        print(f"  target:        {_describe_target(out['target'])}")
+        _print_target_precision(out, "predicted target precision (at the nominal parameters):")
     new_ids = out["new_run_ids"]
     print(f"  batch:         {out['batch']}  (run_ids {min(new_ids)}-{max(new_ids)})")
     print("  recommended runs:")
@@ -2314,6 +2829,36 @@ def do_status(params: dict[str, Any]) -> dict[str, Any]:
     else:
         next_command = f"discopt doe new ... -o {wb.path}"
 
+    target_spec = wb.target_spec()
+    target_out: dict[str, Any] | None = None
+    target_error: str | None = None
+    if target_spec and fim_data is not None and fitted:
+        try:
+            target_out = _precision_out(_status_target_precision(wb, target_spec, fim_data))
+        except Exception as e:  # noqa: BLE001 - status must still report the rest
+            target_error = f"{type(e).__name__}: {e}"
+        if target_out and target_out["met"] and not pending:
+            next_command = (
+                f"# every target is within its tolerance; more runs are optional "
+                f"(discopt doe extend {wb.path} --n N)"
+            )
+
+    target_profile: dict[str, Any] | None = None
+    profile_error: str | None = None
+    if params.get("profile"):
+        if not target_spec:
+            profile_error = (
+                "no design target is stored in this workbook; set one with "
+                "`discopt doe extend --target ...` (or `new ... --target`)"
+            )
+        elif not completed:
+            profile_error = "no completed runs to profile"
+        else:
+            try:
+                target_profile = _status_target_profile(wb, target_spec, completed)
+            except Exception as e:  # noqa: BLE001 - status must still report the rest
+                profile_error = f"profile failed: {type(e).__name__}: {e}"
+
     return {
         "workbook_path": str(wb.path),
         "template": wb.template_name(),
@@ -2331,13 +2876,190 @@ def do_status(params: dict[str, Any]) -> dict[str, Any]:
         "parameters": fitted,
         "has_fim": fim_data is not None,
         "fim_size": fim_data[0].shape[0] if fim_data is not None else 0,
+        "target": target_spec,
+        "target_precision": target_out,
+        "target_precision_error": target_error,
+        "target_profile": target_profile,
+        "target_profile_error": profile_error,
         "next_command": next_command,
     }
 
 
+def _module_source_hash(spec: str | None) -> str | None:
+    """A hash of a --module experiment's source file, so the cache sees edits to it."""
+    if not spec:
+        return None
+    import hashlib
+    import importlib.util
+
+    try:
+        found = importlib.util.find_spec(spec.split(":", 1)[0])
+        origin = getattr(found, "origin", None)
+        if origin:
+            return hashlib.sha256(Path(origin).read_bytes()).hexdigest()
+    except (ImportError, ValueError, OSError):
+        pass
+    return None
+
+
+def _status_target_profile(
+    wb: Workbook, spec: Mapping[str, Any], completed: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Each target's linearized interval next to its profile-likelihood one.
+
+    Refits the campaign (``campaign_experiment`` over the completed runs) and
+    profiles every target with :func:`~discopt.doe.profile_target`. The
+    classical designs are linear in their coefficients, where the two agree
+    exactly, so they are not profiled.
+    """
+    from discopt.doe.profile import profile_target
+    from discopt.doe.runs import campaign_experiment, symbolic_experiment
+    from discopt.doe.templates import CLASSICAL_TEMPLATES
+
+    template = wb.template_name() or ""
+    if template in CLASSICAL_TEMPLATES:
+        return {
+            "adequate": True,
+            "targets": {},
+            "note": "linear in its coefficients: the linearized precision is exact",
+        }
+    runs, _ = _module_campaign_runs(wb, completed)
+    # The check refits and profiles, so it is cached in the workbook against
+    # exactly what it depends on: the data, the target and the model.
+    import hashlib
+
+    key = hashlib.sha256(
+        json.dumps(
+            {
+                "runs": [{k: v for k, v in r.items() if k != "run_id"} for r in runs],
+                "target": spec,
+                "template": template,
+                "template_args": wb.template_args(),
+                "module": wb.module_callable(),
+                "module_source": _module_source_hash(wb.module_callable()),
+                "sigmas": wb.response_sigmas(),
+            },
+            sort_keys=True,
+            default=str,
+        ).encode()
+    ).hexdigest()
+    cached = wb.metadata().get("target_profile_cache")
+    if cached:
+        try:
+            entry = json.loads(cached)
+            if entry.get("key") == key:
+                return {**entry["result"], "cached": True}
+        except (ValueError, TypeError):
+            pass
+    if template == "symbolic":
+        model: Any = wb.symbolic_model()
+        bounds = {s.name: (s.lb, s.ub) for s in wb.input_specs()}
+        per_run: Any = symbolic_experiment(model, input_bounds=bounds)
+        guess = _symbolic_start_values(wb, model)
+    else:
+        per_run, names = wb.rebuild_experiment()
+        model = per_run
+        guess = _param_values_for_design(names, wb)
+    camp = campaign_experiment(model, runs)
+    data = camp.data_from_runs(runs)
+    est = camp.estimate(data, initial_guess=guess)
+    check = profile_target(camp, data, _target_from_spec(spec), model=per_run, initial_estimate=est)
+    result = {
+        "adequate": check.adequate,
+        "confidence_level": check.confidence_level,
+        "targets": {
+            name: {
+                "estimate": p.estimate,
+                "std_error": p.std_error,
+                "linear_ci": list(p.linear_ci),
+                "profile_ci": None if p.profile_ci is None else list(p.profile_ci),
+                "half_width_ratios": list(p.half_width_ratios),
+                "method": p.method,
+                "adequate": p.adequate,
+                "note": p.note,
+            }
+            for name, p in check.profiles.items()
+        },
+    }
+    # Caching is a convenience: a workbook that cannot be written (read-only,
+    # open in Excel on Windows) must not cost the result just computed.
+    cache_note = None
+    try:
+        wb.set_target_profile_cache({"key": key, "result": _sanitize_json(result)})
+        wb.save()
+    except Exception as e:  # noqa: BLE001
+        cache_note = f"not cached ({type(e).__name__}: {e})"
+    return {**result, "cached": False, "cache_note": cache_note}
+
+
+def _status_target_precision(
+    wb: Workbook, spec: Mapping[str, Any], fim_data: tuple[np.ndarray, list[str]]
+) -> Any:
+    """Precision of the stored target under the FIM `fit` stored (data so far).
+
+    That FIM is on the declared measurement error -- the scale `extend` designs
+    and predicts on -- so the tolerance check does not jump with a residual-based
+    sigma estimate from a handful of runs (the parameters table may use one).
+    """
+    fim, names = fim_data
+    from discopt.doe.linear_design import LINEAR_TEMPLATES
+    from discopt.doe.templates import CLASSICAL_TEMPLATES
+
+    # Templates linear in their coefficients (classical designs and the
+    # parametric linear/RSM/Scheffé ones) resolve the target on their basis:
+    # no Experiment to rebuild, so this also works without discopt.modeling
+    # (the browser app).
+    if wb.template_name() in CLASSICAL_TEMPLATES or wb.template_name() in LINEAR_TEMPLATES:
+        from discopt.doe.linear_design import _basis_evaluator
+
+        input_names = [s.name for s in wb.input_specs()]
+        pnames = list(wb.parameter_names())
+        target = _basis_target_or_error(
+            spec,
+            pnames,
+            input_names,
+            _basis_evaluator(wb.template_name() or "", wb.template_args(), pnames, input_names),
+            wb.response_name(),
+        )
+        if list(pnames) != list(names):
+            raise ValueError(f"the stored FIM is over {list(names)}, the basis over {pnames}")
+        return target.precision(fim)
+    if wb.template_name() == "symbolic":
+        model = wb.symbolic_model()
+        theta = _symbolic_start_values(wb, model)
+        try:
+            from discopt.doe.runs import symbolic_experiment
+        except ImportError:  # no base discopt (the browser): the basis path
+            from discopt.doe.symbolic import basis_evaluator
+
+            target = _basis_target_or_error(
+                spec,
+                list(model.parameter_names),
+                list(model.input_names),
+                basis_evaluator(model, theta),
+                model.response_name,
+                theta,
+            )
+            return target.precision(fim)
+        bounds = {s.name: (s.lb, s.ub) for s in wb.input_specs()}
+        experiment: Any = symbolic_experiment(model, input_bounds=bounds)
+    else:
+        experiment, parameter_names = wb.rebuild_experiment()
+        theta = _param_values_for_design(parameter_names, wb)
+    resolved = _target_from_spec(spec).resolve(experiment, theta)
+    if list(resolved.parameter_names) != list(names):
+        raise ValueError(
+            f"the stored FIM is over {list(names)}, the model's parameters are "
+            f"{list(resolved.parameter_names)}; re-run `discopt doe fit`"
+        )
+    return resolved.precision(fim)
+
+
 def _cmd_status(args) -> int:
     try:
-        out = do_status({"workbook": args.workbook})
+        out = do_status(
+            {"workbook": args.workbook, "profile": bool(getattr(args, "profile", False))}
+        )
     except (FileNotFoundError, ValueError) as e:
         return _fail(args, str(e), workbook_path=args.workbook)
     if args.json:
@@ -2380,8 +3102,66 @@ def _cmd_status(args) -> int:
                 print(f"    {p['name']:>8s} = {est:>12.6g}  ± {se_s}")
         else:
             print("  parameters:  (not fit yet)")
+        if out.get("target"):
+            print(f"  target:      {_describe_target(out['target'])}")
+            if out.get("target_precision"):
+                _print_target_precision(
+                    out, "target precision (data so far, at the declared measurement error):"
+                )
+            elif out.get("target_precision_error"):
+                print(f"    (could not evaluate: {out['target_precision_error']})")
+            else:
+                print("    (precision available after `discopt doe fit`)")
+            prof = out.get("target_profile")
+            if out.get("target_profile_error"):
+                print(f"  profile likelihood check: {out['target_profile_error']}")
+            if prof:
+                level = f"{prof.get('confidence_level', 0.95):.0%}"
+                print(f"  profile likelihood check ({level} intervals):")
+                if prof.get("note"):
+                    print(f"    {prof['note']}")
+                fmt = lambda v: "unbounded" if v is None else f"{v:.5g}"  # noqa: E731
+                for name, t in prof["targets"].items():
+                    if t.get("profile_ci"):
+                        lo, hi = t["profile_ci"]
+                        shown = f"profile [{fmt(lo)}, {fmt(hi)}]"
+                    else:
+                        r = t["half_width_ratios"]
+                        shown = f"two-point check {fmt(r[0])}x / {fmt(r[1])}x"
+                    print(
+                        f"    {name:>12s}  linear [{t['linear_ci'][0]:.5g}, {t['linear_ci'][1]:.5g}]"
+                        f"  {shown}  {'ok' if t['adequate'] else 'CHECK'}"
+                    )
+                    print(f"      {t['note']}")
+                if prof.get("cached"):
+                    print("    (cached: same data and target as the last check)")
+                elif prof.get("cache_note"):
+                    print(f"    ({prof['cache_note']})")
+        elif out.get("target_profile_error"):
+            print(f"  profile likelihood check: {out['target_profile_error']}")
         print(f"  next:        {out['next_command']}")
     return 0
+
+
+def _describe_target(spec: Mapping[str, Any]) -> str:
+    parts = list(spec.get("parameters") or {})
+    parts += [
+        f"{n}={e}" if len(e) <= 40 else f"{n} (formula)"
+        for n, e in (spec.get("expressions") or {}).items()
+    ]
+    for r, pts in (spec.get("responses") or {}).items():
+        parts += (
+            [r]
+            if not pts
+            else [f"{r}@" + ",".join(f"{k}={v:g}" for k, v in p.items()) for p in pts]
+        )
+    tol = spec.get("tolerances") or {}
+    text = ", ".join(parts)
+    if tol:
+        text += "  (tolerances " + ", ".join(f"{k}={v:g}" for k, v in tol.items()) + ")"
+    if spec.get("relative"):
+        text += "  [relative]"
+    return text
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -2532,10 +3312,12 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
     # FIM = XᵀX / σ² is the design's information about the parameters
     # under the user-declared measurement_error. Use the declared σ
     # (not σ̂) so the prior FIM reflects design quality rather than fit
-    # residuals. This is what a later `extend` reads back as its prior, so the
-    # ridge has to stay negligible against it (see _scaled_ridge).
+    # residuals. This is what a later `extend` reads back as its prior. It is
+    # stored without a ridge: `status` judges design targets on it, and a
+    # ridge would make an unidentifiable target look precise. `extend` adds
+    # the ridge itself when it uses this as a prior.
     information = (X.T @ X) / (sigma**2)
-    cum_fim = information + _scaled_ridge(information, n_p)
+    cum_fim = information
 
     # The sigma behind the standard errors above: the residual estimate when
     # there were degrees of freedom to spare, else the declared value. Stored so
@@ -3265,14 +4047,24 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
             f"unknown batch strategy {strategy!r}; choose from {list(_BATCH_STRATEGIES)}"
         )
     wb = Workbook.open(params.workbook)
+    # A targeted symbolic campaign is designed through its Experiment, where
+    # every strategy is available.
+    symbolic_targeted = wb.template_name() == "symbolic" and bool(
+        (params.target or wb.target_spec()) and not params.clear_target
+    )
     if strategy != "greedy" and (
-        wb.template_name() == "symbolic" or wb.template_name() in CLASSICAL_TEMPLATES
+        (wb.template_name() == "symbolic" and not symbolic_targeted)
+        or wb.template_name() in CLASSICAL_TEMPLATES
     ):
         raise DoEError(
             f"batch strategy {strategy!r} is only available for models designed through an "
             f"Experiment (the built-in parametric templates and --module); template "
             f"{wb.template_name()!r} designs its batches greedily."
         )
+    if params.target and params.clear_target:
+        raise DoEError("give a new target or clear_target (--clear-target), not both")
+    if params.clear_target:
+        wb.set_target_spec(None)
     if wb.template_name() == "symbolic":
         return _do_extend_symbolic(wb, params)
     if wb.template_name() in CLASSICAL_TEMPLATES:
@@ -3310,11 +4102,25 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
 
     template = wb.template_name()
     _check_prediction_criterion(wb.criterion(), template)
+    target_spec = _extend_target_spec(wb, params, parameter_names, wb.response_names(), input_names)
+    target = None
+    replicates = None
+    if target_spec:
+        target = _target_from_spec(target_spec)
+        # Replicating a completed run is always a candidate: while the data
+        # leave the FIM singular it can be the only run that helps a target.
+        replicates = [
+            {n: float(r[n]) for n in input_names} for r in completed if _all_inputs(r, input_names)
+        ] or None
 
     cached = wb.read_fim()
+    ridge: np.ndarray | None = None
     if cached is not None and cached[1] == parameter_names:
-        # Written by `fit` at the estimates the design below is centred on.
-        prior_fim = cached[0]
+        # Written by `fit` at the estimates the design below is centred on --
+        # the information the data carry, with no ridge. Add it here, and
+        # remember it, so the predicted target precision can leave it out.
+        ridge = _scaled_ridge(cached[0], len(parameter_names))
+        prior_fim = cached[0] + ridge
     elif not template and completed and _any_blank_response(wb, completed):
         # Not fitted yet and some responses are missing: count only what was
         # measured (a per-run compute_fim would count every response).
@@ -3323,11 +4129,14 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
             info = _measured_fim(experiment, runs, param_values)
         except (ValueError, RuntimeError) as e:
             raise DoEError(f"could not evaluate the information in the completed runs: {e}") from e
-        prior_fim = info + _scaled_ridge(info, len(parameter_names))
+        ridge = _scaled_ridge(info, len(parameter_names))
+        prior_fim = info + ridge
     else:
-        prior_fim = _cumulative_fim_from_completed(
-            experiment, parameter_names, completed, input_names, param_values
+        info = _cumulative_fim_from_completed(
+            experiment, parameter_names, completed, input_names, param_values, ridge=False
         )
+        ridge = _scaled_ridge(info, len(parameter_names))
+        prior_fim = info + ridge
 
     template_args = wb.template_args()
     mixture_total = template_args.get("mixture_total")
@@ -3349,9 +4158,12 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
             feasible_projection=proj,
             n_starts=params.n_starts,
             seed=design_seed,
+            target=target,
+            initial_designs=replicates,
         )
         designs = [single.design]
         criterion_value = float(single.criterion_value)
+        precision = _target_precision_without_ridge(single.target, single.fim, ridge)
     else:
         batch = batch_optimal_experiment(
             experiment,
@@ -3365,12 +4177,18 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
             feasible_projection=proj,
             n_starts=params.n_starts,
             seed=design_seed,
+            target=target,
+            initial_designs=replicates,
         )
         designs = list(batch.designs)
         criterion_value = float(batch.criterion_value)
+        precision = _target_precision_without_ridge(batch.target, batch.joint_fim, ridge)
 
     new_ids = wb.append_runs(batch_idx, designs)
-    wb.log("extend", {"n": params.n, "batch": batch_idx, "batch_strategy": strategy})
+    wb.log(
+        "extend",
+        {"n": params.n, "batch": batch_idx, "batch_strategy": strategy, "target": target_spec},
+    )
     wb.save()
 
     return {
@@ -3386,9 +4204,38 @@ def do_extend(params: ExtendParams) -> dict[str, Any]:
         "batch_strategy": strategy,
         "parameter_names": parameter_names,
         "design_parameters": param_values,
+        "target": target_spec,
+        "target_precision": _precision_out(precision) if precision is not None else None,
         "warnings": warnings_out,
         "next_command": f"discopt doe status {wb.path}",
     }
+
+
+def _extend_target_spec(
+    wb: Workbook,
+    params: ExtendParams,
+    parameter_names: Sequence[str],
+    response_names: Sequence[str],
+    input_names: Sequence[str],
+) -> dict[str, Any] | None:
+    """The target this extend designs for: a new one (stored for next time) or the stored one."""
+    if params.clear_target:
+        return None
+    if params.target:
+        spec = _check_target_spec(params.target, parameter_names, response_names, input_names)
+        wb.set_target_spec(spec)
+        return spec
+    stored = wb.target_spec()
+    if not stored:
+        return None
+    return _check_target_spec(stored, parameter_names, response_names, input_names)
+
+
+def _all_inputs(row: Mapping[str, Any], input_names: Sequence[str]) -> bool:
+    try:
+        return all(math.isfinite(float(row[n])) for n in input_names)
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def _any_blank_response(wb: Workbook, rows: list[dict[str, Any]]) -> bool:
@@ -3427,6 +4274,22 @@ def _do_extend_classical(wb: Workbook, params: ExtendParams) -> dict[str, Any]:
     if criterion not in _CRITERION_CHOICES:
         # Classical workbooks record no optimality criterion of their own.
         criterion = "determinant"
+    target_spec = _extend_target_spec(wb, params, names, wb.response_names(), input_names)
+    target = None
+    if target_spec:
+        from discopt.doe.linear_design import _basis_evaluator
+
+        target = _basis_target_or_error(
+            target_spec,
+            names,
+            input_names,
+            _basis_evaluator(template, args, names, input_names),
+            wb.response_name(),
+        )
+        if wb.criterion() not in _CRITERION_CHOICES:
+            # Augmenting for a target: the weighted variance sum unless the
+            # workbook names a criterion.
+            criterion = "trace"
 
     result = linear_batch_design(
         template,
@@ -3440,10 +4303,14 @@ def _do_extend_classical(wb: Workbook, params: ExtendParams) -> dict[str, Any]:
         prior_fim=prior,
         n_starts=int(params.n_starts),
         seed=wb.seed() + batch_idx,
+        target=target,
     )
     designs = [{nm: float(d[nm]) for nm in input_names} for d in result.designs]
     new_ids = wb.append_runs(batch_idx, designs)
-    wb.log("extend", {"n": params.n, "batch": batch_idx, "mode": "classical-augment"})
+    wb.log(
+        "extend",
+        {"n": params.n, "batch": batch_idx, "mode": "classical-augment", "target": target_spec},
+    )
     wb.save()
 
     # Per-parameter geometric precision gain: how much the confidence intervals
@@ -3464,6 +4331,12 @@ def _do_extend_classical(wb: Workbook, params: ExtendParams) -> dict[str, Any]:
         "criterion_value": float(result.criterion_value),
         "parameter_names": names,
         "precision_gain": gain,
+        "target": target_spec,
+        "target_precision": (
+            _precision_out(target.precision(np.asarray(result.joint_fim, dtype=float)))
+            if target is not None
+            else None
+        ),
         "warnings": [],
         "next_command": f"discopt doe status {wb.path}",
     }
@@ -3597,6 +4470,8 @@ def _cmd_extend(args) -> int:
                 n=int(args.n),
                 n_starts=int(args.n_starts),
                 batch_strategy=str(getattr(args, "batch_strategy", "greedy") or "greedy"),
+                target=_target_spec_from_args(args),
+                clear_target=bool(getattr(args, "clear_target", False)),
             )
         )
     except (DoEError, FileNotFoundError, OSError, ValueError, TypeError, RuntimeError) as e:
@@ -3610,6 +4485,9 @@ def _cmd_extend(args) -> int:
         new_ids = out["new_run_ids"]
         print(f"  batch:        {out['batch']}  (run_ids {min(new_ids)}-{max(new_ids)})")
         print(f"  criterion:    {out['criterion']} = {out['criterion_value']:.6g}")
+        if out.get("target"):
+            print(f"  target:       {_describe_target(out['target'])}")
+            _print_target_precision(out, "predicted target precision after these runs:")
         if out.get("batch_strategy") and out["batch_strategy"] != "greedy":
             print(f"  strategy:     {out['batch_strategy']}")
         if out.get("precision_gain"):
@@ -4038,6 +4916,15 @@ def add_subparser(subparsers) -> None:
     # --- status ---
     p_status = doe_sub.add_parser("status", help="Show campaign state and suggested next step.")
     p_status.add_argument("workbook", help="Path to the .xlsx workbook.")
+    p_status.add_argument(
+        "--profile",
+        action="store_true",
+        help=(
+            "Check the design target's linearized precision against its profile "
+            "likelihood (refits the campaign; slower). Flags targets whose real "
+            "uncertainty the SE understates."
+        ),
+    )
     _add_json(p_status)
     p_status.set_defaults(doe_func=_cmd_status)
 
@@ -4166,6 +5053,12 @@ def add_subparser(subparsers) -> None:
             "(default greedy)."
         ),
     )
+    _add_target_options(p_ext)
+    p_ext.add_argument(
+        "--clear-target",
+        action="store_true",
+        help="Drop the stored design target and design for all parameters again.",
+    )
     _add_json(p_ext)
     p_ext.set_defaults(doe_func=_cmd_extend)
 
@@ -4264,6 +5157,66 @@ def _add_design_search_options(sp) -> None:
         type=int,
         default=10,
         help="Multi-start budget for each single-design search (default 10).",
+    )
+    _add_target_options(sp)
+
+
+def _add_target_options(sp) -> None:
+    """Design for the precision of chosen targets instead of all parameters."""
+    g = sp.add_argument_group(
+        "design target",
+        "Design for the precision of chosen quantities instead of every parameter "
+        "(the others become nuisance parameters). --criterion is then applied to the "
+        "targets: trace = weighted sum of their variances, determinant = D_s, max_variance "
+        "= the worst one. The target is stored in the workbook and reused by `extend`.",
+    )
+    g.add_argument(
+        "--target",
+        action="append",
+        type=_parse_target,
+        default=None,
+        metavar="PARAM[=WEIGHT]",
+        help="A parameter to make precise, optionally weighted (repeatable).",
+    )
+    g.add_argument(
+        "--target-expr",
+        action="append",
+        type=_parse_target_expr,
+        default=None,
+        metavar="NAME=FORMULA",
+        help="A function of the parameters, e.g. 'ratio=k1/k2' (repeatable).",
+    )
+    g.add_argument(
+        "--target-response",
+        action="append",
+        type=_parse_target_response,
+        default=None,
+        metavar="RESPONSE@INPUT=V[,...]",
+        help=(
+            "A model prediction at an operating point, e.g. 'y@T=350' (repeatable; "
+            "repeat a response for several points)."
+        ),
+    )
+    g.add_argument(
+        "--tolerance",
+        action="append",
+        type=_parse_kv_float,
+        default=None,
+        metavar="NAME=TAU",
+        help=(
+            "The standard error wanted on a target (repeatable). Sets its weight to "
+            "1/TAU^2, and `status` reports whether every target meets its tolerance. "
+            "If any is given every target needs one; required to mix parameters, "
+            "formulas and responses."
+        ),
+    )
+    g.add_argument(
+        "--relative-precision",
+        action="store_true",
+        help=(
+            "Measure precision relative to each target's value: tolerances become "
+            "fractions (0.05 = 5%%), weights apply to relative variances."
+        ),
     )
 
 

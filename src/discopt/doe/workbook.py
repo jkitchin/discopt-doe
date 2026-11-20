@@ -519,6 +519,22 @@ class Workbook:
         v = self.metadata().get("criterion")
         return "determinant" if v is None or v == "" else str(v)
 
+    def target_spec(self) -> dict[str, Any] | None:
+        """The campaign's design target (see :meth:`discopt.doe.Target.from_spec`), if any."""
+        raw = self.metadata().get("target")
+        if not raw:
+            return None
+        spec: dict[str, Any] = json.loads(raw)
+        return spec
+
+    def set_target_spec(self, spec: Mapping[str, Any] | None) -> None:
+        """Store (or with ``None`` clear) the design target that `extend` reuses."""
+        self._set_metadata("target", json.dumps(dict(spec)) if spec else "")
+
+    def set_target_profile_cache(self, entry: Mapping[str, Any] | None) -> None:
+        """Store the last ``status --profile`` result with the key it is valid for."""
+        self._set_metadata("target_profile_cache", json.dumps(dict(entry)) if entry else "")
+
     def measurement_error(self) -> float:
         # `or 1.0` would turn a legitimately-stored 0.0 into 1.0; guard on
         # None/"" only so falsy-but-valid values survive the round-trip.

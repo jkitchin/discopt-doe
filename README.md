@@ -142,6 +142,31 @@ front = design_tradeoff(
 print(front.summary())
 ```
 
+Design for what you actually need to know, not for every parameter:
+a prediction at an operating point, a derived quantity, or a few parameters
+with the rest as nuisance, optionally to a tolerance. Then certify how close
+to optimal the design is:
+
+```python
+from discopt.doe import Target, batch_optimal_experiment, certify_design
+
+target = Target.responses(at=[{"T": 365.0, "t": 4.0}], tolerances={"B": 0.004})
+batch = batch_optimal_experiment(
+    experiment, theta, bounds, 2, criterion="trace", target=target, prior_fim=prior
+)
+print(batch.target_precision().summary())          # SE and SE/tolerance per target
+print(certify_design(experiment, theta, batch.designs, target,
+                     design_bounds=bounds, prior_fim=prior).summary())
+```
+
+`sequential_doe(..., target=target, stop_at_tolerance=True)` stops a campaign
+as soon as the goal is met, `robust_optimal_experiment(..., target=target)`
+keeps the design good over parameter uncertainty, and `profile_target` checks
+the promised precision against the profile likelihood once data are in. The
+GUI and the browser app take targets too. See
+[Targeted design](docs/targeted-design.md) and the
+[worked example](docs/notebooks/targeted-design-example.ipynb).
+
 Identifiability diagnostics before you spend beam time:
 
 ```python
@@ -230,6 +255,18 @@ discopt doe new module --module mypkg.partition:Partition -o part.xlsx \
     --sigma B_aq=0.03 --n 8                 # override one response's sigma
 discopt doe fit part.xlsx                   # weighted least squares over every response
 discopt doe extend part.xlsx --n 10 --batch-strategy joint
+```
+
+Any campaign designed around a model can be designed for a **target** instead
+of all parameters. The target is stored in the workbook, reused by `extend`,
+and reported against its tolerance by `status`:
+
+```bash
+discopt doe new symbolic ... --criterion trace \
+    --target-response B@T=365,t=4 --tolerance B=0.004     # a prediction
+#   --target Ea --tolerance Ea=0.02 --relative-precision   # a parameter, to 2 %
+#   --target-expr "half_life=log(2)/k"                     # a formula
+discopt doe extend ccd.xlsx --n 2 --target b12            # augment a CCD for one interaction
 ```
 
 Leave a cell blank when something was not measured. A run counts as done once

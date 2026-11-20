@@ -447,8 +447,14 @@ def _profile_combination(
     target: float,
     initial_step: float | None,
     design: Mapping[str, float] | None,
-) -> ProfileLikelihoodResult:
-    """Profile ``g(theta)`` by minimizing the deviance subject to ``g(theta) = c``."""
+    points: Any = None,
+) -> Any:
+    """Profile ``g(theta)`` by minimizing the deviance subject to ``g(theta) = c``.
+
+    With ``points`` (a sequence of ``c`` values) only the constrained deviance
+    at those values is computed and returned as a list (``None`` where
+    ``g = c`` cannot be met) -- the two-point check of :func:`profile_target`.
+    """
     from scipy.optimize import approx_fprime, minimize
 
     names = list(estimate.parameter_names)
@@ -548,6 +554,21 @@ def _profile_combination(
 
     def solve(c: float, u0: np.ndarray) -> tuple[np.ndarray, float] | None:
         return attempt(c, u0) or attempt(c, u_hat)
+
+    if points is not None:
+        values: list[float | None] = []
+        for c in points:
+            # Walk out from the estimate in a few steps: each solve warm-starts
+            # the next, which is what keeps SLSQP on the right branch.
+            y, val = u_hat, None
+            for frac in (0.25, 0.5, 0.75, 1.0):
+                out = solve(c_hat + frac * (float(c) - c_hat), y)
+                if out is None:
+                    val = None
+                    break
+                y, val = out
+            values.append(val)
+        return values
 
     warnings_out: list[str] = []
 
@@ -735,3 +756,275 @@ def _non_monotone(obj_vals: list[float]) -> bool:
     drops = running_max - arr
     scale = max(arr.max(), 1.0)
     return bool(np.any(drops > 1e-3 * scale))
+
+
+# ---------------------------------------------------------------------------
+# Checking a target's linearized precision against its profile likelihood
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TargetProfile:
+    """One target's linearized (FIM) interval next to its profile-likelihood one.
+
+    Attributes
+    ----------
+    name : str
+    estimate : float
+        ``ψ(θ̂)``.
+    std_error : float
+        Linearized standard error, ``sqrt(Kᵀ M⁻¹ K)``.
+    linear_ci : tuple[float, float]
+        ``ψ̂ ± z·SE`` at the profile's confidence level.
+    profile : ProfileLikelihoodResult or None
+        The full profile of ``ψ`` (constrained re-optimization of every
+        parameter), or ``None`` when the two-point check settled it.
+    half_width_ratios : tuple[float | None, float | None]
+        Profile half-width over linear half-width, below and above the
+        estimate (``None`` where the profile does not close). From the
+        two-point check these are ``sqrt(q / ΔD)`` at the linear interval's
+        ends -- exact for a locally quadratic profile.
+    adequate : bool
+        Both ratios within ``1 ± tolerance``: the linearized precision the
+        design was built on describes the real uncertainty.
+    note : str
+        What to make of it.
+    """
+
+    name: str
+    estimate: float
+    std_error: float
+    linear_ci: tuple[float, float]
+    profile: ProfileLikelihoodResult | None
+    half_width_ratios: tuple[float | None, float | None]
+    adequate: bool
+    note: str
+    method: str = "profile"
+    delta_deviance: tuple[float | None, float | None] | None = None
+
+    @property
+    def profile_ci(self) -> tuple[float | None, float | None] | None:
+        """The profile interval (``None`` when only the two-point check ran)."""
+        if self.profile is None:
+            return None
+        return (self.profile.ci_lower, self.profile.ci_upper)
+
+
+@dataclass
+class TargetProfileCheck:
+    """Result of :func:`profile_target`: one :class:`TargetProfile` per target."""
+
+    profiles: dict[str, TargetProfile]
+    confidence_level: float
+    tolerance: float
+
+    @property
+    def adequate(self) -> bool:
+        """Every target's linearized interval matches its profile."""
+        return all(p.adequate for p in self.profiles.values())
+
+    def summary(self) -> str:
+        pct = f"{self.confidence_level:.0%}"
+        lines = [f"Target precision: linearized vs profile likelihood ({pct} intervals)"]
+        for p in self.profiles.values():
+            if p.profile is None:
+                r = p.half_width_ratios
+                prof = f"two-point check {_fmt(r[0])}x / {_fmt(r[1])}x"
+            else:
+                prof = f"[{_fmt(p.profile.ci_lower)}, {_fmt(p.profile.ci_upper)}]"
+            lines.append(
+                f"  {p.name}: {p.estimate:.5g}  linear [{p.linear_ci[0]:.5g}, {p.linear_ci[1]:.5g}]"
+                f"  profile {prof}  -> {'ok' if p.adequate else 'CHECK'}"
+            )
+            lines.append(f"      {p.note}")
+        return "\n".join(lines)
+
+
+def _fmt(v: float | None) -> str:
+    return "unbounded" if v is None else f"{v:.5g}"
+
+
+def _note(
+    se: float, below: float | None, above: float | None, ok: bool, *, two_point: bool = False
+) -> str:
+    """What a target's linear-vs-profile comparison means for the user."""
+    how = " (two-point check)" if two_point else ""
+    if not np.isfinite(se):
+        return "not estimable from these data on the linearization; see the profile."
+    if two_point and (below is None or above is None):
+        side = "lower" if below is None else "upper"
+        return (
+            f"the constrained fit at the linear interval's {side} end could not be evaluated "
+            "(the end may lie outside what the parameter bounds allow); see the full profile."
+        )
+    if below is None or above is None:
+        side = "below" if below is None else "above"
+        return (
+            f"the profile does not close {side} the estimate{how}: the data do not bound the "
+            "target there, and the linearized SE understates its uncertainty."
+        )
+    if ok:
+        return f"the linearized precision matches the profile{how}; tolerance checks are reliable."
+    wider = max(below, above)
+    return (
+        f"the profile interval is {below:.2f}x / {above:.2f}x the linearized half-width "
+        f"(below / above){how}; "
+        + (
+            "the linearization is optimistic -- plan more runs than the design predicts."
+            if wider > 1
+            else "the linearization is pessimistic here."
+        )
+    )
+
+
+def profile_target(
+    experiment: Experiment,
+    data: dict,
+    target: Any,
+    *,
+    model: Any = None,
+    confidence_level: float = 0.95,
+    tolerance: float = 0.25,
+    max_steps: int = 40,
+    initial_estimate: EstimationResult | None = None,
+    design: Mapping[str, float] | None = None,
+    quiet: bool = True,
+    mode: str = "auto",
+) -> TargetProfileCheck:
+    """Check a design target's linearized precision with its profile likelihood.
+
+    Targeted designs are planned, and judged against tolerances, on the
+    linearized covariance ``Σ_ψ = Kᵀ M⁻¹ K`` at the current estimate. With few
+    data, or a target that is strongly nonlinear in the parameters (a ratio, a
+    prediction far from the data, a time of maximum), that can be optimistic,
+    pessimistic or lopsided. This profiles each target -- minimizing the
+    deviance over every parameter subject to ``ψ(θ) = c`` -- and compares the
+    resulting interval with ``ψ̂ ± z·SE``.
+
+    Parameters
+    ----------
+    experiment, data
+        What the parameters are fitted with, as for :func:`profile_likelihood`
+        (for a campaign of runs: ``campaign_experiment(model, runs)`` and its
+        ``data_from_runs(runs)``).
+    target : Target
+        The design target. It is evaluated on ``model``.
+    model : Experiment, optional
+        The model the target is written against, when it differs from the
+        fitted one -- e.g. the per-run model of a campaign, for a
+        ``Target.responses`` at an operating point. Default ``experiment``.
+    confidence_level : float, default 0.95
+    tolerance : float, default 0.25
+        A target is ``adequate`` when each profile half-width is within
+        ``1 ± tolerance`` of the linearized one.
+    max_steps, initial_estimate, design, quiet
+        As for :func:`profile_likelihood`.
+    mode : {"auto", "quick", "full"}, default "auto"
+        ``"quick"``: the two-point check only -- the constrained deviance at
+        the linear interval's two ends, ``ψ̂ ± z·SE`` (two fits per target).
+        For a profile that is locally quadratic with half-width ``h`` the
+        deviance there is ``q (z·SE / h)²``, so ``sqrt(q / ΔD)`` is the
+        half-width ratio. ``"full"``: the whole profile. ``"auto"``: the
+        two-point check, then the full profile for the targets it flags.
+
+    Returns
+    -------
+    TargetProfileCheck
+    """
+    from discopt.doe.targets import Target, _layout
+
+    if not isinstance(target, Target):
+        raise TypeError("profile_target needs a Target (it evaluates the targets nonlinearly)")
+    if mode not in ("auto", "quick", "full"):
+        raise ValueError(f"mode must be 'auto', 'quick' or 'full', got {mode!r}")
+    extra: dict[str, Any] = {"design": dict(design)} if design else {}
+    with quiet_solver(quiet):
+        est = initial_estimate or estimate_parameters(experiment, data, **extra)
+    m = experiment if model is None else model
+    theta_hat = {n: float(est.parameters[n]) for n in est.parameter_names}
+    resolved = target.resolve(m, theta_hat)
+    names_fim = list(est.parameter_names)
+    order = [names_fim.index(n) for n in resolved.parameter_names]
+    fim = np.asarray(est.fim, dtype=float)[np.ix_(order, order)]
+    prec = resolved.precision(fim)
+    lay = _layout(m, theta_hat)
+    values_hat = target._values(m, theta_hat, lay)
+    z = float(np.sqrt(chi2.ppf(confidence_level, df=1)))
+
+    profiles: dict[str, TargetProfile] = {}
+    for name in resolved.names:
+        se = float(prec.std[name])
+        psi = float(values_hat[name])
+        lin = (psi - z * se, psi + z * se)
+
+        def g(theta: Mapping[str, float], _n: str = name) -> float:
+            return float(target._values(m, theta, lay)[_n])
+
+        half = z * se
+        q = float(chi2.ppf(confidence_level, df=1))
+        quick: TargetProfile | None = None
+        if mode in ("auto", "quick") and np.isfinite(se) and half > 0:
+            with quiet_solver(quiet):
+                devs = _profile_combination(
+                    experiment,
+                    data,
+                    est,
+                    expression=None,
+                    function=g,
+                    name=name,
+                    confidence_level=confidence_level,
+                    max_steps=max_steps,
+                    target=0.2,
+                    initial_step=None,
+                    design=design,
+                    points=[lin[0], lin[1]],
+                )
+            dd = tuple(
+                None if v is None else max(float(v) - float(est.objective), 0.0) for v in devs
+            )
+            ratios = tuple(None if x is None or x <= 0 else float(np.sqrt(q / x)) for x in dd)
+            ok = all(r is not None and abs(r - 1.0) <= tolerance for r in ratios)
+            quick = TargetProfile(
+                name,
+                psi,
+                se,
+                lin,
+                None,
+                ratios,  # type: ignore[arg-type]
+                ok,
+                _note(se, ratios[0], ratios[1], ok, two_point=True),
+                "two-point",
+                dd,  # type: ignore[arg-type]
+            )
+            if ok or mode == "quick":
+                profiles[name] = quick
+                continue
+
+        prof = profile_likelihood(
+            experiment,
+            data,
+            function=g,
+            name=name,
+            confidence_level=confidence_level,
+            max_steps=max_steps,
+            initial_estimate=est,
+            initial_step=(0.5 * se if np.isfinite(se) and se > 0 else None),
+            design=design,
+            quiet=quiet,
+        )
+        below = None if prof.ci_lower is None or not half > 0 else (psi - prof.ci_lower) / half
+        above = None if prof.ci_upper is None or not half > 0 else (prof.ci_upper - psi) / half
+        ok = all(r is not None and abs(r - 1.0) <= tolerance for r in (below, above))
+        profiles[name] = TargetProfile(
+            name,
+            psi,
+            se,
+            lin,
+            prof,
+            (below, above),
+            ok,
+            _note(se, below, above, ok),
+            "profile",
+            None if quick is None else quick.delta_deviance,
+        )
+    return TargetProfileCheck(profiles, confidence_level, tolerance)

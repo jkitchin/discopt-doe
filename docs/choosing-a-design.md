@@ -272,6 +272,16 @@ rather than one point at a time — the information matrix is additive over
 independent runs, so a joint design beats picking the best point $N$ times
 {cite:p}`Galvanin2007,Sandrin2025`. See {doc}`notebooks/tutorial_batch_doe`.
 
+**Only some quantities matter.** With many parameters and a small budget, the
+question is often narrower than "all the parameters": a prediction at the
+plant's operating point, a derived quantity such as a half-life, or two of
+seven parameters. A *targeted* design spends the runs on those, and the other
+parameters become nuisance parameters. It can make them precise with fewer runs than
+there are parameters, and it can stop as soon as they meet a tolerance. See
+{doc}`targeted-design` and the {doc}`worked example
+<notebooks/targeted-design-example>`. On the command line, use `--target`,
+`--target-expr`, `--target-response` and `--tolerance`.
+
 **Two rival models.** When the question is *which* model rather than *what
 parameters*, design for the condition where the models disagree most relative
 to their prediction uncertainty {cite:p}`hunter1965,buzzi-ferraris-1984`. See

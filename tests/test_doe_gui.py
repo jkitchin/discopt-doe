@@ -287,3 +287,65 @@ def test_save_responses_writes_every_response_column(tmp_path: Path) -> None:
     assert rows[1]["A_org"] == 0.4 and rows[1]["A_aq"] is None
     assert rows[2]["A_org"] is None and rows[2]["A_aq"] == 0.9
     assert len(wb.completed_runs()) == 2
+
+
+def test_app_shows_the_design_target(monkeypatch, tmp_path: Path) -> None:
+    """A workbook designed for a target: the target panel, its precision after a
+    fit, and the extend panel's keep/replace/clear control all render."""
+    pytest.importorskip("streamlit.testing.v1")
+    from discopt.doe.cli import NewParams, do_fit, do_new
+    from discopt.doe.workbook import Workbook
+    from streamlit.testing.v1 import AppTest
+
+    wb_path = tmp_path / "gui_target.xlsx"
+    do_new(
+        NewParams(
+            output=wb_path,
+            n=3,
+            inputs=[("x", -1.0, 1.0)],
+            response_name="y",
+            measurement_error=0.1,
+            criterion="trace",
+            seed=0,
+            n_starts=3,
+            template="polynomial-1d",
+            degree=2,
+            target={"parameters": {"b1": 1.0}, "tolerances": {"b1": 0.5}},
+        )
+    )
+    wb = Workbook.open(wb_path)
+    wb.record_responses(
+        {
+            int(r["run_id"]): 1.0 + 2.0 * float(r["x"]) + 0.01 * int(r["run_id"])
+            for r in wb.pending_runs()
+        }
+    )
+    wb.save()
+    do_fit({"workbook": str(wb_path)})
+    monkeypatch.setenv("DISCOPT_DOE_WORKBOOK", str(wb_path))
+
+    app_path = importlib.util.find_spec("discopt.doe.gui.app").origin
+    at = AppTest.from_file(str(app_path), default_timeout=60)
+    at.run()
+    assert not at.exception, [str(e) for e in at.exception]
+    assert not at.error, [e.value for e in at.error]
+    assert any("Design target" in m.value for m in at.markdown)
+    assert any("within its tolerance" in s.value for s in at.success)
+    assert any(r.label == "Design target" for r in at.radio)
+
+
+def test_target_text_parsing() -> None:
+    from discopt.doe.cli import DoEError, target_spec_from_text
+
+    spec = target_spec_from_text(
+        "k1; ratio=k1/k2\ny@T=365,t=4; w=2", "k1=0.1, ratio=0.2; y=0.01, w=1"
+    )
+    assert spec["parameters"] == {"k1": 1.0, "w": 2.0}
+    assert spec["expressions"] == {"ratio": "k1/k2"}
+    assert spec["responses"] == {"y": [{"T": 365.0, "t": 4.0}]}
+    assert spec["tolerances"] == {"k1": 0.1, "ratio": 0.2, "y": 0.01, "w": 1.0}
+    assert target_spec_from_text("  ", "") is None
+    with pytest.raises(DoEError):
+        target_spec_from_text("", "k=1")
+    with pytest.raises(DoEError):
+        target_spec_from_text("y@T", "")

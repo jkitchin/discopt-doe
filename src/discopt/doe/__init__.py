@@ -214,7 +214,14 @@ _SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
         "model_based_optimize_round",
     ),
     "optimize": ("OptimizationCriterion", "OptimizationRoundResult", "optimize_round"),
-    "profile": ("ProfileLikelihoodResult", "profile_all", "profile_likelihood"),
+    "profile": (
+        "ProfileLikelihoodResult",
+        "TargetProfile",
+        "TargetProfileCheck",
+        "profile_all",
+        "profile_likelihood",
+        "profile_target",
+    ),
     "screening": (
         "FactorialDesign",
         "HalfNormalScores",
@@ -306,6 +313,19 @@ _SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
     ),
     "tradeoff": ("TradeoffPoint", "TradeoffResult", "design_tradeoff"),
     "surrogate": ("GPSurrogate", "Surrogate", "coerce_surrogate", "gp_surrogate"),
+    "certificate": (
+        "ApproximateTargetDesign",
+        "DesignCertificate",
+        "approximate_targeted_design",
+        "certify_design",
+    ),
+    "targets": (
+        "ResolvedTarget",
+        "Target",
+        "TargetPrecision",
+        "target_precision",
+        "validate_target_spec",
+    ),
     "templates": (
         "TEMPLATE_NAMES",
         "build_template",
@@ -329,6 +349,15 @@ _EXPORTS: dict[str, str] = {
 _ALIASES: dict[str, tuple[str, str]] = {"SURROGATE_PRESETS": ("surrogate", "PRESETS")}
 
 __all__ = [
+    "ApproximateTargetDesign",
+    "DesignCertificate",
+    "approximate_targeted_design",
+    "certify_design",
+    "ResolvedTarget",
+    "Target",
+    "TargetPrecision",
+    "target_precision",
+    "validate_target_spec",
     "estimate_parameters",
     "MSESubsetResult",
     "mse_subset_selection",
@@ -489,6 +518,9 @@ __all__ = [
     "response_surface_template",
     "profile_all",
     "profile_likelihood",
+    "profile_target",
+    "TargetProfile",
+    "TargetProfileCheck",
     "sample_simplex",
     "scheffe_linear_template",
     "scheffe_quadratic_template",

@@ -269,6 +269,86 @@ book.save("/work/upload.xlsx")
   if (!fit.converged) throw new Error("solver did not converge");
 });
 
+say("\n── design targets (no jax: the basis path) ──");
+
+check("a user-defined model designed for one parameter, fewer runs than parameters", () => {
+  // One run cannot identify k0 and Ea together, but with a target on Ea the
+  // design is built (through the jax-free basis search) and reports honestly.
+  const out = call(
+    "create_design",
+    JSON.stringify({ ...ARRHENIUS, n: 2, criterion: "trace", targets: "Ea", tolerances: "" }),
+  );
+  if (out.new_run_ids.length !== 2) throw new Error(`got ${out.new_run_ids.length} runs`);
+  if (!out.target || out.target.parameters.Ea !== 1) throw new Error("target not stored");
+  const prec = out.target_precision;
+  if (!prec || !(prec.std_errors.Ea > 0)) throw new Error(`no precision: ${JSON.stringify(prec)}`);
+});
+
+check("a linear template designed for its slope puts the runs at the ends", () => {
+  const out = call(
+    "create_design",
+    JSON.stringify({
+      template: "polynomial-1d",
+      factors: bounds(["x", -1, 1]),
+      degree: 2,
+      n: 2,
+      criterion: "trace",
+      targets: "b1",
+      tolerances: "b1=0.2",
+      response: "y",
+      error: 0.1,
+      seed: 0,
+    }),
+  );
+  const xs = out.designs.map((d) => d.x).sort((a, b) => a - b);
+  if (Math.abs(xs[0] + 1) > 1e-3 || Math.abs(xs[1] - 1) > 1e-3) throw new Error(`runs at ${xs}`);
+  if (out.target_precision.ratios.b1 === undefined) throw new Error("no tolerance ratio");
+});
+
+check("a targeted linear template reports its target after the fit", () => {
+  // Review of PR #53: status rebuilt the Experiment (needs discopt.modeling,
+  // absent here), so the target block silently never appeared.
+  call(
+    "create_design",
+    JSON.stringify({
+      template: "linear",
+      factors: bounds(["x", -1, 1]),
+      n: 3,
+      criterion: "trace",
+      targets: "b1",
+      tolerances: "b1=0.5",
+      response: "y",
+      error: 0.1,
+      seed: 0,
+    }),
+  );
+  pyodide.runPython(`
+import shutil, openpyxl
+shutil.copy("/work/design.xlsx", "/work/upload.xlsx")
+book = openpyxl.load_workbook("/work/upload.xlsx")
+sheet = book["runs"]
+head = [c.value for c in sheet[1]]
+col = head.index("y") + 1
+for i, row in enumerate(sheet.iter_rows(min_row=2)):
+    vals = dict(zip(head, [c.value for c in row]))
+    if vals.get("run_id") is None:
+        continue
+    row[col - 1].value = 1.0 + 2.0 * float(vals["x"]) + 0.01 * i
+book.save("/work/upload.xlsx")
+`);
+  const out = call("run_fit", "/work/upload.xlsx");
+  if (!out.target_precision) throw new Error("no target precision after the fit");
+  if (!(out.target_precision.std_errors.b1 > 0)) throw new Error("no SE for b1");
+});
+
+check("a bad target is a message, not a crash", () => {
+  const py = pyodide.globals.get("create_design");
+  const out = JSON.parse(py(JSON.stringify({ ...ARRHENIUS, targets: "nope" })));
+  py.destroy();
+  if (out.ok) throw new Error("expected a refusal");
+  if (!/unknown parameter/.test(out.error)) throw new Error(out.error);
+});
+
 say("\n── round trip: design → fill → fit → anova ──");
 call(
   "create_design",

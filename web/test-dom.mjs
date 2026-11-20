@@ -483,6 +483,29 @@ await scenario(
 
 // ── the analysis must not depend on a frame ever being painted ──────
 
+await scenario(
+  "a campaign designed for a target shows the target against its tolerance after the fit",
+  {
+    inspect_workbook: inspected([1, 2, 3, 4]),
+    run_fit: () => ({
+      ...FIT,
+      target: { parameters: { b1: 1 }, tolerances: { b1: 0.5 }, relative: false },
+      target_precision: {
+        estimable: true,
+        std_errors: { b1: 0.25 },
+        ratios: { b1: 0.5 },
+        met: true,
+      },
+    }),
+    run_anova: () => ANOVA,
+  },
+  {
+    contains: ["Design target", "within its tolerance", "SE / tolerance"],
+    absent: ["did not run"],
+    download: true,
+  },
+);
+
 {
   // A hidden, backgrounded or occluded tab gets no requestAnimationFrame
   // callbacks at all — and switching back to Excel right after dropping a

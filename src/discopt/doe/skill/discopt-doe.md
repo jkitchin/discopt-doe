@@ -3,9 +3,11 @@ name: discopt-doe
 description: >-
   Design optimal experiments with discopt (requires the discopt-doe plugin) —
   check identifiability, explore the design space, and recommend D/A/E-optimal
-  conditions for a model with unknown parameters. Supports
-  sequential/active-learning DoE. Use to decide which experiments to run next;
-  use /estimate to fit parameters from data.
+  conditions for a model with unknown parameters, or *targeted* designs that
+  make only chosen quantities precise (some parameters, a formula, a prediction
+  at an operating point) with tolerances, certified efficiency and robustness.
+  Supports sequential/active-learning DoE. Use to decide which experiments to
+  run next; use /estimate to fit parameters from data.
 license: EPL-2.0
 argument-hint: '[model + design vars + nominal params, e.g. "y=A*exp(-Ea/(R*T)) design T in [300,500]"]'
 allowed-tools: Read Grep Glob Bash Write
@@ -68,6 +70,33 @@ You are a design of experiments assistant for discopt. Given a model with unknow
     `condition_number` (ME), and for prediction quality over the factor box
     `average_variance` (I) and `max_variance` (G).
 
+  **Design targets in the CLI** (parametric templates, `module`, `symbolic`,
+  `--use-linear-design`, and `extend` of a classical design). Use them when the
+  user needs some quantities, not every parameter:
+  ```bash
+  discopt doe new symbolic ... --criterion trace \
+      --target Ea                                  # a parameter (repeatable; NAME=WEIGHT)
+      --target-expr "half_life=log(2)/k"           # a formula in the parameters
+      --target-response "y@T=365,t=4"              # a prediction at an operating point
+      --tolerance Ea=0.02 --relative-precision     # SE wanted (all targets, if any)
+  discopt doe extend c.xlsx --n 2                  # reuses the stored target
+  discopt doe extend c.xlsx --n 2 --target b12     # replace it (CCD: one interaction)
+  discopt doe extend c.xlsx --n 2 --clear-target   # back to all parameters
+  discopt doe status c.xlsx                        # SE and SE/tolerance after `fit`
+  discopt doe status c.xlsx --profile              # is that SE honest? (profile likelihood)
+  ```
+  - Use `--criterion trace` with targets: the weighted sum of target variances,
+    or the sum of (SE/tolerance)² with tolerances. Use `max_variance` for the
+    worst target, and `determinant` for D_s, where weights have no effect.
+  - Mixing parameters, formulas and responses requires `--tolerance` on every
+    target, because they are in different units.
+  - With a target, `new symbolic` accepts fewer runs than parameters, and the
+    reported precision says "not estimable" when the runs cannot identify the
+    target.
+  - `status` judges the tolerance at the declared measurement error, the scale
+    the designs are predicted on. The parameters table may use the residual
+    sigma instead, so the two SEs can differ.
+
 ## Arguments
 
 $ARGUMENTS
@@ -91,6 +120,20 @@ Identify:
 - Design variables (with bounds)
 - Response expressions
 - Measurement error (default σ = 0.05 if not specified)
+
+### 1b. Decide what the user needs to know
+
+Ask, or infer from the request: does the user need **every parameter**, or
+**specific quantities**? Examples of specific quantities: a prediction at the
+operating point, a derived quantity (half-life, optimal time, selectivity), a
+few parameters with the rest as nuisance, or a precision goal ("to 2 %",
+"±0.005"). Then:
+
+- every parameter → the D/A/E workflow below;
+- specific quantities → **targeted design** (section below). It needs fewer
+  runs, it can work with fewer runs than parameters, and it can stop when a
+  tolerance is met. Say so explicitly when the user asks about one quantity
+  but would otherwise get a D-optimal design.
 
 ### 2. Check identifiability first
 
@@ -171,6 +214,64 @@ Summarize:
 - If multiple criteria disagree: explain the tradeoffs
 - Suggest running `/estimate` with data collected at the optimal design
 
+## Targeted design mode
+
+Every target is a matrix ``K = ∂ψ/∂θ``. The design criterion is applied to
+``Σ_ψ = Kᵀ M⁺ K`` instead of ``M⁻¹``, and nuisance parameters are marginalized
+(through the Schur complement), not dropped.
+
+```python
+from discopt.doe import (Target, optimal_experiment, batch_optimal_experiment,
+                         certify_design, robust_optimal_experiment, sequential_doe)
+
+t = Target.parameters(["Ea1", "Ea2"])                         # D_s / A_s; others nuisance
+t = Target.parameters({"k1": 1, "k2": 0.1}, relative=True)    # graded weights, relative
+t = Target.expression({"half_life": "log(2)/k"})              # formula (sympy gradient)
+t = Target.function(lambda th: jnp.log(th["k2"]/th["k1"]), ["r"])  # any JAX function
+t = Target.responses(at=[{"T": 365.0}], tolerances={"y": 0.01})    # prediction ± tol
+t = Target.parameters(tolerances={"Ea": 0.02}, relative=True) + Target.responses(
+        at=[{"T": 365.0}], tolerances={"y": 0.01})                 # mixed: tolerances
+
+res = batch_optimal_experiment(exp, theta, bounds, 3, criterion="trace", target=t,
+                               prior_fim=prior, strategy="joint")
+print(res.target_precision().summary())          # SE, SE/tol, met?
+cert = certify_design(exp, theta, res.designs, t, design_bounds=bounds, prior_fim=prior)
+print(cert.summary())                             # certified efficiency >= x %
+```
+
+- **Criterion:** `"trace"` (default choice; weighted variance sum), `"max_variance"`
+  (worst target; the right one for "every goal within tolerance"),
+  `"determinant"` (D_s; weights irrelevant), `"min_eigenvalue"`.
+- **Always compare** the targeted design with the D-optimal one on the user's
+  target (`res.target.precision(fim)` for both). Report the SE ratio, and
+  (ratio)² as the factor in runs it saves.
+- **Certify** with `certify_design`. It works for every target criterion; the
+  minimax ones go through their dual (`cert.approximate.dual` shows which
+  targets bind), and `condition_number` needs the targets to be an invertible
+  set of all parameters. By default the bound is relative to a candidate grid
+  refined between its points. For a symbolic model, `global_bound=True` makes it
+  hold over the whole region (`cert.region_certified`) when the formula admits a
+  finite bound. A bound well below 100 % means the search is stuck: try
+  `strategy="joint"`, more `n_starts`, or `initial_designs`.
+- **Check the SE is honest** once there are data:
+  `profile_target(campaign, data, target, model=per_run_experiment)` compares
+  each target's linear interval with its profile likelihood (a two-point
+  check, then the full profile only for flagged targets). Flag `CHECK`
+  results to the user (ratios, half-lives and far predictions are typical),
+  and plan more runs than the linearized design predicts.
+- **Few runs, singular FIM:** say when the targets are estimable even though
+  the parameters are not. If the only useful run is a replicate of an existing
+  one, pass those runs as `initial_designs`.
+- **Nonlinear model, uncertain guess:** `robust_optimal_experiment(exp, samples,
+  bounds, criterion="A", n_experiments=N, target=t)` (K re-resolved per sample).
+- **Stopping rule:** `sequential_doe(..., target=t, stop_at_tolerance=True)`.
+  Each `DoERound` carries `target_precision`.
+- **GUI / browser app:** both take targets as text (`k1; ratio=k1/k2;
+  y@T=365,t=4`) with a tolerances field; `discopt.doe.cli.target_spec_from_text`
+  parses the same notation.
+- Worked example: `docs/notebooks/targeted-design-example.ipynb`. Theory:
+  `docs/targeted-design.md`.
+
 ## Sequential DoE mode
 
 If the user asks for sequential DoE or has existing data:
@@ -200,5 +301,6 @@ for r in history:
 - Always check identifiability before optimizing
 - Use reasonable parameter bounds (not ±1e19)
 - Default measurement error to σ = 0.05 if not specified
-- Present all four design criteria for comparison
+- Present all four design criteria for comparison (for a targeted question,
+  compare the targeted design with the D-optimal one on the target instead)
 - Keep the Experiment class self-contained and readable

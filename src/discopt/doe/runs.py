@@ -214,6 +214,9 @@ class _SymbolicExperiment(Experiment):
     per_run: _PerRun
     input_bounds: dict[str, tuple[float, float]] = field(default_factory=dict)
     name: str = "symbolic"
+    # The SymbolicModel it came from: its formula is what a certified global
+    # bound over the design region is built from (discopt.doe.certificate).
+    symbolic_model: Any = None
 
     def create_model(self, **kwargs: Any) -> ExperimentModel:
         import discopt.modeling as dm
@@ -272,6 +275,7 @@ def symbolic_experiment(
         per_run=_per_run(model, parameter_bounds=parameter_bounds),
         input_bounds=dict(input_bounds or {}),
         name=name,
+        symbolic_model=model,
     )
 
 

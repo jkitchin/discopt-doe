@@ -78,6 +78,29 @@ CRITERION_ALIASES = {
 # Criteria where a larger value is a better design.
 _MAXIMIZED = frozenset({D_OPTIMAL, E_OPTIMAL})
 
+# Names of the criteria on a design target (discopt.doe.targets); the region
+# criteria map to their targeted counterparts.
+_TARGET_NAMES = {
+    I_OPTIMAL: "average_variance",
+    G_OPTIMAL: "max_variance",
+    "average_variance": "average_variance",
+    "max_variance": "max_variance",
+}
+
+
+def _is_target(region: Any) -> bool:
+    return bool(getattr(region, "is_target", False))
+
+
+def target_criterion_name(criterion: str) -> str:
+    """A criterion name or letter as the targeted criteria spell it."""
+    name = str(criterion)
+    if name in _TARGET_NAMES:
+        return _TARGET_NAMES[name]
+    name = normalize_criterion(name)
+    return _TARGET_NAMES.get(name, name)
+
+
 # Returned by the objective when the FIM is singular or the criterion is
 # non-finite, so a failed evaluation loses to every real one without letting
 # NaN propagate into the optimizer.
@@ -405,6 +428,10 @@ def evaluate_criterion(
     Because the FIM carries ``1/σ²``, both are variances of the fitted
     response in the response's own units. A singular FIM scores ``inf``.
     """
+    if _is_target(region):
+        # A design target (discopt.doe.targets.ResolvedTarget): the criterion
+        # is taken on the targets' covariance.
+        return region.criterion(fim, target_criterion_name(criterion))
     criterion = normalize_criterion(criterion)
     if criterion == D_OPTIMAL:
         sign, logdet = np.linalg.slogdet(fim)
@@ -429,6 +456,8 @@ def evaluate_criterion(
 
 def is_maximized(criterion: str) -> bool:
     """Return True when a larger criterion value means a better design."""
+    if str(criterion) in ("average_variance", "max_variance"):
+        return False
     return normalize_criterion(criterion) in _MAXIMIZED
 
 
@@ -805,7 +834,9 @@ def _search_one_point(
             f = basis(x)
             # Rank-1 update: one more run adds f fᵀ/σ² to the information.
             trial = accumulated + np.outer(f, f) * inv_var + ridge
-            if criterion == G_OPTIMAL and region is not None:
+            if _is_target(region):
+                value = region.criterion(trial, target_criterion_name(criterion), smooth=True)
+            elif criterion == G_OPTIMAL and region is not None:
                 # Follow a smooth envelope of the maximum; callers re-score exactly.
                 value = region.soft_max_variance(trial)
             else:
@@ -913,14 +944,17 @@ def _joint_polish(
         F = np.array([basis(z[i * k : (i + 1) * k]) for i in range(n)], dtype=np.float64)
         return base + F.T @ F * inv_var
 
+    # Minimized internally; a maximized criterion (D, E) is negated.
+    sign = -1.0 if is_maximized(criterion) else 1.0
+
     def exact(z: np.ndarray) -> float:
-        return evaluate_criterion(fim_of(z), criterion, region=region)
+        return sign * evaluate_criterion(fim_of(z), criterion, region=region)
 
     z = np.concatenate(points)
     best_val = exact(z)
     bounds = [(lo, hi) for _ in range(n) for lo, hi in zip(lbs, ubs)]
     lo_all, hi_all = np.tile(lbs, n), np.tile(ubs, n)
-    qs = (64.0, 512.0) if criterion == G_OPTIMAL else (None,)
+    qs = (64.0, 512.0) if criterion == G_OPTIMAL and not _is_target(region) else (None,)
     # Symmetric designs are often saddle points of I and G (the gradient
     # vanishes by symmetry), so also start from a few small random jitters.
     jitter_rng = np.random.default_rng(12345)
@@ -933,7 +967,7 @@ def _joint_polish(
         def smooth(zz: np.ndarray, q=q) -> float:
             M = fim_of(zz)
             if q is None:
-                v = evaluate_criterion(M, criterion, region=region)
+                v = sign * evaluate_criterion(M, criterion, region=region)
             else:
                 assert region is not None
                 v = region.soft_max_variance(M, q=q)
@@ -947,7 +981,9 @@ def _joint_polish(
             continue
         z_new = np.clip(np.asarray(res.x, dtype=np.float64), lo_all, hi_all)
         val = exact(z_new)
-        if np.isfinite(val) and val < best_val - 1e-12 * max(1.0, abs(best_val)):
+        if np.isfinite(val) and (
+            not np.isfinite(best_val) or val < best_val - 1e-12 * max(1.0, abs(best_val))
+        ):
             z, best_val = z_new, val
     new_points = [z[i * k : (i + 1) * k].copy() for i in range(n)]
     return new_points, fim_of(z)
@@ -1131,6 +1167,7 @@ def linear_batch_design(
     exchange_passes: int = 2,
     region: DesignRegion | Sequence[Mapping[str, float]] | np.ndarray | None = None,
     region_bounds: Mapping[str, tuple[float, float]] | None = None,
+    target: Any = None,
 ) -> LinearBatchDesignResult:
     """Design ``n_experiments`` runs greedily, accumulating information.
 
@@ -1219,6 +1256,7 @@ def linear_batch_design(
         exchange_passes=exchange_passes,
         region=region,
         region_bounds=region_bounds,
+        target=target,
     )
 
 
@@ -1240,6 +1278,7 @@ def batch_design_from_basis(
     exchange_passes: int = 2,
     region: DesignRegion | Sequence[Mapping[str, float]] | np.ndarray | None = None,
     region_bounds: Mapping[str, tuple[float, float]] | None = None,
+    target: Any = None,
 ) -> LinearBatchDesignResult:
     """Greedy batch design driven by an arbitrary Jacobian-row provider.
 
@@ -1258,10 +1297,29 @@ def batch_design_from_basis(
 
     Other parameters are as :func:`linear_batch_design`; ``region`` and
     ``region_bounds`` (for the I and G criteria) as :func:`linear_optimal_design`.
+
+    ``target`` (a :class:`~discopt.doe.targets.ResolvedTarget` over
+    ``parameter_names``, e.g. from :func:`~discopt.doe.targets.basis_target`)
+    evaluates ``criterion`` on the targets instead of all parameters. The
+    exchange and joint-polish passes then run as soon as the *targets* are
+    estimable, which can be with fewer runs than parameters.
     """
     if n_experiments < 1:
         raise ValueError(f"n_experiments must be >= 1, got {n_experiments}")
-    criterion = normalize_criterion(criterion)
+    if target is not None:
+        from discopt.doe.targets import _check_target_criterion
+
+        if region is not None:
+            raise ValueError("a target replaces the prediction region")
+        if list(target.parameter_names) != list(parameter_names):
+            raise ValueError(
+                f"the target is over {list(target.parameter_names)}, the design over "
+                f"{list(parameter_names)}"
+            )
+        criterion = target_criterion_name(criterion)
+        _check_target_criterion(target, criterion)
+    else:
+        criterion = normalize_criterion(criterion)
 
     names = list(input_names)
     missing = [n for n in names if n not in design_bounds]
@@ -1285,16 +1343,20 @@ def batch_design_from_basis(
             f"{n_p} parameters {list(parameter_names)}"
         )
 
-    region_obj = _resolve_region(
-        region,
-        criterion,
-        basis,
-        names,
-        region_bounds,
-        design_bounds,
-        inequality_constraints,
-        feasible_projection,
-        seed,
+    region_obj = (
+        target
+        if target is not None
+        else _resolve_region(
+            region,
+            criterion,
+            basis,
+            names,
+            region_bounds,
+            design_bounds,
+            inequality_constraints,
+            feasible_projection,
+            seed,
+        )
     )
     rng = np.random.default_rng(seed)
     inv_var = 1.0 / (float(measurement_error) ** 2)
@@ -1323,6 +1385,13 @@ def batch_design_from_basis(
     eps = _RANK_RIDGE * typical
 
     def full_rank(m: np.ndarray) -> bool:
+        # With a target, "identified enough to score" means the targets are
+        # estimable -- which can happen while the FIM is still singular.
+        if target is not None:
+            return bool(m.any()) and bool(target.precision(m).estimable)
+        return fim_full_rank(m)
+
+    def fim_full_rank(m: np.ndarray) -> bool:
         # Test rank on the correlation-scaled matrix, so a full-rank FIM with a
         # huge scale spread is not mistaken for a singular one.
         if not m.any():
@@ -1336,20 +1405,31 @@ def batch_design_from_basis(
     # (large-N) limit the two coincide (the Kiefer-Wolfowitz equivalence
     # theorem), and the maximum-variance surface is too kinked for a greedy build
     # from scratch. The G exchange passes that follow can then only improve on it.
-    stages = [D_OPTIMAL, G_OPTIMAL] if criterion == G_OPTIMAL else [criterion]
+    stages = [D_OPTIMAL, G_OPTIMAL] if criterion == G_OPTIMAL and target is None else [criterion]
     build = stages[0]
 
     def pick(
         base: np.ndarray,
         round_seed_rng: np.random.Generator,
         start: np.ndarray | None = None,
-        target: str | None = None,
+        stage_name: str | None = None,
     ):
         # While ``base`` is rank-deficient every criterion is degenerate; rank
         # candidates by a lightly regularized log det, which is what fills in
         # the missing directions fastest.
-        if full_rank(base):
-            active, reg = (target or build), 0.0
+        if target is not None and full_rank(base) and not fim_full_rank(base):
+            # Targets estimable on a singular FIM: the exact criterion is
+            # discontinuous there (only a run at exactly the right point helps),
+            # so the search follows the ridge-regularized one; callers re-score
+            # exactly.
+            active, reg = (stage_name or build), eps
+        elif full_rank(base):
+            active, reg = (stage_name or build), 0.0
+        elif target is not None:
+            # The targeted criterion on a lightly regularized FIM: steers the
+            # first runs toward what the targets need, not toward every
+            # parameter.
+            active, reg = build, eps
         else:
             active, reg = D_OPTIMAL, eps
         return _search_one_point(
@@ -1397,7 +1477,7 @@ def batch_design_from_basis(
                 for i in range(len(points)):
                     fi = basis(points[i])
                     others = accumulated - np.outer(fi, fi) * inv_var
-                    found = pick(others, rng, start=points[i], target=stage)
+                    found = pick(others, rng, start=points[i], stage_name=stage)
                     if found is None:
                         continue
                     x_new, _ = found
@@ -1420,7 +1500,7 @@ def batch_design_from_basis(
     # together (a symmetric pair drifting outward); a local search over every
     # coordinate at once, accepted only if the exact criterion improves, fixes it.
     if (
-        criterion in REGION_CRITERIA
+        (criterion in REGION_CRITERIA or target is not None)
         and full_rank(accumulated)
         and not eq_cons
         and not ineq_cons

@@ -16,6 +16,9 @@ You are an expert on model-based design of experiments (MBDoE) using `discopt.do
 - **Sequential DoE**: `sequential_doe` loops estimation → design → optional experiment-run callback. Accumulates data across rounds and uses prior FIM.
 - **Trade-offs (multi-objective design)**: `design_tradeoff` sweeps the Pareto front between the information criterion and a second objective (experiment duration, cost, a yield the run must deliver) by the ε-constraint method; efficiencies are relative to the unconstrained optimum. For several *process* objectives of one mechanistic model (yield vs. impurity), `model_based_optimize_round(objectives={...})` runs model-based ParEGO and returns the model's predicted Pareto front.
 - **Exploration before optimization**: `explore_design_space` does grid sweeps of the criterion surface — essential before trusting the optimizer.
+- **Targeted (goal-oriented) design**: `Target` + `target=` on `optimal_experiment` / `batch_optimal_experiment` / `sequential_doe` / `robust_optimal_experiment` / `linear_batch_design`. Every target reduces to `K = ∂ψ/∂θ` with `Σ_ψ = Kᵀ M⁺ K` (Pukelsheim's `C_K(M)`). Covers D_s/A_s (parameter subsets, nuisance marginalized through the Schur complement), L-optimality (weights), c/D_A (linear combinations), formulas, and predictions at operating points (goal-oriented OED). Tolerances (`w = 1/τ²`) make goals comparable across units and give a stopping rule. A target can be estimable while the FIM is singular.
+- **Optimality certificates**: `approximate_targeted_design` (multiplicative + Frank-Wolfe/away steps) and `certify_design` turn the equivalence-theorem gap into a certified lower bound on any design's efficiency for a target, relative to the candidate grid. Covers trace/determinant directly and max_variance/min_eigenvalue through their dual (max over trace criteria, exponentiated-gradient ascent on the dual weight; `.dual` shows which targets bind).
+- **Profile-likelihood check of targets**: `profile_target(fit_experiment, data, target, model=...)` compares each target's linearized interval (`ψ̂ ± z·SE`) with its profile likelihood (deviance minimized subject to `ψ(θ) = c`; `Target.values` evaluates ψ nonlinearly). `discopt doe status --profile` in the CLI.
 - **Connection to estimation/identifiability/estimability/discrimination**: the same `Experiment` interface feeds every tool. Know when to branch.
 
 ## Context: discopt Implementation
@@ -26,6 +29,8 @@ You are an expert on model-based design of experiments (MBDoE) using `discopt.do
 - `from discopt.doe import sequential_doe, DoERound` — closed-loop MBDoE.
 - `from discopt.doe import explore_design_space, ExplorationResult` — criterion surface scan.
 - `from discopt.doe import design_tradeoff, TradeoffResult` — information-vs-cost Pareto fronts (`.knee`, `.summary()`, `.plot()`).
+- `from discopt.doe import Target, ResolvedTarget, target_precision` — targeted design (`Target.parameters/linear/expression/function/responses/region`, combine with `+`, `Target.from_spec` for JSON).
+- `from discopt.doe import certify_design, approximate_targeted_design` — certified efficiency, optimal approximate designs, sensitivity maps.
 - `from discopt.estimate import Experiment, ExperimentModel` — the shared model contract.
 
 ### Key files
@@ -35,6 +40,9 @@ You are an expert on model-based design of experiments (MBDoE) using `discopt.do
 - `src/discopt/doe/tradeoff.py` — `design_tradeoff`, `TradeoffResult`, `TradeoffPoint`.
 - `src/discopt/doe/model_based.py` — `model_based_optimize_round` (incl. `objectives=`), `MultiResponseParametricSurrogate`.
 - `src/discopt/doe/exploration.py` — grid over design ranges; returns all four metrics per point.
+- `src/discopt/doe/targets.py` — `Target`, `ResolvedTarget` (`covariance`, `information`, `criterion`, `precision`), `basis_target` (jax-free path), `validate_target_spec`.
+- `src/discopt/doe/certificate.py` — `approximate_targeted_design`, `certify_design`, `ApproximateTargetDesign` (`support`, `sensitivity`, `rounded`, `efficiency_bound`).
+- `src/discopt/doe/robust.py` — `robust_optimal_experiment(..., target=)` re-resolves K per parameter sample.
 - `discopt.estimate` module — `ExperimentModel` metadata (`unknown_parameters`, `design_inputs`, `responses`, `measurement_error`), `Experiment.create_model()` factory.
 
 ### Criterion constants
@@ -81,6 +89,12 @@ The MBDoE taxonomy, FIM/Cramér-Rao theory, and the sloppy-model picture (long f
 - **"The optimal experiment takes too long / makes nothing I can sell — what does compromising cost?"** `design_tradeoff(exp, theta, bounds, tradeoff=g_or_response_name, sense="minimize"|"maximize")` returns the efficiency-vs-objective front. D-efficiency e means 1/e replicates to match the optimum, so efficiency/(duration + overhead) is information per reactor-hour — often maximized well below the D-optimal duration. With `prior_fim`, efficiency is of the whole campaign, not the new run alone.
 - **"I have two objectives (yield and impurity) and a mechanistic model"** → `model_based_optimize_round(wb, experiment=..., objectives={"yield": "maximize", "impurity": "minimize"})`: joint multi-response fit, ParEGO weights per run, `predicted_front` with standard errors. Without a trusted model, use `optimize_round(objectives=...)` (GP).
 - **"My parameters have wildly different units — does A/E/ME depend on that?"** Yes: A-, E- and ME-optimal designs change with the parameters' units (D-, I- and G-optimal ones don't). `scale_parameters=True` optimizes the criterion of the relative parameters (FIM scaled by the nominal values, like pyomo.doe's `scale_nominal_param_value`). Keep passing `prior_fim` in ordinary units — it is scaled along with the FIM.
+
+- **"I only need X (one parameter / a prediction / a derived quantity) — do I still need a D-optimal design?"** No. Use a target: `Target.parameters([...])`, `Target.responses(at=[...])`, `Target.expression({...})`. Compare it with the D-optimal design on X. The ratio of SEs, squared, is the factor in runs saved. A target can need fewer runs than parameters.
+- **"How do I combine 'yield to ±0.005' with 'Ea to 2 %'?"** Use tolerances on both (`Target.responses(..., tolerances=...) + Target.parameters(tolerances=..., relative=True)`), then `criterion="max_variance"` (the worst SE/τ) or `"trace"` (the sum of squared ratios). Without tolerances, mixing kinds is refused, because the units don't add.
+- **"Is my design any good?"** `certify_design(exp, theta, designs, target, design_bounds=..., prior_fim=...)` gives a certified lower bound on its efficiency for the target. For D on all parameters, use `Target.parameters(all_names)` with `criterion="determinant"`.
+- **"Can I trust the SE my design promised?"** Once there are data, run `profile_target` (or `discopt doe status --profile`). `ok` means the linearized precision, and the tolerance check based on it, holds. `CHECK` means the profile interval is wider or lopsided, which is typical for ratios, half-lives, times of maximum and predictions far from the data. Believe the profile and plan more runs.
+- **"When can I stop experimenting?"** Give tolerances, then use `sequential_doe(..., target=t, stop_at_tolerance=True)`. In the CLI, `discopt doe status` reports SE/tolerance after `fit`.
 
 ## When to Defer
 
