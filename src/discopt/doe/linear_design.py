@@ -73,6 +73,12 @@ CRITERION_ALIASES = {
     "V": I_OPTIMAL,
     "IV": I_OPTIMAL,
     "G": G_OPTIMAL,
+    # The spelling the rest of the package uses (DesignCriterion, the CLI's
+    # --criterion choices, the design targets). Without these, `new symbolic
+    # --criterion I` failed: the CLI maps "I" to "average_variance" before the
+    # basis search sees it.
+    "average_variance": I_OPTIMAL,
+    "max_variance": G_OPTIMAL,
 }
 
 # Criteria where a larger value is a better design.

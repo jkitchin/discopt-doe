@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **I/G-optimal designs on the basis path.** `discopt doe new symbolic --criterion I`
+  (and `G`, `average_variance`, `max_variance`) failed with "unknown criterion
+  'average_variance'". The same happened for `linear_batch_design` /
+  `batch_design_from_basis` given those names (the browser app's `symbolic`
+  designs go through the same `do_new` path). `linear_design` spells the criteria
+  `average_prediction_variance` / `max_prediction_variance`, while the CLI (which
+  maps `I`/`G` to the short names), `DesignCriterion` and the design targets use
+  `average_variance` / `max_variance`. The basis search now accepts both.
+
 ## [0.7.0] - 2026-11-22
 
 ### Added
