@@ -19,7 +19,8 @@ dependencies = [
     # own terminal statuses. The floor is now 0.10 (which pulls pounce-solver>=0.14).
     # 0.10 made JAX an optional extra; discopt.estimate and discopt.parametric,
     # which fim.py / model_based.py / workbook.py import, need it.
-    "discopt[jax]>=0.10",
+    # The floor is 0.13 (which pulls pounce-solver>=0.18).
+    "discopt[jax]>=0.13",
     "jax>=0.4",          # fim.py / model_based.py use jax directly
     "numpy>=1.24",
     "scipy>=1.10",

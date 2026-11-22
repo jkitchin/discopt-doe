@@ -139,6 +139,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multi-response `--module` campaigns, and the criterion guide covers I/G.
 
 ### Changed
+- **Requires discopt 0.13.** The dependency floor is now `discopt[jax]>=0.13`
+  (which pulls `pounce-solver>=0.18`), and the lockfile resolves `discopt`
+  0.13.0 and `pounce-solver` 0.18.0.
 - **Tested against discopt 0.12.0** (#45). The lockfile now resolves
   `discopt` 0.12.0 (and `pounce-solver` 0.17.0), so CI runs against it. The
   full suite, slow tests included, and every notebook pass unchanged. The
