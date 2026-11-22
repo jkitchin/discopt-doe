@@ -63,7 +63,7 @@ an installable package can be added with another `--with` (e.g.
 
 ## Install
 
-Both `discopt-doe` and its `discopt>=0.10` dependency are published on
+Both `discopt-doe` and its `discopt>=0.13` dependency are published on
 [PyPI](https://pypi.org/project/discopt-doe/), so a plain pip install resolves
 everything:
 
