@@ -244,6 +244,17 @@ def describe_templates() -> str:
     return _ok({"groups": groups})
 
 
+def _maybe_number(v: Any) -> object:
+    """A level as a float when it reads as a number, else the stripped text."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return float(v)
+    s = str(v).strip()
+    try:
+        return float(s)
+    except ValueError:
+        return s
+
+
 @_guard
 def create_design(spec_json: str) -> str:
     """Build a design workbook at :data:`DESIGN_PATH` and return its summary.
@@ -268,7 +279,14 @@ def create_design(spec_json: str) -> str:
         for row in spec["factors"]:
             inputs.append((row["name"], float(row["low"]), float(row["high"])))
     elif style == "levels2":
-        factor_pairs = {row["name"]: (row["low"], row["high"]) for row in spec["factors"]}
+        # The level boxes are text inputs (a level may be "lo"/"hi"), so a
+        # numeric level arrives as the string "-1". Convert numeric strings the
+        # way the CLI's NAME:LOW:HIGH parser does, or every factor is treated as
+        # categorical and centre points are refused.
+        factor_pairs = {
+            row["name"]: (_maybe_number(row["low"]), _maybe_number(row["high"]))
+            for row in spec["factors"]
+        }
     else:  # "levels" — the Latin-square family
         levels = {
             row["name"]: [v.strip() for v in str(row["levels"]).split(",") if v.strip()]

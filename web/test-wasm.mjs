@@ -165,6 +165,17 @@ const CASES = [
     8,
   ],
   [
+    // Numeric levels arrive from the text boxes as strings ("-1"); they must
+    // still count as numeric so centre points are allowed (8 + 3 runs).
+    "factorial-2level",
+    {
+      factors: ["1", "2", "3"].map((name) => ({ name, low: "-1", high: "1" })),
+      center_points: 3,
+      replicates: 1,
+    },
+    11,
+  ],
+  [
     "latin-square",
     {
       factors: [
