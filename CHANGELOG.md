@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-23
+
 ### Fixed
 - **I/G-optimal designs on the basis path.** `discopt doe new symbolic --criterion I`
   (and `G`, `average_variance`, `max_variance`) failed with "unknown criterion
@@ -1294,7 +1296,8 @@ First public release on PyPI.
 ### Changed
 - Depend on `discopt>=0.6` from PyPI (removed the temporary `[tool.uv.sources]` git pin).
 
-[Unreleased]: https://github.com/jkitchin/discopt-doe/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/jkitchin/discopt-doe/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/jkitchin/discopt-doe/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/jkitchin/discopt-doe/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jkitchin/discopt-doe/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/jkitchin/discopt-doe/compare/v0.5.0...v0.5.1
