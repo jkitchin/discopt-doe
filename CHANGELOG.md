@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Requires discopt 0.14.** The dependency floor is now `discopt[jax]>=0.14`
+  (which pulls `pounce-solver>=0.19`), and the lockfile resolves `discopt`
+  0.14.0 and `pounce-solver` 0.19.0.
+
 ## [0.7.1] - 2026-11-23
 
 ### Fixed
