@@ -64,10 +64,10 @@ from importlib.metadata import version as _dist_version
 # "discopt.cli" plugin hook, both introduced in discopt 0.6, and the solver
 # correctness fixes that landed in 0.8 (false `infeasible` on a GDP
 # disjunction, false `Unbounded` on a bounded LP, an ignored non-zero
-# `Constraint.rhs`); the floor is now 0.10. A stale base install fails here
+# `Constraint.rhs`); the floor now tracks pyproject.toml at 0.14. A stale base install fails here
 # with a clear message instead of a wrong answer or an AttributeError later.
-# Two-component compare so 0.10.0.dev0 local builds pass.
-_MIN_DISCOPT = (0, 10)
+# Two-component compare so 0.14.0.dev0 local builds pass.
+_MIN_DISCOPT = (0, 14)
 
 
 def _version_prefix(found: str) -> tuple[int, ...]:

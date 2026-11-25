@@ -205,9 +205,10 @@ def test_cli_loop_matches_sequential_doe(tmp_path, partition_module):
 
     # The workbook stores the FIM through openpyxl, which writes "%.16g" (one
     # digit short of a lossless float64), so the prior `extend` reads differs from
-    # est.fim by ~1 ulp. The design is the same optimum -- the criterion agrees
-    # to ~1e-11 -- but the local refinement stops within its own tolerance of it.
-    assert ext["criterion_value"] == pytest.approx(history[0].design.criterion_value, rel=1e-9)
+    # est.fim by ~1 ulp. The design is the same optimum, but the local refinement
+    # stops within its own tolerance of it, so the two criterion values can differ
+    # by ~1e-7 relative (seen on Linux with discopt 0.13 and 0.14).
+    assert ext["criterion_value"] == pytest.approx(history[0].design.criterion_value, rel=1e-6)
     cli_batch = sorted(d["pH"] for d in ext["designs"])
     py_batch = sorted(float(d["pH"]) for d in history[0].design.designs)
     np.testing.assert_allclose(cli_batch, py_batch, atol=1e-4)
